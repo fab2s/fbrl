@@ -104,16 +104,26 @@ Epoch 5/200: Recon 0.0173  Ltr 2.8557  Case 0.6955  Attn -0.1115  Div 0.0782  Hi
 
 **Key benchmarks:** Ltr and Case start near their random baselines (3.26 and 0.69) and should drop steadily. Hit rate should climb to ~30% within the first 10-20 epochs — if it stays near 0%, the attention guide is misconfigured (run `make check-attention` to diagnose).
 
+## Results
+
+- [128x128, Aa-Zz, single font, 200 epochs](thoughts/results_128x128_Aa-Zz.md) — 100% letter, 100% case, pixel-perfect recode
+
+## Requirements
+
+**PyTorch 2.5.1** — Pinned to this version because training runs on a Pascal-era GPU (GTX 1080 Ti, compute capability 6.1). PyTorch 2.6+ dropped CUDA support for Pascal. If you have an Ampere or newer card, feel free to bump the version in the Dockerfile.
+
+If anyone feels like donating a modern GPU to the cause, the latent space would be eternally grateful.
+
 ## Quick Start
 
 ```bash
 # Build and start the container
 make build up
 
-# Generate training data (52 letters × 20 noisy variants)
+# Generate training data (52 letters × 20 noisy variants × 11 fonts)
 make generate
 
-# Generate clean test data
+# Generate clean test data (52 letters × 11 fonts)
 make generate-test
 
 # Pre-check that attention guide works for this image size
@@ -139,12 +149,14 @@ All commands run via `python vision_training.py <command>`:
 --num_variants 20      Noisy copies per letter
 --noise_level 0.1      Gaussian noise std (0-1 scale)
 --output_dir data/letters
+--fonts all            Font spec: "all", "default", or comma-separated names
 ```
 
 ### generate_test
 ```
 --letters Aa-Zz
 --output_dir data/test
+--fonts all            Font spec: "all", "default", or comma-separated names
 ```
 
 ### train
@@ -163,6 +175,7 @@ All commands run via `python vision_training.py <command>`:
 --diversity_weight 1.0     Fixation spread pressure (0=off)
 --diversity_sigma 0.1      Repulsion radius in normalized coords
 --recode_weight 1.0        Case-flip reconstruction loss weight (0=off)
+--batch_size 52            Training batch size
 ```
 
 ### test
@@ -195,8 +208,8 @@ All commands run via `python vision_training.py <command>`:
 All targets accept overridable variables:
 
 ```bash
-make train DEVICE=cuda EPOCHS=500 CKPT=100
-make generate LETTERS=A-Z VARIANTS=10 NOISE=0.2
+make train DEVICE=cuda EPOCHS=500 CKPT=100 BATCH=52
+make generate LETTERS=A-Z VARIANTS=10 NOISE=0.2 FONTS=all
 make test DEVICE=cuda
 make check-attention DEVICE=cuda
 ```
@@ -209,6 +222,8 @@ make check-attention DEVICE=cuda
 | `LETTERS` | Aa-Zz | Letter range for generation |
 | `VARIANTS` | 20 | Noisy variants per letter |
 | `NOISE` | 0.1 | Gaussian noise level |
+| `FONTS` | all | Font spec: all, default, or comma-separated names |
+| `BATCH` | 52 | Training batch size |
 
 | Target | Description |
 |--------|-------------|
@@ -258,7 +273,7 @@ fbrl/
 
 The current single-letter model is the foundation. The research goal is to scale foveal attention from character recognition toward reading:
 
-1. **Multi-font** — Same letters, 10-15 fonts. Tests whether attention strategies generalize across visual styles or are font-specific.
+1. **Multi-font** — Same letters, 11 fonts (serif, sans, mono, narrow). Tests whether attention strategies generalize across visual styles. *(in progress)*
 2. **Bigrams/trigrams** — 2-3 letter combinations. The attention must scan left-to-right and segment characters. Output becomes a sequence.
 3. **Words** — Variable-length strings with a language model prior. Tests whether the model skips predictable letters, fixates word centers, and spends more glimpses on rare words (all human reading behaviors).
 4. **Meta-attention** — A coarse controller that finds word boundaries (whitespace, line breaks) and deploys the fine letter-reader within each region. Hierarchical saccade planning.

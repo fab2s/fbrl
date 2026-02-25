@@ -1,0 +1,7 @@
+git: 4a4e26a
+date: 2026-02-25T08:11:43+01:00
+fonts: all
+letters: Aa-Zz
+epochs: 50
+batch: 52
+guide: 8.0
