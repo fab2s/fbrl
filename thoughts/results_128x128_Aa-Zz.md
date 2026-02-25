@@ -1,5 +1,7 @@
 # Results: 128x128, Aa-Zz, 200 epochs
 
+**Archived model**: [`runs/v1-single-font/`](../runs/v1-single-font/)
+
 ## Summary
 - **Letter accuracy**: 52/52 (100%)
 - **Case accuracy**: 52/52 (100%)
