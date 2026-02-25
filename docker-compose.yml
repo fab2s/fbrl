@@ -1,0 +1,14 @@
+services:
+  fbrl:
+    build: .
+    entrypoint: ["tail", "-f", "/dev/null"]
+    volumes:
+      - ./data:/app/data
+      - ./vision_training.py:/app/vision_training.py
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
