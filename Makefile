@@ -61,7 +61,8 @@ ifndef NAME
 	$(error Usage: make archive NAME=v1-single-font)
 endif
 	@mkdir -p runs/$(NAME)
-	cp data/models/model_final.pth runs/$(NAME)/
+	$(RUN) compress_model --input data/models/model_final.pth --output data/models/_archive.pth.gz
+	mv data/models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
 	cp data/models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
 	cp data/models/training.log runs/$(NAME)/ 2>/dev/null || true
 	cp data/atlas.html runs/$(NAME)/ 2>/dev/null || true

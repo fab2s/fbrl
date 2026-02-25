@@ -91,6 +91,10 @@ if __name__ == '__main__':
     chk_parser.add_argument('--diversity_weight', type=float, default=1.0)
     chk_parser.add_argument('--diversity_sigma', type=float, default=0.1)
 
+    compress_parser = subparsers.add_parser('compress_model')
+    compress_parser.add_argument('--input', required=True)
+    compress_parser.add_argument('--output', required=True)
+
     args = parser.parse_args()
 
     if args.command == 'generate':
@@ -134,3 +138,16 @@ if __name__ == '__main__':
                         blur_sigma_ratio=args.blur_sigma_ratio,
                         diversity_weight=args.diversity_weight,
                         diversity_sigma=args.diversity_sigma)
+
+    elif args.command == 'compress_model':
+        import torch, gzip, io, os
+        ckpt = torch.load(args.input, map_location='cpu', weights_only=False)
+        ckpt['model'] = {k: v.half() for k, v in ckpt['model'].items()}
+        buf = io.BytesIO()
+        torch.save(ckpt, buf)
+        raw = buf.getvalue()
+        with gzip.open(args.output, 'wb') as f:
+            f.write(raw)
+        orig_mb = os.path.getsize(args.input) / 1048576
+        comp_mb = os.path.getsize(args.output) / 1048576
+        print(f"fp16+gzip: {orig_mb:.0f}MB -> {comp_mb:.0f}MB ({comp_mb/orig_mb:.0%})")
