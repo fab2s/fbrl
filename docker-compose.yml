@@ -5,6 +5,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./vision_training.py:/app/vision_training.py
+      - ./fbrl:/app/fbrl
     deploy:
       resources:
         reservations:
