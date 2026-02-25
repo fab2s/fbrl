@@ -88,7 +88,7 @@ total = recon + letter_cls + case_cls + guide_weight * attn_guide
 Each epoch prints a line like:
 
 ```
-Epoch 5/200: Recon 0.0173  Ltr 2.8557  Case 0.6955  Attn -0.1115  Div 0.0782  Hit 28%  Recode 0.0174  [5.6s  ETA 18m46s]
+Epoch 5/200: Recon 0.0173  Ltr 2.8557  Case 0.6955  Attn -0.1115  Div 0.0782  Hit 28%  Recode 0.0174  lr 0.000996  [5.6s  ETA 18m46s]
 ```
 
 | Field | What it means | Good values |
@@ -100,6 +100,7 @@ Epoch 5/200: Recon 0.0173  Ltr 2.8557  Case 0.6955  Attn -0.1115  Div 0.0782  Hi
 | **Div** | Fixation diversity (repulsion). Lower = fixation points more spread out. | 0.05–0.15 |
 | **Hit** | % of fixations landing on actual letter pixels (diagnostic, not a loss). | 25–40% |
 | **Recode** | MSE between case-flipped decode and partner clean image. Lower = better. | < 0.01 |
+| **lr** | Current learning rate (CosineAnnealingLR). Decays from 0.001 → ~0 over the run. | — |
 | **[time]** | Wall time per epoch + estimated time remaining. | — |
 
 **Key benchmarks:** Ltr and Case start near their random baselines (3.26 and 0.69) and should drop steadily. Hit rate should climb to ~30% within the first 10-20 epochs — if it stays near 0%, the attention guide is misconfigured (run `make check-attention` to diagnose).
@@ -108,6 +109,7 @@ Epoch 5/200: Recon 0.0173  Ltr 2.8557  Case 0.6955  Attn -0.1115  Div 0.0782  Hi
 
 - [128x128, Aa-Zz, single font, 200 epochs](thoughts/results_128x128_Aa-Zz.md) — 100% letter, 100% case, pixel-perfect recode
 - [128x128, Aa-Zz, 11 fonts, 50 epochs](thoughts/results_multi-font_50ep.md) — 99.5% letter, 99.7% case across all fonts (guide_weight=8.0)
+- [128x128, Aa-Zz, 11 fonts, 100 epochs, CosineAnnealingLR](thoughts/results_multi-font-cosine_100ep.md) — 100% letter, 100% case, all 11 fonts perfect
 
 ## Requirements
 
@@ -128,13 +130,16 @@ make generate
 make generate-test
 
 # Pre-check that attention guide works for this image size
-make check-attention DEVICE=cuda
+make check-attention
 
 # Train (200 epochs, GPU)
-make train DEVICE=cuda
+make train
 
 # Test (prints per-letter accuracy + attention visualizations)
-make test DEVICE=cuda
+make test
+
+# Generate interactive attention atlas (self-contained HTML)
+make atlas
 
 # Visualize attention paths on training data
 make visualize
@@ -171,7 +176,7 @@ All commands run via `python vision_training.py <command>`:
 --n_scales 1               Resolution scales (1=foveal only)
 --device auto|cpu|cuda
 --resume PATH              Resume from checkpoint
---guide_weight 4.0         Attention guide loss weight
+--guide_weight 8.0         Attention guide loss weight
 --blur_sigma_ratio 0.16    Blur sigma as fraction of image size (auto-scales)
 --diversity_weight 1.0     Fixation spread pressure (0=off)
 --diversity_sigma 0.1      Repulsion radius in normalized coords
@@ -192,9 +197,19 @@ All commands run via `python vision_training.py <command>`:
 --data_dir data/letters    Dataset to check against
 --n_epochs 10              Diagnostic epochs to run
 --device auto|cpu|cuda
---guide_weight 4.0         Guide weight to test
+--guide_weight 8.0         Guide weight to test
 --blur_sigma_ratio 0.16    Blur ratio to test
 ```
+
+### atlas
+```
+--model_dir data/models
+--test_data_dir data/test
+--output data/atlas.html    Self-contained HTML file
+--device auto|cpu|cuda
+```
+
+Generates an interactive attention atlas — a single HTML file with Canvas-based Gaussian-splat heatmaps for all 52 letters across all fonts. The grid view shows averaged attention across fonts; clicking a letter drills down into per-font fixation patterns. Controls: heatmap/path toggle, upper/lower/both filter, opacity slider. Cell borders show correctness: green = all fonts correct, yellow = some wrong, red = all wrong.
 
 ### visualize
 ```
@@ -209,15 +224,13 @@ All commands run via `python vision_training.py <command>`:
 All targets accept overridable variables:
 
 ```bash
-make train DEVICE=cuda EPOCHS=500 CKPT=100 BATCH=52
+make train EPOCHS=500 CKPT=100 BATCH=52
 make generate LETTERS=A-Z VARIANTS=10 NOISE=0.2 FONTS=all
-make test DEVICE=cuda
-make check-attention DEVICE=cuda
-```
+make testmake check-attention```
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DEVICE` | cpu | cpu or cuda |
+| `DEVICE` | auto | auto, cpu, or cuda |
 | `EPOCHS` | 200 | Training epochs |
 | `CKPT` | 100 | Checkpoint interval |
 | `LETTERS` | Aa-Zz | Letter range for generation |
@@ -233,6 +246,7 @@ make check-attention DEVICE=cuda
 | `make train` | Train from scratch |
 | `make resume` | Resume from last checkpoint |
 | `make test` | Run test evaluation |
+| `make atlas` | Generate interactive attention atlas (HTML) |
 | `make check-attention` | Quick attention diagnostic (PASS/FAIL) |
 | `make visualize` | Generate attention visualizations |
 | `make build` / `up` / `down` | Docker lifecycle |
@@ -253,7 +267,8 @@ fbrl/
     ├── test/               # Clean test PNGs
     ├── models/             # Checkpoints + training_metrics.png
     ├── results/            # Test output (attention overlays + reconstructions + recode)
-    └── visualizations/     # Attention path visualizations
+    ├── visualizations/     # Attention path visualizations
+    └── atlas.html          # Interactive attention atlas (generated by make atlas)
 ```
 
 ## Design Decisions

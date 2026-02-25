@@ -603,7 +603,7 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
                 checkpoint_interval=10, n_glimpses=10, patch_size=12,
                 n_scales=1, device='auto',
                 diversity_weight=1.0, diversity_sigma=0.1,
-                recode_weight=1.0, guide_weight=4.0, blur_sigma_ratio=0.16,
+                recode_weight=1.0, guide_weight=8.0, blur_sigma_ratio=0.16,
                 batch_size=52):
     device = _resolve_device(device)
     print(f"Training on: {device}")
@@ -1532,7 +1532,7 @@ def generate_atlas(model_dir, test_data_dir, output_path='data/atlas.html', devi
 
 def check_attention(data_dir, n_epochs=10, n_glimpses=10, patch_size=12,
                     n_scales=1, device='auto',
-                    guide_weight=4.0, blur_sigma_ratio=0.16,
+                    guide_weight=8.0, blur_sigma_ratio=0.16,
                     diversity_weight=1.0, diversity_sigma=0.1):
     """Quick diagnostic: can the attention guide pull fixations onto letter content?
 
@@ -1666,7 +1666,7 @@ if __name__ == '__main__':
                               help='Repulsion radius in normalized coords (0.1=10%% of image)')
     train_parser.add_argument('--recode_weight', type=float, default=1.0,
                               help='Weight for recode loss (0=off)')
-    train_parser.add_argument('--guide_weight', type=float, default=4.0,
+    train_parser.add_argument('--guide_weight', type=float, default=8.0,
                               help='Weight for attention guide loss')
     train_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16,
                               help='Blur sigma as fraction of image size (0.16=proven default)')
@@ -1702,7 +1702,7 @@ if __name__ == '__main__':
     chk_parser.add_argument('--n_scales', type=int, default=1)
     chk_parser.add_argument('--device', default='auto',
                             choices=['auto', 'cpu', 'cuda'])
-    chk_parser.add_argument('--guide_weight', type=float, default=4.0)
+    chk_parser.add_argument('--guide_weight', type=float, default=8.0)
     chk_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
     chk_parser.add_argument('--diversity_weight', type=float, default=1.0)
     chk_parser.add_argument('--diversity_sigma', type=float, default=0.1)

@@ -64,6 +64,7 @@ endif
 	cp data/models/model_final.pth runs/$(NAME)/
 	cp data/models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
 	cp data/models/training.log runs/$(NAME)/ 2>/dev/null || true
+	cp data/atlas.html runs/$(NAME)/ 2>/dev/null || true
 	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
 	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
 	@echo "fonts: $(FONTS)" >> runs/$(NAME)/info.txt
