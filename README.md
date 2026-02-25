@@ -107,6 +107,7 @@ Epoch 5/200: Recon 0.0173  Ltr 2.8557  Case 0.6955  Attn -0.1115  Div 0.0782  Hi
 ## Results
 
 - [128x128, Aa-Zz, single font, 200 epochs](thoughts/results_128x128_Aa-Zz.md) — 100% letter, 100% case, pixel-perfect recode
+- [128x128, Aa-Zz, 11 fonts, 50 epochs](thoughts/results_multi-font_50ep.md) — 99.5% letter, 99.7% case across all fonts (guide_weight=8.0)
 
 ## Requirements
 
