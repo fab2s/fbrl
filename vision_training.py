@@ -9,6 +9,8 @@ import os
 import argparse
 import json
 import time
+import base64
+import io
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -498,6 +500,16 @@ def visualize_attention(img_tensor, locations, save_path):
     plt.close()
 
 
+def _tensor_to_base64_png(tensor):
+    """Convert (1, H, W) grayscale tensor to base64-encoded PNG string."""
+    arr = tensor.squeeze(0).cpu().detach().numpy()
+    arr = (arr * 255).clip(0, 255).astype(np.uint8)
+    img = Image.fromarray(arr, mode='L')
+    buf = io.BytesIO()
+    img.save(buf, format='PNG')
+    return base64.b64encode(buf.getvalue()).decode('ascii')
+
+
 # --- Attention Guide Loss ---
 
 def attention_content_loss(image, locations, blur_sigma_ratio=0.16):
@@ -640,10 +652,21 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
         print(f"Resumed from epoch {start_epoch} ({len(losses_letter_cls)} prior epochs of history)")
 
     optimizer = optim.Adam(model.parameters(), lr=0.001)
+    # CosineAnnealingLR: starts at lr=0.001, smoothly decays to near zero by final epoch.
+    # Prevents the constant-lr instability that caused catastrophic divergence at epoch 43/100.
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     criterion = nn.MSELoss()  # pixel-level reconstruction loss
 
     end_epoch = start_epoch + epochs
     train_start = time.time()
+
+    # Training log file — append epoch metrics for post-hoc analysis
+    log_path = os.path.join(save_dir, 'training.log')
+    log_file = open(log_path, 'a')
+    if start_epoch == 0:
+        log_file.write("epoch  recon    ltr      case     attn     div      hit    recode   lr\n")
+        log_file.write("-" * 80 + "\n")
+    log_file.flush()
 
     for epoch in range(start_epoch, end_epoch):
         epoch_start = time.time()
@@ -751,12 +774,23 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
         eta_sec = remaining * (elapsed / done)
         eta_min, eta_s = divmod(int(eta_sec), 60)
 
+        current_lr = scheduler.get_last_lr()[0]
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avg_recon:.4f}  Ltr {avg_letter_cls:.4f}  "
               f"Case {avg_case_cls:.4f}  Attn {avg_attn:.4f}  "
               f"Div {avg_div:.4f}  Hit {avg_hr:.0%}  "
               f"Recode {avg_recode:.4f}  "
+              f"lr {current_lr:.6f}  "
               f"[{epoch_time:.1f}s  ETA {eta_min}m{eta_s:02d}s]")
+
+        # Write to log file (machine-readable, tab-separated)
+        log_file.write(f"{epoch+1:>5d}  {avg_recon:.4f}  {avg_letter_cls:.4f}  "
+                       f"{avg_case_cls:.4f}  {avg_attn:.4f}  {avg_div:.4f}  "
+                       f"{avg_hr:.4f}  {avg_recode:.4f}  {current_lr:.6f}\n")
+        log_file.flush()
+
+        # Step the learning rate schedule (once per epoch, after logging)
+        scheduler.step()
 
         if (epoch + 1 - start_epoch) % checkpoint_interval == 0:
             ckpt = {
@@ -773,6 +807,9 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
                 },
             }
             torch.save(ckpt, os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth'))
+
+    log_file.close()
+    print(f"Training log saved to {log_path}")
 
     # Save final
     torch.save({
@@ -931,7 +968,7 @@ def test_model(model_dir, test_data_dir, output_dir='results', device='auto'):
               f"MSE={mse:.4f}  Hit={hr:.0%}")
 
         # Output filenames include font when multiple fonts present
-        suffix = f'_{font}' if len(dataset.fonts) > len(dataset.letters) else ''
+        suffix = f'_{font}' if len(set(dataset.fonts)) > 1 else ''
 
         # Save attention overlay
         visualize_attention(
@@ -1004,7 +1041,7 @@ def visualize_model(model_dir, data_dir, output_dir='visualizations', device='au
     model.eval()
 
     dataset = LetterDataset(data_dir)
-    multi_font = len(dataset.fonts) > len(dataset.letters)
+    multi_font = len(set(dataset.fonts)) > 1
     for i in range(len(dataset)):
         img, _clean, letter, case, font, _partner = dataset[i]
         img = img.unsqueeze(0).to(device)
@@ -1024,6 +1061,471 @@ def visualize_model(model_dir, data_dir, output_dir='visualizations', device='au
         print(f"Saved attention visualization for '{original_char}'{f' [{font}]' if multi_font else ''}")
 
     print(f"Visualizations saved in {output_dir}")
+
+
+# --- Attention Atlas ---
+
+def _atlas_html_template():
+    """Return self-contained HTML/CSS/JS template for the interactive attention atlas.
+
+    Contains a {atlas_json} placeholder to be filled with the data payload.
+    All rendering happens client-side: Gaussian-splat heatmaps on Canvas,
+    hot colormap, fixation path overlay, per-font drill-down on click.
+    """
+    return r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Attention Atlas</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; }
+#controls {
+  position: sticky; top: 0; z-index: 10; background: #16213e;
+  padding: 10px 20px; display: flex; gap: 20px; align-items: center;
+  border-bottom: 1px solid #0f3460; flex-wrap: wrap;
+}
+#controls label { font-size: 13px; color: #a0a0c0; }
+#controls button {
+  background: #0f3460; color: #e0e0e0; border: 1px solid #1a1a4e;
+  padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;
+}
+#controls button.active { background: #e94560; border-color: #e94560; }
+#controls input[type=range] { width: 120px; vertical-align: middle; }
+#grid {
+  display: grid; grid-template-columns: repeat(26, 1fr);
+  gap: 4px; padding: 12px; max-width: 1800px; margin: 0 auto;
+}
+.cell {
+  position: relative; cursor: pointer; border: 2px solid transparent;
+  border-radius: 4px; overflow: hidden; transition: transform 0.15s;
+  aspect-ratio: 1;
+}
+.cell:hover { transform: scale(1.3); z-index: 5; }
+.cell.correct { border-color: #2ecc71; }
+.cell.partial { border-color: #f39c12; }
+.cell.wrong { border-color: #e74c3c; }
+.cell.selected { border-color: #3498db; box-shadow: 0 0 8px #3498db; }
+.cell canvas { width: 100%; height: 100%; display: block; }
+.cell-label {
+  position: absolute; bottom: 1px; right: 3px; font-size: 10px;
+  color: #fff; text-shadow: 0 0 3px #000; pointer-events: none;
+}
+#detail-panel {
+  background: #16213e; border-top: 2px solid #0f3460;
+  padding: 16px; display: none; max-width: 1800px; margin: 0 auto;
+}
+#detail-title { font-size: 18px; margin-bottom: 12px; color: #e94560; }
+#detail-grid {
+  display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
+}
+.detail-cell {
+  text-align: center; border: 2px solid transparent; border-radius: 4px;
+  padding: 4px; background: #1a1a2e;
+}
+.detail-cell.correct { border-color: #2ecc71; }
+.detail-cell.wrong { border-color: #e74c3c; }
+.detail-cell canvas { width: 120px; height: 120px; display: block; }
+.detail-cell .font-name { font-size: 11px; color: #a0a0c0; margin-top: 2px; }
+.detail-cell .pred-info { font-size: 10px; color: #888; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <span style="font-weight:bold;color:#e94560;">Attention Atlas</span>
+  <div>
+    <label>View:</label>
+    <button id="btn-heatmap" class="active" onclick="setView('heatmap')">Heatmap</button>
+    <button id="btn-path" onclick="setView('path')">Path</button>
+  </div>
+  <div>
+    <label>Case:</label>
+    <button id="btn-both" class="active" onclick="setCase('both')">Both</button>
+    <button id="btn-upper" onclick="setCase('upper')">Upper</button>
+    <button id="btn-lower" onclick="setCase('lower')">Lower</button>
+  </div>
+  <div>
+    <label>Opacity:</label>
+    <input type="range" id="opacity-slider" min="0" max="100" value="60"
+           oninput="setOpacity(this.value)">
+    <span id="opacity-val">60%</span>
+  </div>
+  <div style="margin-left:auto;font-size:12px;color:#666;">
+    <span id="stats"></span>
+  </div>
+</div>
+<div id="grid"></div>
+<div id="detail-panel">
+  <div id="detail-title"></div>
+  <div id="detail-grid"></div>
+</div>
+
+<script>
+const DATA = ATLAS_JSON_PLACEHOLDER;
+let viewMode = 'heatmap';
+let caseFilter = 'both';
+let opacity = 0.6;
+let selectedIdx = -1;
+
+// Hot colormap (matches matplotlib 'hot': black -> red -> yellow -> white)
+function hotColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  let r, g, b;
+  if (t < 0.33) { r = t / 0.33; g = 0; b = 0; }
+  else if (t < 0.66) { r = 1; g = (t - 0.33) / 0.33; b = 0; }
+  else { r = 1; g = 1; b = (t - 0.66) / 0.34; }
+  return [r * 255 | 0, g * 255 | 0, b * 255 | 0];
+}
+
+// Render Gaussian-splat heatmap into an ImageData
+function renderHeatmap(fixations, size) {
+  // fixations: [[x,y], ...] in normalized [-1,1] coords
+  const sigma = size * 0.06;  // Gaussian splat radius
+  const sigma2 = 2 * sigma * sigma;
+  const field = new Float32Array(size * size);
+  let maxVal = 0;
+
+  for (const [fx, fy] of fixations) {
+    const cx = (fx + 1) / 2 * size;
+    const cy = (fy + 1) / 2 * size;
+    const r = Math.ceil(sigma * 3);
+    const x0 = Math.max(0, cx - r | 0), x1 = Math.min(size - 1, cx + r | 0);
+    const y0 = Math.max(0, cy - r | 0), y1 = Math.min(size - 1, cy + r | 0);
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx, dy = y - cy;
+        const v = Math.exp(-(dx * dx + dy * dy) / sigma2);
+        const idx = y * size + x;
+        field[idx] += v;
+        if (field[idx] > maxVal) maxVal = field[idx];
+      }
+    }
+  }
+
+  if (maxVal === 0) maxVal = 1;
+  const data = new Uint8ClampedArray(size * size * 4);
+  for (let i = 0; i < size * size; i++) {
+    const t = field[i] / maxVal;
+    const [r, g, b] = hotColor(t);
+    data[i * 4] = r; data[i * 4 + 1] = g; data[i * 4 + 2] = b;
+    data[i * 4 + 3] = t > 0.01 ? (t * opacity * 255) | 0 : 0;
+  }
+  return new ImageData(data, size, size);
+}
+
+// Render fixation path as numbered circles + arrows
+function renderPath(ctx, fixations, size) {
+  const n = fixations.length;
+  for (let i = 0; i < n; i++) {
+    const [fx, fy] = fixations[i];
+    const cx = (fx + 1) / 2 * size;
+    const cy = (fy + 1) / 2 * size;
+    const t = i / Math.max(1, n - 1);
+    const [r, g, b] = hotColor(0.2 + t * 0.7);
+    const color = `rgb(${r},${g},${b})`;
+
+    // Arrow from previous fixation
+    if (i > 0) {
+      const [px, py] = fixations[i - 1];
+      const pcx = (px + 1) / 2 * size;
+      const pcy = (py + 1) / 2 * size;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(pcx, pcy); ctx.lineTo(cx, cy); ctx.stroke();
+      // Arrowhead
+      const angle = Math.atan2(cy - pcy, cx - pcx);
+      const hl = 5;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx - hl * Math.cos(angle - 0.4), cy - hl * Math.sin(angle - 0.4));
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx - hl * Math.cos(angle + 0.4), cy - hl * Math.sin(angle + 0.4));
+      ctx.stroke();
+    }
+
+    // Circle
+    ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fillStyle = color; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.5; ctx.stroke();
+
+    // Number
+    ctx.fillStyle = '#fff'; ctx.font = '7px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(i.toString(), cx, cy);
+  }
+}
+
+// Draw a single cell (grayscale image + heatmap/path overlay)
+function drawCell(canvas, b64, fixations, size) {
+  canvas.width = size; canvas.height = size;
+  const ctx = canvas.getContext('2d');
+
+  const img = new window.Image();
+  img.onload = function() {
+    ctx.drawImage(img, 0, 0, size, size);
+
+    if (viewMode === 'heatmap') {
+      // putImageData ignores alpha, so splat heatmap onto a temp canvas,
+      // then drawImage (which respects alpha) to composite over grayscale
+      const hm = renderHeatmap(fixations, size);
+      const tmp = document.createElement('canvas');
+      tmp.width = size; tmp.height = size;
+      tmp.getContext('2d').putImageData(hm, 0, 0);
+      ctx.drawImage(tmp, 0, 0);
+    } else {
+      renderPath(ctx, fixations, size);
+    }
+  };
+  img.src = 'data:image/png;base64,' + b64;
+}
+
+// Aggregate fixations across all fonts for a letter
+function aggregateFixations(entry) {
+  const all = [];
+  for (const fname of DATA.font_names) {
+    const fd = entry.fonts[fname];
+    if (fd) all.push(...fd.fixations);
+  }
+  return all;
+}
+
+// Pick a representative clean image (first available font)
+function representativeImage(entry) {
+  for (const fname of DATA.font_names) {
+    const fd = entry.fonts[fname];
+    if (fd) return fd.clean_b64;
+  }
+  return '';
+}
+
+// Check correctness across fonts
+function correctnessClass(entry) {
+  let ok = 0, total = 0;
+  for (const fname of DATA.font_names) {
+    const fd = entry.fonts[fname];
+    if (fd) { total++; if (fd.correct) ok++; }
+  }
+  if (ok === total) return 'correct';
+  if (ok === 0) return 'wrong';
+  return 'partial';
+}
+
+function buildGrid() {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  let shown = 0, totalCorrect = 0, totalSamples = 0;
+
+  DATA.letters.forEach((entry, idx) => {
+    if (caseFilter === 'upper' && entry.case !== 'upper') { grid.appendChild(createPlaceholder()); return; }
+    if (caseFilter === 'lower' && entry.case !== 'lower') { grid.appendChild(createPlaceholder()); return; }
+
+    const cell = document.createElement('div');
+    cell.className = 'cell ' + correctnessClass(entry);
+    if (idx === selectedIdx) cell.classList.add('selected');
+
+    const canvas = document.createElement('canvas');
+    const fixations = aggregateFixations(entry);
+    const b64 = representativeImage(entry);
+    drawCell(canvas, b64, fixations, DATA.image_size);
+    cell.appendChild(canvas);
+
+    const label = document.createElement('span');
+    label.className = 'cell-label';
+    label.textContent = entry.char;
+    cell.appendChild(label);
+
+    cell.onclick = () => { selectedIdx = idx; buildGrid(); showDetail(entry); };
+    grid.appendChild(cell);
+    shown++;
+
+    // Stats
+    for (const fname of DATA.font_names) {
+      const fd = entry.fonts[fname];
+      if (fd) { totalSamples++; if (fd.correct) totalCorrect++; }
+    }
+  });
+
+  document.getElementById('stats').textContent =
+    `${totalCorrect}/${totalSamples} correct (${(totalCorrect/totalSamples*100).toFixed(1)}%)`;
+}
+
+function createPlaceholder() {
+  const div = document.createElement('div');
+  div.style.visibility = 'hidden';
+  return div;
+}
+
+function showDetail(entry) {
+  const panel = document.getElementById('detail-panel');
+  const title = document.getElementById('detail-title');
+  const grid = document.getElementById('detail-grid');
+
+  title.textContent = `${entry.char} — per-font attention (${DATA.font_names.length} fonts)`;
+  grid.innerHTML = '';
+  panel.style.display = 'block';
+
+  for (const fname of DATA.font_names) {
+    const fd = entry.fonts[fname];
+    if (!fd) continue;
+
+    const cell = document.createElement('div');
+    cell.className = 'detail-cell ' + (fd.correct ? 'correct' : 'wrong');
+
+    const canvas = document.createElement('canvas');
+    drawCell(canvas, fd.clean_b64, fd.fixations, 120);
+    cell.appendChild(canvas);
+
+    const fnLabel = document.createElement('div');
+    fnLabel.className = 'font-name';
+    fnLabel.textContent = fname;
+    cell.appendChild(fnLabel);
+
+    const pred = document.createElement('div');
+    pred.className = 'pred-info';
+    pred.textContent = fd.correct ? 'OK' :
+      `pred: ${fd.letter_pred}${fd.case_pred === 'lower' ? '.lower' : ''}`;
+    cell.appendChild(pred);
+
+    grid.appendChild(cell);
+  }
+
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function setView(mode) {
+  viewMode = mode;
+  document.getElementById('btn-heatmap').className = mode === 'heatmap' ? 'active' : '';
+  document.getElementById('btn-path').className = mode === 'path' ? 'active' : '';
+  buildGrid();
+  if (selectedIdx >= 0) showDetail(DATA.letters[selectedIdx]);
+}
+
+function setCase(mode) {
+  caseFilter = mode;
+  document.getElementById('btn-both').className = mode === 'both' ? 'active' : '';
+  document.getElementById('btn-upper').className = mode === 'upper' ? 'active' : '';
+  document.getElementById('btn-lower').className = mode === 'lower' ? 'active' : '';
+  selectedIdx = -1;
+  document.getElementById('detail-panel').style.display = 'none';
+  buildGrid();
+}
+
+function setOpacity(val) {
+  opacity = val / 100;
+  document.getElementById('opacity-val').textContent = val + '%';
+  buildGrid();
+  if (selectedIdx >= 0) showDetail(DATA.letters[selectedIdx]);
+}
+
+// Initial render
+buildGrid();
+</script>
+</body>
+</html>'''
+
+
+def generate_atlas(model_dir, test_data_dir, output_path='data/atlas.html', device='auto'):
+    """Generate an interactive HTML attention atlas from a trained model.
+
+    Runs inference on all test samples, collects fixation coordinates and clean
+    images, then renders a self-contained HTML file with Canvas-based heatmaps
+    and per-font drill-down.
+    """
+    device = _resolve_device(device)
+    print(f"Generating attention atlas on: {device}")
+
+    # Load model (same pattern as test_model)
+    ckpt = torch.load(os.path.join(model_dir, 'model_final.pth'),
+                      map_location=device, weights_only=False)
+    if isinstance(ckpt, dict) and 'model' in ckpt:
+        n_glimpses = ckpt.get('n_glimpses', 10)
+        patch_size = ckpt.get('patch_size', 12)
+        n_scales = ckpt.get('n_scales', 1)
+        state_dict = ckpt['model']
+    else:
+        n_glimpses, patch_size, n_scales = 10, 12, 1
+        state_dict = ckpt
+
+    model = VisionModel(
+        n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
+    ).to(device)
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
+
+    dataset = LetterDataset(test_data_dir)
+    font_names = sorted(set(dataset.fonts))
+
+    # Collect per-(letter, case) data keyed by font
+    entries = {}  # (letter, case) -> {char, fonts: {font -> {fixations, clean_b64, ...}}}
+
+    for i in range(len(dataset)):
+        img, clean, letter, case, font, _partner = dataset[i]
+        img_dev = img.unsqueeze(0).to(device)
+
+        letter_idx = ord(letter) - ord('A')
+        case_idx = 0 if case == 'upper' else 1
+        case_float = torch.tensor([[float(case_idx)]], device=device)
+
+        with torch.no_grad():
+            _, letter_logits, case_logits, locations, _ = model(img_dev, case_float)
+
+        # Collect fixation coordinates as [[x, y], ...] in normalized [-1, 1]
+        fixations = []
+        for loc in locations:
+            loc_np = loc[0].cpu().detach().tolist()
+            fixations.append([round(loc_np[0], 4), round(loc_np[1], 4)])
+
+        letter_pred = chr(letter_logits.argmax(dim=1).item() + ord('A'))
+        case_pred = 'upper' if case_logits.argmax(dim=1).item() == 0 else 'lower'
+        correct = (letter_pred == letter) and (case_pred == case)
+
+        key = (letter, case)
+        if key not in entries:
+            char = letter.lower() if case == 'lower' else letter
+            entries[key] = {'letter': letter, 'case': case, 'char': char, 'fonts': {}}
+
+        entries[key]['fonts'][font] = {
+            'fixations': fixations,
+            'clean_b64': _tensor_to_base64_png(clean),
+            'letter_pred': letter_pred,
+            'case_pred': case_pred,
+            'correct': correct,
+        }
+
+        print(f"  {entries[key]['char']} [{font}]: {'OK' if correct else 'WRONG'}")
+
+    # Build ordered list: A-Z then a-z
+    letters_list = []
+    for letter_char in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+        key = (letter_char, 'upper')
+        if key in entries:
+            letters_list.append(entries[key])
+    for letter_char in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+        key = (letter_char, 'lower')
+        if key in entries:
+            letters_list.append(entries[key])
+
+    atlas_data = {
+        'image_size': 128,
+        'n_fixations': n_glimpses + 1,  # initial center + n_glimpses saccades
+        'font_names': font_names,
+        'letters': letters_list,
+    }
+
+    # Inject JSON into HTML template
+    atlas_json = json.dumps(atlas_data)
+    html = _atlas_html_template().replace('ATLAS_JSON_PLACEHOLDER', atlas_json)
+
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    with open(output_path, 'w') as f:
+        f.write(html)
+
+    total = sum(len(e['fonts']) for e in letters_list)
+    correct = sum(1 for e in letters_list for fd in e['fonts'].values() if fd['correct'])
+    size_kb = os.path.getsize(output_path) / 1024
+    print(f"\nAtlas: {len(letters_list)} letters x {len(font_names)} fonts = {total} samples")
+    print(f"Accuracy: {correct}/{total} ({correct/total*100:.1f}%)")
+    print(f"Written to {output_path} ({size_kb:.0f} KB)")
 
 
 # --- Attention Pre-Check ---
@@ -1185,6 +1687,13 @@ if __name__ == '__main__':
     viz_parser.add_argument('--device', default='auto',
                             choices=['auto', 'cpu', 'cuda'])
 
+    atlas_parser = subparsers.add_parser('atlas')
+    atlas_parser.add_argument('--model_dir', required=True)
+    atlas_parser.add_argument('--test_data_dir', required=True)
+    atlas_parser.add_argument('--output', default='data/atlas.html')
+    atlas_parser.add_argument('--device', default='auto',
+                              choices=['auto', 'cpu', 'cuda'])
+
     chk_parser = subparsers.add_parser('check_attention')
     chk_parser.add_argument('--data_dir', required=True)
     chk_parser.add_argument('--n_epochs', type=int, default=10)
@@ -1228,6 +1737,10 @@ if __name__ == '__main__':
     elif args.command == 'visualize':
         visualize_model(args.model_dir, args.data_dir, args.output_dir,
                         device=args.device)
+
+    elif args.command == 'atlas':
+        generate_atlas(args.model_dir, args.test_data_dir, args.output,
+                       device=args.device)
 
     elif args.command == 'check_attention':
         check_attention(args.data_dir, n_epochs=args.n_epochs,

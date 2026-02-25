@@ -2,15 +2,15 @@ SERVICE = fbrl
 RUN     = docker compose exec $(SERVICE) python vision_training.py
 
 # Overridable defaults (e.g. make train-gpu EPOCHS=500 DEVICE=cuda)
-EPOCHS   ?= 200
-CKPT     ?= 100
-DEVICE   ?= cpu
+EPOCHS   ?= 100
+CKPT     ?= 50
+DEVICE   ?= auto
 LETTERS  ?= Aa-Zz
 VARIANTS ?= 20
 NOISE    ?= 0.1
 FONTS    ?= all
 BATCH    ?= 52
-GUIDE    ?= 4.0
+GUIDE    ?= 8.0
 
 # Lifecycle
 build:
@@ -49,6 +49,9 @@ test:
 visualize:
 	$(RUN) visualize --model_dir data/models --data_dir data/letters --output_dir data/visualizations
 
+atlas:
+	$(RUN) atlas --model_dir data/models --test_data_dir data/test --output data/atlas.html --device $(DEVICE)
+
 check-attention:
 	$(RUN) check_attention --data_dir data/letters --device $(DEVICE)
 
@@ -60,6 +63,7 @@ endif
 	@mkdir -p runs/$(NAME)
 	cp data/models/model_final.pth runs/$(NAME)/
 	cp data/models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
+	cp data/models/training.log runs/$(NAME)/ 2>/dev/null || true
 	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
 	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
 	@echo "fonts: $(FONTS)" >> runs/$(NAME)/info.txt
@@ -69,4 +73,4 @@ endif
 	@echo "guide: $(GUIDE)" >> runs/$(NAME)/info.txt
 	@echo "Archived to runs/$(NAME)/"
 
-.PHONY: build up down restart logs shell generate generate-test train resume test visualize check-attention archive
+.PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive
