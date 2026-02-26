@@ -2,7 +2,8 @@ import argparse
 
 from fbrl.data import generate_dataset, generate_test, generate_bigram_dataset, generate_bigram_test
 from fbrl.train import train_model, check_attention, train_bigram_model, check_bigram_attention
-from fbrl.evaluate import test_model, visualize_model, generate_atlas, test_bigram_model
+from fbrl.evaluate import (test_model, visualize_model, generate_atlas, test_bigram_model,
+                           generate_bigram_atlas)
 
 
 def _parse_letters(letters_str):
@@ -150,6 +151,13 @@ if __name__ == '__main__':
     test_bi_parser.add_argument('--device', default='auto',
                                  choices=['auto', 'cpu', 'cuda'])
 
+    bi_atlas_parser = subparsers.add_parser('bigram_atlas')
+    bi_atlas_parser.add_argument('--model_dir', required=True)
+    bi_atlas_parser.add_argument('--test_data_dir', required=True)
+    bi_atlas_parser.add_argument('--output', default='data/bigram_atlas.html')
+    bi_atlas_parser.add_argument('--device', default='auto',
+                                  choices=['auto', 'cpu', 'cuda'])
+
     args = parser.parse_args()
 
     if args.command == 'generate':
@@ -240,3 +248,7 @@ if __name__ == '__main__':
     elif args.command == 'test_bigrams':
         test_bigram_model(args.model_dir, args.test_data_dir, args.output_dir,
                           device=args.device)
+
+    elif args.command == 'bigram_atlas':
+        generate_bigram_atlas(args.model_dir, args.test_data_dir, args.output,
+                              device=args.device)

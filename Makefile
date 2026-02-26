@@ -96,5 +96,30 @@ test-bigrams:
 check-bigram-attention:
 	$(RUN) check_bigram_attention --data_dir data/bigrams --device $(DEVICE)
 
+bigram-atlas:
+	$(RUN) bigram_atlas --model_dir data/bigram_models --test_data_dir data/bigram_test --output data/bigram_atlas.html --device $(DEVICE)
+
+# Archive a trained bigram model: make archive-bigrams NAME=v4-bigram-transfer
+archive-bigrams:
+ifndef NAME
+	$(error Usage: make archive-bigrams NAME=v4-bigram-transfer)
+endif
+	@mkdir -p runs/$(NAME)
+	$(RUN) compress_model --input data/bigram_models/model_final.pth --output data/bigram_models/_archive.pth.gz
+	mv data/bigram_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
+	cp data/bigram_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
+	cp data/bigram_models/training.log runs/$(NAME)/ 2>/dev/null || true
+	cp data/bigram_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
+	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
+	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
+	@echo "model: bigram" >> runs/$(NAME)/info.txt
+	@echo "fonts: $(FONTS)" >> runs/$(NAME)/info.txt
+	@echo "epochs: $(EPOCHS)" >> runs/$(NAME)/info.txt
+	@echo "batch: $(BATCH)" >> runs/$(NAME)/info.txt
+	@echo "guide: $(GUIDE)" >> runs/$(NAME)/info.txt
+	@echo "scaffold: $(SCAFFOLD)" >> runs/$(NAME)/info.txt
+	@echo "Archived to runs/$(NAME)/"
+
 .PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive \
-       generate-bigrams generate-bigrams-test train-bigrams resume-bigrams test-bigrams check-bigram-attention
+       generate-bigrams generate-bigrams-test train-bigrams resume-bigrams test-bigrams check-bigram-attention \
+       bigram-atlas archive-bigrams

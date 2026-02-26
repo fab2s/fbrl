@@ -1,0 +1,8 @@
+git: dc7d066
+date: 2026-02-26T13:32:23+01:00
+model: bigram
+fonts: all
+epochs: 300
+batch: 52
+guide: 8.0
+scaffold: 200
