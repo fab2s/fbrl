@@ -11,7 +11,9 @@ from fbrl import _resolve_device
 from fbrl.data import LetterDataset, BigramDataset
 from fbrl.model import VisionModel, BigramVisionModel
 from fbrl.losses import (attention_content_loss, temporal_attention_content_loss,
-                          fixation_diversity_loss, fixation_hit_rate)
+                          two_phase_attention_loss,
+                          fixation_diversity_loss, fixation_edge_loss,
+                          fixation_hit_rate)
 
 
 # --- Training ---
@@ -401,33 +403,41 @@ def check_attention(data_dir, n_epochs=10, n_glimpses=10, patch_size=12,
 # --- Bigram Training ---
 
 def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_models',
-                       checkpoint_interval=10, n_glimpses=15, patch_size=12,
+                       checkpoint_interval=10,
+                       n_scan_glimpses=5, n_read_glimpses=6,
+                       scan_patch_size=(12, 18), read_patch_size=12,
                        n_scales=1, device='auto',
                        diversity_weight=1.0, diversity_sigma=0.1, diversity_vy=1.0,
-                       guide_weight=8.0, blur_sigma_ratio=0.16,
+                       guide_weight=8.0, scan_guide_weight=None,
+                       blur_sigma_ratio=0.16,
                        batch_size=32, scaffold_epochs=200,
                        scaffold_floor=0.0,
-                       transfer_from=None, mask_weight=0.5):
-    """Train a BigramVisionModel on 256x128 bigram images.
+                       transfer_from=None, mask_weight=0.5,
+                       edge_weight=0.0):
+    """Train a BigramVisionModel with two-phase scan/read attention on 128x128 bigram images.
 
-    Loss = recon + letter1_cls + letter2_cls + guide_weight * attn + diversity * div
-    No case classifier, no recode loss (lowercase only).
+    Phase 1 — SCAN: wide patches build spatial map. Loss: full-image guide + edge.
+    Phase 2 — READ: focused patches read letters. Loss: temporal scaffold.
 
-    Temporal attention scaffold: for the first scaffold_epochs, the attention guide
-    uses position-specific fields (left letter, right letter, full) to teach
-    left-to-right scanning. The scaffold anneals linearly to zero, after which
-    the model maintains the pattern via classification reward alone.
+    scaffold_epochs controls temporal scaffold annealing for the READ phase.
     Set scaffold_epochs=0 to disable scaffolding entirely.
     """
+    if scan_guide_weight is None:
+        scan_guide_weight = guide_weight
+
     device = _resolve_device(device)
+    n_glimpses = n_scan_glimpses + n_read_glimpses
     print(f"Bigram training on: {device}")
-    mask_str = f"  mask_weight={mask_weight}" if mask_weight > 0 else ""
     vy_str = f"  diversity_vy={diversity_vy}" if diversity_vy != 1.0 else ""
-    print(f"Attention: guide_weight={guide_weight}  blur_sigma_ratio={blur_sigma_ratio}  "
+    edge_str = f"  edge_weight={edge_weight}" if edge_weight > 0 else ""
+    print(f"Two-phase: scan={n_scan_glimpses} ({scan_patch_size}) + "
+          f"read={n_read_glimpses} ({read_patch_size}) = {n_glimpses} glimpses")
+    print(f"Attention: guide_weight={guide_weight}  scan_guide={scan_guide_weight}  "
+          f"blur_sigma_ratio={blur_sigma_ratio}  "
           f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}{vy_str}  "
-          f"batch_size={batch_size}  n_glimpses={n_glimpses}{mask_str}")
+          f"batch_size={batch_size}{edge_str}")
     floor_str = f", floor={scaffold_floor}" if scaffold_floor > 0 else ""
-    print(f"Temporal scaffold: {scaffold_epochs} epochs "
+    print(f"Temporal scaffold (read phase): {scaffold_epochs} epochs "
           f"({'disabled' if scaffold_epochs == 0 else 'left→right→holistic'}){floor_str}")
 
     os.makedirs(save_dir, exist_ok=True)
@@ -436,20 +446,22 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=use_cuda)
 
     model = BigramVisionModel(
-        n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
+        n_scan_glimpses=n_scan_glimpses, n_read_glimpses=n_read_glimpses,
+        scan_patch_size=scan_patch_size, read_patch_size=read_patch_size,
+        n_scales=n_scales,
     ).to(device)
 
     # --- Transfer learning from single-letter model ---
-    # Load encoder + classifier weights from a trained VisionModel. The readout
-    # and decoder are new (different architecture) and train from scratch.
-    # During scaffold phase: sensor + classifiers frozen, forcing the readout to
-    # learn to produce vectors the frozen classifier already understands.
+    # Map: encoder.glimpse_sensor.* -> read_sensor.* (same 12x12 patches)
+    #       encoder.attention_controller.* -> controller.*
+    #       letter_classifier.* -> classifiers.0.* + classifiers.1.*
+    # scan_sensor trains from scratch (new rectangular patches).
     transfer_scaffold = False
     if transfer_from and not resume:
-        import gzip, io
+        import gzip, io as _io
         if transfer_from.endswith('.gz'):
             with gzip.open(transfer_from, 'rb') as f:
-                src = torch.load(io.BytesIO(f.read()), map_location=device,
+                src = torch.load(_io.BytesIO(f.read()), map_location=device,
                                  weights_only=False)['model']
         else:
             src = torch.load(transfer_from, map_location=device,
@@ -458,9 +470,18 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
         dst = model.state_dict()
         n_transferred = 0
         for key in src:
-            if key.startswith('encoder.'):
-                dst[key] = src[key].float()  # fp16 compressed -> fp32
-                n_transferred += 1
+            # encoder.glimpse_sensor.* -> read_sensor.*
+            if key.startswith('encoder.glimpse_sensor.'):
+                new_key = key.replace('encoder.glimpse_sensor.', 'read_sensor.')
+                if new_key in dst:
+                    dst[new_key] = src[key].float()
+                    n_transferred += 1
+            # encoder.attention_controller.* -> controller.*
+            elif key.startswith('encoder.attention_controller.'):
+                new_key = key.replace('encoder.attention_controller.', 'controller.')
+                if new_key in dst:
+                    dst[new_key] = src[key].float()
+                    n_transferred += 1
         # Single-letter letter_classifier -> both bigram position classifiers
         for suffix in ('weight', 'bias'):
             sk = f'letter_classifier.{suffix}'
@@ -471,15 +492,16 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
         model.load_state_dict(dst)
         print(f"Transfer: {n_transferred} tensors from {transfer_from}")
 
-        # Freeze sensor + classifiers during scaffold phase
+        # Freeze read_sensor + classifiers during scaffold phase.
+        # scan_sensor is new (trains from scratch). controller gets low lr.
         if scaffold_epochs > 0:
             transfer_scaffold = True
-            for p in model.encoder.glimpse_sensor.parameters():
+            for p in model.read_sensor.parameters():
                 p.requires_grad = False
             for clf in model.classifiers:
                 for p in clf.parameters():
                     p.requires_grad = False
-            print(f"Transfer scaffold: sensor + classifiers frozen for {scaffold_epochs} epochs")
+            print(f"Transfer scaffold: read_sensor + classifiers frozen for {scaffold_epochs} epochs")
     elif transfer_from and resume:
         print("Warning: --transfer ignored when --resume is used")
 
@@ -508,22 +530,28 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
         print(f"Resumed from epoch {start_epoch} ({len(losses_pos1_cls)} prior epochs of history)")
 
     # Optimizer param groups depend on transfer mode.
-    # Transfer scaffold: only controller + readout/decoder train (sensor + classifiers frozen).
-    # Standard: encoder gets 10x lower lr than readout path.
+    # Transfer scaffold: scan_sensor + controller + readout/decoder train.
+    #   read_sensor + classifiers frozen.
+    # Standard: sensors + controller get 10x lower lr than readout path.
     if transfer_scaffold:
         optimizer = optim.Adam([
-            {'params': list(model.encoder.attention_controller.parameters()), 'lr': 0.0001},
+            {'params': list(model.scan_sensor.parameters()), 'lr': 0.001},
+            {'params': list(model.controller.parameters()), 'lr': 0.0001},
             {'params': list(model.readout.parameters()) + list(model.decoder.parameters()), 'lr': 0.001},
         ])
-        print(f"Param groups (scaffold): controller lr=0.0001, readout+decoder lr=0.001")
+        print(f"Param groups (scaffold): scan_sensor lr=0.001, controller lr=0.0001, readout+decoder lr=0.001")
     else:
-        encoder_params = set(model.encoder.parameters())
-        readout_params = [p for p in model.parameters() if p not in encoder_params]
+        sensor_ctrl_params = set(
+            list(model.scan_sensor.parameters()) +
+            list(model.read_sensor.parameters()) +
+            list(model.controller.parameters())
+        )
+        readout_params = [p for p in model.parameters() if p not in sensor_ctrl_params]
         optimizer = optim.Adam([
-            {'params': list(model.encoder.parameters()), 'lr': 0.0001},
+            {'params': list(sensor_ctrl_params), 'lr': 0.0001},
             {'params': readout_params, 'lr': 0.001},
         ])
-        print(f"Param groups: encoder lr=0.0001, readout lr=0.001")
+        print(f"Param groups: sensors+controller lr=0.0001, readout lr=0.001")
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     criterion = torch.nn.MSELoss()
 
@@ -538,37 +566,39 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
         os.rename(log_path, os.path.join(save_dir, f'training_{ts}.log'))
     log_file = open(log_path, 'a')
     if start_epoch == 0:
-        mask_hdr = "  mask" if mask_weight > 0 else ""
-        log_file.write(f"epoch  recon    pos1     pos2     attn     div      hit      lr_enc   lr_read  scaff{mask_hdr}  time\n")
-        log_file.write("-" * (96 + len(mask_hdr)) + "\n")
+        edge_hdr = "  edge" if edge_weight > 0 else ""
+        log_file.write(f"epoch  recon    pos1     pos2     s_attn   r_attn   div      hit      lr_enc   lr_read  scaff{edge_hdr}  time\n")
+        log_file.write("-" * (100 + len(edge_hdr)) + "\n")
     log_file.flush()
 
     for epoch in range(start_epoch, end_epoch):
-        # Transfer: unfreeze sensor + classifiers when scaffold phase ends
+        # Transfer: unfreeze read_sensor + classifiers when scaffold phase ends
         if transfer_scaffold and epoch >= scaffold_epochs:
             transfer_scaffold = False
-            for p in model.encoder.glimpse_sensor.parameters():
+            for p in model.read_sensor.parameters():
                 p.requires_grad = True
             for clf in model.classifiers:
                 for p in clf.parameters():
                     p.requires_grad = True
             optimizer = optim.Adam([
-                {'params': list(model.encoder.glimpse_sensor.parameters()), 'lr': 0.00001},
-                {'params': list(model.encoder.attention_controller.parameters()), 'lr': 0.0001},
+                {'params': list(model.scan_sensor.parameters()), 'lr': 0.0001},
+                {'params': list(model.read_sensor.parameters()), 'lr': 0.00001},
+                {'params': list(model.controller.parameters()), 'lr': 0.0001},
                 {'params': [p for clf in model.classifiers for p in clf.parameters()], 'lr': 0.0001},
                 {'params': list(model.readout.parameters()) + list(model.decoder.parameters()), 'lr': 0.001},
             ])
             remaining = end_epoch - epoch
             scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining)
-            print(f"Transfer: unfroze sensor + classifiers, 4 param groups for {remaining} epochs")
+            print(f"Transfer: unfroze read_sensor + classifiers, 5 param groups for {remaining} epochs")
 
         epoch_start = time.time()
         total_loss_recon = 0
         total_loss_pos1 = 0
         total_loss_pos2 = 0
-        total_loss_attn = 0
+        total_loss_scan_attn = 0
+        total_loss_read_attn = 0
         total_loss_div = 0
-        total_loss_mask = 0
+        total_loss_edge = 0
         total_hit_rate = 0
         total_hit_intensity = 0
         total_pos1_correct = 0
@@ -602,22 +632,30 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
             recon_loss = criterion(recon, img)
             pos1_cls_loss = F.cross_entropy(logits_list[0], idx1)
             pos2_cls_loss = F.cross_entropy(logits_list[1], idx2)
-            # Temporal attention guide: position-specific guide fields teach
-            # left-to-right scanning, annealed by scaffold_weight
-            attn_loss = temporal_attention_content_loss(
-                clean, locations, blur_sigma_ratio=blur_sigma_ratio,
+
+            # Two-phase attention: scan gets full-image guide, read gets scaffold
+            scan_attn, read_attn = two_phase_attention_loss(
+                clean, locations, n_scan_glimpses,
+                blur_sigma_ratio=blur_sigma_ratio,
                 scaffold_weight=scaffold_weight,
             )
+
             div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma,
                                                vy=diversity_vy)
+            # Edge loss on scan locations only (encourage horizontal spread during scan)
+            if edge_weight > 0:
+                scan_locations = locations[:n_scan_glimpses + 1]
+                edge_loss = fixation_edge_loss(scan_locations)
+            else:
+                edge_loss = torch.tensor(0.0)
 
             total_loss = (recon_loss + pos1_cls_loss + pos2_cls_loss
-                          + guide_weight * attn_loss
+                          + scan_guide_weight * scan_attn
+                          + guide_weight * read_attn
+                          + edge_weight * edge_loss
                           + diversity_weight * div_loss)
 
             # --- Masked-half auxiliary loss ---
-            # Force the model to classify each letter from glimpses on that
-            # letter alone: mask one half, require the visible letter correct.
             if mask_weight > 0:
                 mid_w = img.shape[3] // 2
                 mask_left = torch.rand(img.shape[0], device=device) < 0.5
@@ -628,7 +666,6 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
 
                 _, logits_m, _, _ = model(masked_img)
 
-                # Only penalize the visible position
                 mask_cls = torch.tensor(0.0, device=device)
                 if mask_left.any():
                     mask_cls = mask_cls + F.cross_entropy(
@@ -637,7 +674,6 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
                     mask_cls = mask_cls + F.cross_entropy(
                         logits_m[0][~mask_left], idx1[~mask_left])
                 total_loss = total_loss + mask_weight * mask_cls
-                total_loss_mask += mask_cls.item()
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -647,8 +683,11 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
             total_loss_recon += recon_loss.item()
             total_loss_pos1 += pos1_cls_loss.item()
             total_loss_pos2 += pos2_cls_loss.item()
-            total_loss_attn += attn_loss.item()
+            total_loss_scan_attn += scan_attn.item()
+            total_loss_read_attn += read_attn.item()
             total_loss_div += div_loss.item()
+            if edge_weight > 0:
+                total_loss_edge += edge_loss.item()
 
             # Accuracy tracking
             with torch.no_grad():
@@ -663,7 +702,8 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
         avg_recon = total_loss_recon / n
         avg_pos1 = total_loss_pos1 / n
         avg_pos2 = total_loss_pos2 / n
-        avg_attn = total_loss_attn / n
+        avg_scan_attn = total_loss_scan_attn / n
+        avg_read_attn = total_loss_read_attn / n
         avg_div = total_loss_div / n
         avg_hr = total_hit_rate / n
         avg_hi = total_hit_intensity / n
@@ -673,7 +713,7 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
         losses_recon.append(avg_recon)
         losses_pos1_cls.append(avg_pos1)
         losses_pos2_cls.append(avg_pos2)
-        losses_attn.append(avg_attn)
+        losses_attn.append(avg_scan_attn + avg_read_attn)  # combined for history compat
         losses_div.append(avg_div)
         hist_hit_rate.append(avg_hr)
         hist_hit_intensity.append(avg_hi)
@@ -688,27 +728,30 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
         lrs = scheduler.get_last_lr()
         lr_enc = lrs[0]
         lr_read = lrs[-1]
-        avg_mask = total_loss_mask / n
+        avg_edge = total_loss_edge / n
         scaff_str = f"  scaff {scaffold_weight:.2f}" if scaffold_epochs > 0 else ""
-        mask_str = f"  Mask {avg_mask:.4f}" if mask_weight > 0 else ""
+        edge_str = f"  Edge {avg_edge:.4f}" if edge_weight > 0 else ""
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avg_recon:.4f}  Pos1 {avg_pos1:.4f} ({acc1:.0%})  "
-              f"Pos2 {avg_pos2:.4f} ({acc2:.0%})  Attn {avg_attn:.4f}  "
-              f"Div {avg_div:.4f}  Hit {avg_hr:.0%}{mask_str}  "
+              f"Pos2 {avg_pos2:.4f} ({acc2:.0%})  "
+              f"SAttn {avg_scan_attn:.4f}  RAttn {avg_read_attn:.4f}  "
+              f"Div {avg_div:.4f}  Hit {avg_hr:.0%}{edge_str}  "
               f"lr {lr_enc:.6f}/{lr_read:.6f}{scaff_str}  "
               f"[{epoch_time:.1f}s  ETA {eta_min}m{eta_s:02d}s]")
 
-        mask_log = f"  {avg_mask:.4f}" if mask_weight > 0 else ""
+        edge_log = f"  {avg_edge:.4f}" if edge_weight > 0 else ""
         log_file.write(f"{epoch+1:>5d}  {avg_recon:.4f}  {avg_pos1:.4f}  "
-                       f"{avg_pos2:.4f}  {avg_attn:.4f}  {avg_div:.4f}  "
+                       f"{avg_pos2:.4f}  {avg_scan_attn:.4f}  {avg_read_attn:.4f}  "
+                       f"{avg_div:.4f}  "
                        f"{avg_hr:.4f}  {lr_enc:.6f}  {lr_read:.6f}  "
-                       f"{scaffold_weight:.4f}{mask_log}  {epoch_time:.1f}s\n")
+                       f"{scaffold_weight:.4f}{edge_log}  {epoch_time:.1f}s\n")
         log_file.flush()
 
         scheduler.step()
 
         if (epoch + 1 - start_epoch) % checkpoint_interval == 0:
-            _save_bigram_checkpoint(model, epoch, n_glimpses, patch_size, n_scales,
+            _save_bigram_checkpoint(model, epoch, n_scan_glimpses, n_read_glimpses,
+                                   scan_patch_size, read_patch_size, n_scales,
                                    losses_recon, losses_pos1_cls, losses_pos2_cls,
                                    losses_attn, losses_div, hist_hit_rate, hist_hit_intensity,
                                    os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth'))
@@ -716,7 +759,8 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
     log_file.close()
     print(f"Training log saved to {log_path}")
 
-    _save_bigram_checkpoint(model, end_epoch - 1, n_glimpses, patch_size, n_scales,
+    _save_bigram_checkpoint(model, end_epoch - 1, n_scan_glimpses, n_read_glimpses,
+                            scan_patch_size, read_patch_size, n_scales,
                             losses_recon, losses_pos1_cls, losses_pos2_cls,
                             losses_attn, losses_div, hist_hit_rate, hist_hit_intensity,
                             os.path.join(save_dir, 'model_final.pth'))
@@ -728,7 +772,7 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
     axes[0].plot(epochs_x, losses_recon, label='Recon', color='tab:blue')
     axes[0].set_ylabel('MSE')
     axes[0].legend(loc='upper right')
-    axes[0].set_title('Reconstruction (256x128)')
+    axes[0].set_title('Reconstruction (128x128)')
 
     axes[1].plot(epochs_x, losses_pos1_cls, label='Pos 1', color='tab:red')
     axes[1].plot(epochs_x, losses_pos2_cls, label='Pos 2', color='tab:orange',
@@ -739,7 +783,7 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
     axes[1].legend(loc='upper right')
     axes[1].set_title('Letter Classification (26-class, per position)')
 
-    axes[2].plot(epochs_x, losses_attn, label='Guide', color='tab:green')
+    axes[2].plot(epochs_x, losses_attn, label='Guide (scan+read)', color='tab:green')
     axes[2].set_ylabel('Loss')
     axes[2].legend(loc='upper right')
     axes[2].set_title('Attention guide (lower = fixations on letters)')
@@ -768,16 +812,22 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
           f"Model and graph saved in {save_dir}")
 
 
-def _save_bigram_checkpoint(model, epoch, n_glimpses, patch_size, n_scales,
+def _save_bigram_checkpoint(model, epoch, n_scan_glimpses, n_read_glimpses,
+                            scan_patch_size, read_patch_size, n_scales,
                             losses_recon, losses_pos1, losses_pos2,
                             losses_attn, losses_div, hist_hr, hist_hi, path):
-    """Save a bigram model checkpoint with model_type marker."""
+    """Save a bigram model checkpoint with two-phase metadata."""
     torch.save({
         'epoch': epoch,
         'model': {k: v.cpu() for k, v in model.state_dict().items()},
         'model_type': 'bigram',
-        'n_glimpses': n_glimpses, 'patch_size': patch_size, 'n_scales': n_scales,
-        'image_size': (128, 192),  # (H, W)
+        'n_scan_glimpses': n_scan_glimpses,
+        'n_read_glimpses': n_read_glimpses,
+        'scan_patch_size': scan_patch_size,
+        'read_patch_size': read_patch_size,
+        'n_glimpses': n_scan_glimpses + n_read_glimpses,  # eval compat
+        'n_scales': n_scales,
+        'image_size': (128, 128),
         'losses': {
             'recon': losses_recon, 'pos1_cls': losses_pos1,
             'pos2_cls': losses_pos2, 'attn': losses_attn,
@@ -789,14 +839,16 @@ def _save_bigram_checkpoint(model, epoch, n_glimpses, patch_size, n_scales,
 
 # --- Bigram Attention Pre-Check ---
 
-def check_bigram_attention(data_dir, n_epochs=10, n_glimpses=15, patch_size=12,
+def check_bigram_attention(data_dir, n_epochs=10,
+                           n_scan_glimpses=5, n_read_glimpses=6,
+                           scan_patch_size=(12, 18), read_patch_size=12,
                            n_scales=1, device='auto',
                            guide_weight=8.0, blur_sigma_ratio=0.16,
                            diversity_weight=1.0, diversity_sigma=0.1,
                            diversity_vy=1.0):
     """Quick diagnostic: can the attention guide pull fixations onto bigram letter content?
 
-    Runs a few epochs with ONLY attention + diversity loss on 256x128 bigram images.
+    Runs a few epochs with ONLY attention + diversity loss on 128x128 bigram images.
     """
     device = _resolve_device(device)
     dataset = BigramDataset(data_dir)
@@ -804,7 +856,9 @@ def check_bigram_attention(data_dir, n_epochs=10, n_glimpses=15, patch_size=12,
                             pin_memory=device.type == 'cuda')
 
     model = BigramVisionModel(
-        n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
+        n_scan_glimpses=n_scan_glimpses, n_read_glimpses=n_read_glimpses,
+        scan_patch_size=scan_patch_size, read_patch_size=read_patch_size,
+        n_scales=n_scales,
     ).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 

@@ -11,12 +11,17 @@ NOISE    ?= 0.1
 FONTS    ?= all
 BATCH    ?= 52
 GUIDE    ?= 8.0
-SCAFFOLD ?= 200
+SCAFFOLD_RATIO ?= 0.67
 SCAFFOLD_FLOOR ?= 0.0
 TRANSFER ?=
-GLIMPSES ?= 15
+SCAN_GLIMPSES ?= 5
+READ_GLIMPSES ?= 6
+SCAN_PATCH    ?= 12,18
+READ_PATCH    ?= 12
+SCAN_GUIDE    ?=
 MASK     ?= 0.5
 VY       ?= 1.0
+EDGE     ?= 0.0
 
 # Lifecycle
 build:
@@ -99,10 +104,10 @@ generate-bigrams-test:
 
 train-bigrams:
 	@$(CLEAN_BIGRAM_MODELS)
-	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_glimpses $(GLIMPSES) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --scaffold_epochs $(SCAFFOLD) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --diversity_vy $(VY) $(if $(TRANSFER),--transfer $(TRANSFER))
+	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(SCAN_GLIMPSES) --n_read_glimpses $(READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --diversity_vy $(VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER))
 
 resume-bigrams:
-	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_glimpses $(GLIMPSES) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --scaffold_epochs $(SCAFFOLD) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --diversity_vy $(VY) --resume data/bigram_models/model_final.pth
+	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(SCAN_GLIMPSES) --n_read_glimpses $(READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --diversity_vy $(VY) --edge_weight $(EDGE) --resume data/bigram_models/model_final.pth
 
 test-bigrams:
 	@$(CLEAN_BIGRAM_RESULTS)
@@ -128,12 +133,14 @@ endif
 	cp data/bigram_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
 	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
 	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
-	@echo "model: bigram" >> runs/$(NAME)/info.txt
+	@echo "model: bigram (two-phase)" >> runs/$(NAME)/info.txt
 	@echo "fonts: $(FONTS)" >> runs/$(NAME)/info.txt
 	@echo "epochs: $(EPOCHS)" >> runs/$(NAME)/info.txt
 	@echo "batch: $(BATCH)" >> runs/$(NAME)/info.txt
 	@echo "guide: $(GUIDE)" >> runs/$(NAME)/info.txt
-	@echo "scaffold: $(SCAFFOLD)" >> runs/$(NAME)/info.txt
+	@echo "scan: $(SCAN_GLIMPSES) glimpses, patch $(SCAN_PATCH)" >> runs/$(NAME)/info.txt
+	@echo "read: $(READ_GLIMPSES) glimpses, patch $(READ_PATCH)" >> runs/$(NAME)/info.txt
+	@echo "scaffold_ratio: $(SCAFFOLD_RATIO)" >> runs/$(NAME)/info.txt
 	@echo "Archived to runs/$(NAME)/"
 
 .PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive \

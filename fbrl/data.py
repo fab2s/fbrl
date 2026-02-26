@@ -243,11 +243,11 @@ class LetterDataset(Dataset):
 
 def generate_bigram_dataset(output_dir, noise_level=0.01, num_variants=1,
                             font_spec='default'):
-    """Render 192x128 images with natural bigram strings.
+    """Render 128x128 images with natural bigram strings.
 
     The two-character string is rendered with natural kerning (as real text),
-    centered on a 192x128 canvas. This is much tighter than the old 256x128
-    layout where each letter sat in its own 128px half.
+    centered on a 128x128 canvas. Tighter canvas eliminates dead space
+    (widest bigram text ~96px on 128px canvas).
     Uses BIGRAMS_200 as the bigram set.
     """
     os.makedirs(output_dir, exist_ok=True)
@@ -260,11 +260,11 @@ def generate_bigram_dataset(output_dir, noise_level=0.01, num_variants=1,
         for bigram in BIGRAMS_200:
             letter1, letter2 = bigram[0], bigram[1]
 
-            # Render clean 192x128 image: bigram as a natural 2-char string, centered
-            img = Image.new('L', (192, 128), color=0)
+            # Render clean 128x128 image: bigram as a natural 2-char string, centered
+            img = Image.new('L', (128, 128), color=0)
             draw = ImageDraw.Draw(img)
             bbox = draw.textbbox((0, 0), bigram, font=font)
-            x = (192 - bbox[2] - bbox[0]) / 2
+            x = (128 - bbox[2] - bbox[0]) / 2
             y = (128 - bbox[3] - bbox[1]) / 2
             draw.text((x, y), bigram, fill=255, font=font)
 
@@ -296,7 +296,10 @@ def generate_bigram_dataset(output_dir, noise_level=0.01, num_variants=1,
 
 
 def generate_bigram_test(output_dir, font_spec='default'):
-    """Generate clean (no noise) bigram test set — one image per bigram per font."""
+    """Generate clean (no noise) bigram test set — one image per bigram per font.
+
+    128x128 canvas with centered text.
+    """
     os.makedirs(output_dir, exist_ok=True)
     fonts = discover_fonts(font_spec)
     print(f"Generating bigram test with {len(fonts)} font(s): {', '.join(n for n, _ in fonts)}")
@@ -307,10 +310,10 @@ def generate_bigram_test(output_dir, font_spec='default'):
         for bigram in BIGRAMS_200:
             letter1, letter2 = bigram[0], bigram[1]
 
-            img = Image.new('L', (192, 128), color=0)
+            img = Image.new('L', (128, 128), color=0)
             draw = ImageDraw.Draw(img)
             bbox = draw.textbbox((0, 0), bigram, font=font)
-            x = (192 - bbox[2] - bbox[0]) / 2
+            x = (128 - bbox[2] - bbox[0]) / 2
             y = (128 - bbox[3] - bbox[1]) / 2
             draw.text((x, y), bigram, fill=255, font=font)
 
@@ -356,7 +359,7 @@ class BigramDataset(Dataset):
             img = Image.open(entry['image']).convert('L')
             img_tensor = torch.tensor(
                 np.array(img) / 255.0, dtype=torch.float32,
-            ).unsqueeze(0)  # (1, H, W) = (1, 128, 256)
+            ).unsqueeze(0)  # (1, H, W) = (1, 128, 128)
             self.images.append(img_tensor)
             self.letter1s.append(entry['letter1'])
             self.letter2s.append(entry['letter2'])

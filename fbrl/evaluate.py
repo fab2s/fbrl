@@ -20,7 +20,8 @@ def _load_model(model_dir, device):
     """Load a trained model from a checkpoint directory.
 
     Detects model_type in checkpoint ('single' or 'bigram') and instantiates
-    the appropriate class.
+    the appropriate class. Two-phase bigram checkpoints have n_scan_glimpses
+    and n_read_glimpses; legacy bigram checkpoints fall back to single-phase.
 
     Returns (model, n_glimpses, model_type) with the model in eval mode.
     Backwards compatible: checkpoints without model_type default to 'single'.
@@ -29,20 +30,34 @@ def _load_model(model_dir, device):
                       map_location=device, weights_only=False)
     if isinstance(ckpt, dict) and 'model' in ckpt:
         n_glimpses = ckpt.get('n_glimpses', 10)
-        patch_size = ckpt.get('patch_size', 12)
         n_scales = ckpt.get('n_scales', 1)
         model_type = ckpt.get('model_type', 'single')
         state_dict = ckpt['model']
     else:
-        n_glimpses, patch_size, n_scales = 10, 12, 1
+        n_glimpses, n_scales = 10, 1
         model_type = 'single'
         state_dict = ckpt
 
     if model_type == 'bigram':
-        model = BigramVisionModel(
-            n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
-        ).to(device)
+        # Two-phase checkpoint (has n_scan_glimpses)
+        if 'n_scan_glimpses' in ckpt:
+            n_scan = ckpt['n_scan_glimpses']
+            n_read = ckpt['n_read_glimpses']
+            scan_ps = ckpt.get('scan_patch_size', (12, 18))
+            read_ps = ckpt.get('read_patch_size', 12)
+            model = BigramVisionModel(
+                n_scan_glimpses=n_scan, n_read_glimpses=n_read,
+                scan_patch_size=scan_ps, read_patch_size=read_ps,
+                n_scales=n_scales,
+            ).to(device)
+        else:
+            # Legacy single-phase bigram checkpoint — not supported by new model
+            raise ValueError(
+                "Legacy single-phase bigram checkpoint. "
+                "Re-train with two-phase architecture."
+            )
     else:
+        patch_size = ckpt.get('patch_size', 12)
         model = VisionModel(
             n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
         ).to(device)
@@ -911,7 +926,7 @@ def _bigram_atlas_html_template():
 
     Adapted from the single-letter atlas with key differences:
     - Grid flows with auto-fill (200 bigrams vs 52 letters)
-    - Cells have 3:2 aspect ratio (192x128 images)
+    - Cells have 1:1 aspect ratio (128x128 images)
     - No case filter (bigrams are all lowercase)
     - Rendering functions take (width, height) instead of single size
     - Correctness: green=both ok, yellow=one ok, red=neither
@@ -943,7 +958,7 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; 
 .cell {
   position: relative; cursor: pointer; border: 2px solid transparent;
   border-radius: 4px; overflow: hidden; transition: transform 0.15s;
-  aspect-ratio: 3/2;
+  aspect-ratio: 1;
 }
 .cell:hover { transform: scale(1.3); z-index: 5; }
 .cell.correct { border-color: #2ecc71; }
@@ -970,7 +985,7 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; 
 .detail-cell.correct { border-color: #2ecc71; }
 .detail-cell.partial { border-color: #f39c12; }
 .detail-cell.wrong { border-color: #e74c3c; }
-.detail-cell canvas { width: 360px; height: 240px; display: block; }
+.detail-cell canvas { width: 240px; height: 240px; display: block; }
 .detail-cell .font-name { font-size: 11px; color: #a0a0c0; margin-top: 2px; }
 .detail-cell .pred-info { font-size: 10px; color: #888; }
 </style>
@@ -1256,7 +1271,7 @@ def generate_bigram_atlas(model_dir, test_data_dir, output_path='data/bigram_atl
     Same pattern as generate_atlas() but adapted for BigramVisionModel:
     - Uses BigramDataset for test data
     - Tracks per-position predictions (pred1, pred2, ok1, ok2)
-    - Image dimensions are 192x128 (width x height)
+    - Image dimensions are 128x128
     """
     device = _resolve_device(device)
     print(f"Generating bigram attention atlas on: {device}")

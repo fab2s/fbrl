@@ -110,6 +110,74 @@ def temporal_attention_content_loss(image, locations, blur_sigma_ratio=0.16,
     return -total / n_locs
 
 
+# --- Two-Phase Attention Loss (scan + read) ---
+
+def two_phase_attention_loss(image, locations, n_scan, blur_sigma_ratio=0.16,
+                              scaffold_weight=1.0):
+    """Separate attention guides for scan and read phases.
+
+    Scan phase (locations[1:n_scan+1]): full-image guide — land on any content.
+    Read phase (locations[n_scan+1:]): temporal scaffold — left/right/full thirds.
+
+    Returns (scan_attn_loss, read_attn_loss) separately for independent weighting.
+    """
+    B, C, H, W = image.shape
+    blur_sigma = blur_sigma_ratio * min(H, W)
+
+    k = int(4 * blur_sigma) | 1
+    x = torch.arange(k, device=image.device, dtype=image.dtype) - k // 2
+    gauss = torch.exp(-x ** 2 / (2 * blur_sigma ** 2))
+    gauss = gauss / gauss.sum()
+
+    def _blur(img):
+        out = F.conv2d(img, gauss.view(1, 1, k, 1), padding=(k // 2, 0))
+        return F.conv2d(out, gauss.view(1, 1, 1, k), padding=(0, k // 2))
+
+    guide_full = _blur(image)
+
+    # --- Scan loss: full-image guide for all scan locations ---
+    scan_locs = locations[1:n_scan + 1]  # skip locations[0] (fixed start)
+    scan_total = 0
+    for loc in scan_locs:
+        grid = loc.view(B, 1, 1, 2)
+        sampled = F.grid_sample(guide_full, grid, align_corners=True, padding_mode='zeros')
+        scan_total = scan_total + sampled.mean()
+    scan_loss = -scan_total / max(len(scan_locs), 1)
+
+    # --- Read loss: temporal scaffold (left/right/full thirds) ---
+    read_locs = locations[n_scan + 1:]
+    n_read = len(read_locs)
+    if n_read == 0:
+        return scan_loss, torch.tensor(0.0, device=image.device)
+
+    if scaffold_weight > 0:
+        mid = W // 2
+        left_img = image.clone()
+        left_img[:, :, :, mid:] = 0
+        right_img = image.clone()
+        right_img[:, :, :, :mid] = 0
+        guide_left = _blur(left_img)
+        guide_right = _blur(right_img)
+
+    phase1_end = n_read // 3
+    phase2_end = 2 * n_read // 3
+
+    read_total = 0
+    for t, loc in enumerate(read_locs):
+        grid = loc.view(B, 1, 1, 2)
+        if scaffold_weight > 0 and t < phase1_end:
+            guide = scaffold_weight * guide_left + (1 - scaffold_weight) * guide_full
+        elif scaffold_weight > 0 and t < phase2_end:
+            guide = scaffold_weight * guide_right + (1 - scaffold_weight) * guide_full
+        else:
+            guide = guide_full
+        sampled = F.grid_sample(guide, grid, align_corners=True, padding_mode='zeros')
+        read_total = read_total + sampled.mean()
+    read_loss = -read_total / n_read
+
+    return scan_loss, read_loss
+
+
 # --- Fixation Diversity Loss ---
 
 def fixation_diversity_loss(locations, sigma=0.1, vy=1.0):
@@ -137,6 +205,21 @@ def fixation_diversity_loss(locations, sigma=0.1, vy=1.0):
     # Zero out self-pairs (distance of a point to itself is always 0)
     mask = 1 - torch.eye(T, device=locs.device)
     return (repulsion * mask).mean()
+
+
+# --- Fixation Edge Loss (bigrams only) ---
+
+def fixation_edge_loss(locations):
+    """Penalize fixations near the horizontal center of the image.
+
+    In [-1,1] coords: center=0, edges=±1.
+    Loss = mean(1 - |x|): 0 at edges, 1 at center.
+    Gives a soft gradient pushing fixations toward the left and right
+    sides of the image — useful for bigrams where the model needs to
+    visit both letters' outer edges, not just the inner halves.
+    """
+    locs = torch.stack(locations[1:], dim=1)  # (B, T, 2)
+    return (1 - locs[:, :, 0].abs()).mean()
 
 
 # --- Fixation Hit Rate (diagnostic) ---

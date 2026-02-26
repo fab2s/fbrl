@@ -8,14 +8,21 @@ import torch.nn.functional as F
 class GlimpseSensor(nn.Module):
     """Extracts multi-resolution patches from the RAW IMAGE at a given location.
 
-    Strict foveal-only field of view: each glimpse sees ONLY patch_size x patch_size
-    raw pixels. No peripheral context. Default patch_size=12, n_scales=1:
+    Strict foveal-only field of view: each glimpse sees ONLY patch_h x patch_w
+    raw pixels. No peripheral context. patch_size can be int (square) or (h, w)
+    tuple (rectangular — e.g. (12, 18) for wide scan patches).
+    Default patch_size=12, n_scales=1:
       Scale 1: 12x12 pixels (0.9% of 128x128 image)
     With 10 glimpses: 8.8% max coverage.
     """
     def __init__(self, patch_size=12, n_scales=1, latent_dim=256):
         super().__init__()
-        self.patch_size = patch_size
+        if isinstance(patch_size, int):
+            self.patch_h = patch_size
+            self.patch_w = patch_size
+        else:
+            self.patch_h, self.patch_w = patch_size
+        self.patch_size = patch_size  # keep original for serialization
         # Each scale doubles the crop area: scale 0 = 1x, scale 1 = 2x, etc.
         # With n_scales=1, only the raw foveal patch is used (no peripheral).
         self.scales = [2**i for i in range(n_scales)]
@@ -75,19 +82,19 @@ class GlimpseSensor(nn.Module):
         """Build a sampling grid for grid_sample, centered on `location`.
 
         Coordinates are in [-1, 1] (PyTorch grid_sample convention).
-        The grid covers patch_size x patch_size pixels, scaled by `scale`.
+        The grid covers patch_h x patch_w pixels, scaled by `scale`.
         Adding `location` shifts the grid to the fixation point.
         """
         B = location.shape[0]
         # Convert patch extent from pixels to normalized [-1, 1] coords
-        delta_h = scale * self.patch_size / H
-        delta_w = scale * self.patch_size / W
+        delta_h = scale * self.patch_h / H
+        delta_w = scale * self.patch_w / W
 
-        grid_y = torch.linspace(-delta_h, delta_h, self.patch_size, device=location.device)
-        grid_x = torch.linspace(-delta_w, delta_w, self.patch_size, device=location.device)
+        grid_y = torch.linspace(-delta_h, delta_h, self.patch_h, device=location.device)
+        grid_x = torch.linspace(-delta_w, delta_w, self.patch_w, device=location.device)
         grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing='ij')
 
-        # grid shape: (1, patch_size, patch_size, 2) — a centered patch
+        # grid shape: (1, patch_h, patch_w, 2) — a centered patch
         grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0).expand(B, -1, -1, -1)
         # Shift the centered grid to the fixation location
         loc = location.view(B, 1, 1, 2)
@@ -251,27 +258,27 @@ class VisionModel(nn.Module):
 # --- Bigram (Letter-Pair) Reading ---
 
 class BigramDecoder(nn.Module):
-    """Generates 192x128 images from concatenated readout states.
+    """Generates 128x128 images from concatenated readout states.
 
     Input: concatenated readout states (2 * latent_dim = 512 by default).
-    FC projects to 128 channels x 32(H) x 48(W), then two stride-2 deconvs.
-    Output: (B, 1, 128, 192).
+    FC projects to 128 channels x 32x32, then two stride-2 deconvs.
+    Output: (B, 1, 128, 128).
     """
     def __init__(self, latent_dim=256, n_positions=2):
         super().__init__()
         input_dim = latent_dim * n_positions  # 512 by default
-        # FC expands to spatial feature map: 128 channels x 32(H) x 48(W)
-        # Two stride-2 deconvs: 32x48 -> 64x96 -> 128x192
+        # FC expands to spatial feature map: 128 channels x 32x32
+        # Two stride-2 deconvs: 32x32 -> 64x64 -> 128x128
         self.fc = nn.Sequential(
-            nn.Linear(input_dim, 128 * 32 * 48),
+            nn.Linear(input_dim, 128 * 32 * 32),
             nn.ReLU(),
         )
-        # Transposed convolutions: 32x48 -> 64x96 -> 128x192
+        # Transposed convolutions: 32x32 -> 64x64 -> 128x128
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # 32x48 -> 64x96
+            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # 32->64
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 5, stride=2, padding=2, output_padding=1),  # 64x96 -> 128x192
+            nn.ConvTranspose2d(64, 32, 5, stride=2, padding=2, output_padding=1),  # 64->128
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Conv2d(32, 1, 3, padding=1),  # final 1-channel output
@@ -279,15 +286,15 @@ class BigramDecoder(nn.Module):
         )
 
     def forward(self, readout_states):
-        """Decode concatenated readout states into a 192x128 image.
+        """Decode concatenated readout states into a 128x128 image.
 
         Args:
             readout_states: (B, n_positions * latent_dim) — concatenated readout hidden states
         Returns:
-            (B, 1, 128, 192) reconstructed bigram image
+            (B, 1, 128, 128) reconstructed bigram image
         """
         x = self.fc(readout_states)
-        x = x.view(-1, 128, 32, 48)  # (B, 128, H=32, W=48)
+        x = x.view(-1, 128, 32, 32)  # (B, 128, 32, 32)
         return self.deconv(x)
 
 
@@ -343,34 +350,47 @@ class CrossAttentionReadout(nn.Module):
 
 
 class BigramVisionModel(nn.Module):
-    """Full bigram model: encoder (attention) + cross-attention readout + decoder + classifiers.
+    """Full bigram model with two-phase scan/read attention.
 
-    Two-phase architecture:
-      Phase 1 (visual GRU):  saccade planning — 15 glimpses, builds a history of hidden states
-      Phase 2 (cross-attention): position tokens query the glimpse history in parallel
+    Phase 1 — SCAN (wide rectangular patches, coarse spatial map):
+      scan_sensor extracts 12h x 18w patches. GRU builds a spatial map of
+      where letters are. Loss: content guide (full image) + edge loss.
 
-    The cross-attention readout replaces the earlier sequential GRU readout.
-    Both position tokens attend independently to the full glimpse history, so
-    there's no asymmetry between positions. Each token learns which glimpses
-    carry information relevant to its letter (left token -> left-fixation
-    glimpses, right token -> right-fixation glimpses).
+    Phase 2 — READ (focused square patches, precise letter identification):
+      read_sensor extracts 12x12 patches. GRU continues from scan's final
+      hidden state, carrying spatial knowledge. Loss: temporal scaffold.
 
-    Classification gradients flow back into the visual GRU (no detach). Stability
-    comes from separate param groups: the encoder gets 10x lower lr than the
-    readout path.
+    CrossAttentionReadout attends to READ states only → classify + reconstruct.
+
+    Same GRU + location_head for both phases — different visual inputs
+    naturally produce different saccade patterns.
     """
-    def __init__(self, n_classes=26, latent_dim=256, n_glimpses=15,
-                 patch_size=12, n_scales=1, n_positions=2):
+    def __init__(self, n_classes=26, latent_dim=256,
+                 n_scan_glimpses=5, n_read_glimpses=6,
+                 scan_patch_size=(12, 18), read_patch_size=12,
+                 n_scales=1, n_positions=2):
         super().__init__()
         self.n_positions = n_positions
         self.latent_dim = latent_dim
-        self.encoder = VisualAttentionEncoder(
-            n_glimpses=n_glimpses, patch_size=patch_size,
-            n_scales=n_scales, latent_dim=latent_dim,
+        self.n_scan_glimpses = n_scan_glimpses
+        self.n_read_glimpses = n_read_glimpses
+
+        # Two sensors: wide scan, focused read
+        self.scan_sensor = GlimpseSensor(
+            patch_size=scan_patch_size, n_scales=n_scales, latent_dim=latent_dim,
         )
+        self.read_sensor = GlimpseSensor(
+            patch_size=read_patch_size, n_scales=n_scales, latent_dim=latent_dim,
+        )
+
+        # Shared GRU controller for both phases
+        self.controller = AttentionController(
+            glimpse_dim=latent_dim, hidden_dim=latent_dim, latent_dim=latent_dim,
+        )
+
         self.decoder = BigramDecoder(latent_dim=latent_dim, n_positions=n_positions)
 
-        # Cross-attention readout — position tokens query full glimpse history
+        # Cross-attention readout — position tokens query READ states only
         self.readout = CrossAttentionReadout(
             latent_dim=latent_dim, n_positions=n_positions,
         )
@@ -381,44 +401,43 @@ class BigramVisionModel(nn.Module):
         ])
 
     def forward(self, img):
-        """Forward pass with cross-attention readout.
+        """Forward pass with two-phase scan/read attention.
 
         Args:
-            img: (B, 1, 128, 192) bigram input image
+            img: (B, 1, 128, 128) bigram input image
         Returns:
-            recon: (B, 1, 128, 192) reconstructed image
+            recon: (B, 1, 128, 128) reconstructed image
             logits_list: [logits_pos1, logits_pos2] each (B, 26)
-            locations: list of (B, 2) fixation coords (visual phase only)
+            locations: list of (B, 2) fixation coords (all phases)
             readout_states: (B, n_positions, latent_dim) per-position hidden states
         """
         B = img.shape[0]
-        controller = self.encoder.attention_controller
-        sensor = self.encoder.glimpse_sensor
+        h = self.controller.h0.expand(B, -1).contiguous()
+        location = torch.zeros(B, 2, device=img.device)  # center start
+        all_locations = [location]
 
-        # --- Phase 1: Visual glimpses (visual GRU — saccade planning) ---
-        # Collect ALL intermediate hidden states for cross-attention readout.
-        # The visual GRU scans the image like an eye sweep; the readout then
-        # goes back and selectively attends to relevant glimpses.
-        h = controller.h0.expand(B, -1).contiguous()
-        # Start at left-center: natural reading start position.
-        location = torch.tensor([[-0.3, 0.0]], device=img.device).expand(B, -1)
-        locations = [location]
-        glimpse_states = []
+        # --- Phase 1: SCAN (wide patches, build spatial map) ---
+        for t in range(self.n_scan_glimpses):
+            glimpse = self.scan_sensor(img, location)
+            h = self.controller.gru(glimpse, h)
+            location = torch.tanh(self.controller.location_head(h))
+            all_locations.append(location)
 
-        for t in range(self.encoder.n_glimpses):
-            glimpse = sensor(img, location)
-            h = controller.gru(glimpse, h)
-            location = torch.tanh(controller.location_head(h))
-            locations.append(location)
-            glimpse_states.append(h)
+        # --- Phase 2: READ (focused patches, precise identification) ---
+        # h carries forward from scan — spatial knowledge persists
+        read_states = []
+        for t in range(self.n_read_glimpses):
+            glimpse = self.read_sensor(img, location)
+            h = self.controller.gru(glimpse, h)
+            location = torch.tanh(self.controller.location_head(h))
+            all_locations.append(location)
+            read_states.append(h)
 
-        # Stack into (B, T, latent_dim) for cross-attention
-        glimpse_states = torch.stack(glimpse_states, dim=1)
+        # Stack READ states for cross-attention (B, n_read, latent_dim)
+        read_states = torch.stack(read_states, dim=1)
 
-        # --- Phase 2: Cross-attention readout ---
-        # Both position tokens attend to the full glimpse history in parallel.
-        # No sequential dependency — pos1 and pos2 get equal access.
-        readout_states = self.readout(glimpse_states)  # (B, n_positions, latent_dim)
+        # --- Cross-attention readout (READ states only) ---
+        readout_states = self.readout(read_states)  # (B, n_positions, latent_dim)
 
         # --- Classify each position ---
         logits_list = []
@@ -429,4 +448,4 @@ class BigramVisionModel(nn.Module):
         concat = readout_states.view(B, -1)  # (B, n_positions * latent_dim)
         recon = self.decoder(concat)
 
-        return recon, logits_list, locations, readout_states
+        return recon, logits_list, all_locations, readout_states

@@ -6,6 +6,14 @@ from fbrl.evaluate import (test_model, visualize_model, generate_atlas, test_big
                            generate_bigram_atlas)
 
 
+def _parse_patch_size(s):
+    """Parse patch size: '12' -> 12 (int), '12,18' -> (12, 18) (tuple)."""
+    parts = s.split(',')
+    if len(parts) == 1:
+        return int(parts[0])
+    return tuple(int(x) for x in parts)
+
+
 def _parse_letters(letters_str):
     if letters_str == 'A-Z':
         return [chr(i) for i in range(65, 91)]
@@ -118,8 +126,14 @@ if __name__ == '__main__':
     train_bi_parser.add_argument('--epochs', type=int, default=100)
     train_bi_parser.add_argument('--save_dir', default='bigram_models')
     train_bi_parser.add_argument('--checkpoint_interval', type=int, default=10)
-    train_bi_parser.add_argument('--n_glimpses', type=int, default=15)
-    train_bi_parser.add_argument('--patch_size', type=int, default=12)
+    train_bi_parser.add_argument('--n_scan_glimpses', type=int, default=5,
+                                 help='Number of scan-phase glimpses (wide patches)')
+    train_bi_parser.add_argument('--n_read_glimpses', type=int, default=6,
+                                 help='Number of read-phase glimpses (focused patches)')
+    train_bi_parser.add_argument('--scan_patch_size', default='12,18',
+                                 help='Scan patch size as H,W (default: 12,18)')
+    train_bi_parser.add_argument('--read_patch_size', type=int, default=12,
+                                 help='Read patch size (square, default: 12)')
     train_bi_parser.add_argument('--n_scales', type=int, default=1)
     train_bi_parser.add_argument('--device', default='auto',
                                  choices=['auto', 'cpu', 'cuda'])
@@ -127,11 +141,15 @@ if __name__ == '__main__':
     train_bi_parser.add_argument('--diversity_weight', type=float, default=1.0)
     train_bi_parser.add_argument('--diversity_sigma', type=float, default=0.1)
     train_bi_parser.add_argument('--guide_weight', type=float, default=8.0)
+    train_bi_parser.add_argument('--scan_guide_weight', type=float, default=None,
+                                 help='Scan-phase guide weight (defaults to --guide_weight)')
     train_bi_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
     train_bi_parser.add_argument('--batch_size', type=int, default=32)
-    train_bi_parser.add_argument('--scaffold_epochs', type=int, default=200,
-                                 help='Epochs to anneal temporal attention scaffold '
-                                      '(0=disabled)')
+    train_bi_parser.add_argument('--scaffold_epochs', type=int, default=None,
+                                 help='Explicit scaffold epoch count (overrides --scaffold_ratio)')
+    train_bi_parser.add_argument('--scaffold_ratio', type=float, default=0.67,
+                                 help='Scaffold phase as fraction of total epochs '
+                                      '(default 0.67 = 67%%). Ignored if --scaffold_epochs set.')
     train_bi_parser.add_argument('--scaffold_floor', type=float, default=0.0,
                                  help='Minimum scaffold weight after annealing '
                                       '(0.05 keeps gentle spatial pressure)')
@@ -141,12 +159,16 @@ if __name__ == '__main__':
                                  help='Weight for masked-half auxiliary loss (0=disabled)')
     train_bi_parser.add_argument('--diversity_vy', type=float, default=1.0,
                                  help='Vertical diversity multiplier (1.5 = 50%% stronger vertical repulsion)')
+    train_bi_parser.add_argument('--edge_weight', type=float, default=0.0,
+                                 help='Edge exploration weight — pushes scan fixations toward image sides (0=off)')
 
     chk_bi_parser = subparsers.add_parser('check_bigram_attention')
     chk_bi_parser.add_argument('--data_dir', required=True)
     chk_bi_parser.add_argument('--n_epochs', type=int, default=10)
-    chk_bi_parser.add_argument('--n_glimpses', type=int, default=15)
-    chk_bi_parser.add_argument('--patch_size', type=int, default=12)
+    chk_bi_parser.add_argument('--n_scan_glimpses', type=int, default=5)
+    chk_bi_parser.add_argument('--n_read_glimpses', type=int, default=6)
+    chk_bi_parser.add_argument('--scan_patch_size', default='12,18')
+    chk_bi_parser.add_argument('--read_patch_size', type=int, default=12)
     chk_bi_parser.add_argument('--n_scales', type=int, default=1)
     chk_bi_parser.add_argument('--device', default='auto',
                                 choices=['auto', 'cpu', 'cuda'])
@@ -239,24 +261,38 @@ if __name__ == '__main__':
         generate_bigram_test(args.output_dir, font_spec=args.fonts)
 
     elif args.command == 'train_bigrams':
+        # Resolve scaffold duration: explicit --scaffold_epochs wins, else use ratio
+        scaffold_ep = (args.scaffold_epochs if args.scaffold_epochs is not None
+                       else int(args.scaffold_ratio * args.epochs))
+        scan_ps = _parse_patch_size(args.scan_patch_size)
         train_bigram_model(args.data_dir, args.epochs, args.resume, args.save_dir,
-                           args.checkpoint_interval, n_glimpses=args.n_glimpses,
-                           patch_size=args.patch_size, n_scales=args.n_scales,
+                           args.checkpoint_interval,
+                           n_scan_glimpses=args.n_scan_glimpses,
+                           n_read_glimpses=args.n_read_glimpses,
+                           scan_patch_size=scan_ps,
+                           read_patch_size=args.read_patch_size,
+                           n_scales=args.n_scales,
                            device=args.device,
                            diversity_weight=args.diversity_weight,
                            diversity_sigma=args.diversity_sigma,
                            diversity_vy=args.diversity_vy,
                            guide_weight=args.guide_weight,
+                           scan_guide_weight=args.scan_guide_weight,
                            blur_sigma_ratio=args.blur_sigma_ratio,
                            batch_size=args.batch_size,
-                           scaffold_epochs=args.scaffold_epochs,
+                           scaffold_epochs=scaffold_ep,
                            scaffold_floor=args.scaffold_floor,
                            transfer_from=args.transfer,
-                           mask_weight=args.mask_weight)
+                           mask_weight=args.mask_weight,
+                           edge_weight=args.edge_weight)
 
     elif args.command == 'check_bigram_attention':
+        scan_ps = _parse_patch_size(args.scan_patch_size)
         check_bigram_attention(args.data_dir, n_epochs=args.n_epochs,
-                               n_glimpses=args.n_glimpses, patch_size=args.patch_size,
+                               n_scan_glimpses=args.n_scan_glimpses,
+                               n_read_glimpses=args.n_read_glimpses,
+                               scan_patch_size=scan_ps,
+                               read_patch_size=args.read_patch_size,
                                n_scales=args.n_scales, device=args.device,
                                guide_weight=args.guide_weight,
                                blur_sigma_ratio=args.blur_sigma_ratio,
