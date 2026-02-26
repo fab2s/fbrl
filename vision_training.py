@@ -1,8 +1,8 @@
 import argparse
 
-from fbrl.data import generate_dataset, generate_test
-from fbrl.train import train_model, check_attention
-from fbrl.evaluate import test_model, visualize_model, generate_atlas
+from fbrl.data import generate_dataset, generate_test, generate_bigram_dataset, generate_bigram_test
+from fbrl.train import train_model, check_attention, train_bigram_model, check_bigram_attention
+from fbrl.evaluate import test_model, visualize_model, generate_atlas, test_bigram_model
 
 
 def _parse_letters(letters_str):
@@ -95,6 +95,56 @@ if __name__ == '__main__':
     compress_parser.add_argument('--input', required=True)
     compress_parser.add_argument('--output', required=True)
 
+    # --- Bigram subcommands ---
+    gen_bi_parser = subparsers.add_parser('generate_bigrams')
+    gen_bi_parser.add_argument('--num_variants', type=int, default=20)
+    gen_bi_parser.add_argument('--noise_level', type=float, default=0.01)
+    gen_bi_parser.add_argument('--output_dir', default='data/bigrams')
+    gen_bi_parser.add_argument('--fonts', default='default',
+                               help='Font spec: "all", "default", or comma-separated names')
+
+    gen_bi_test_parser = subparsers.add_parser('generate_bigrams_test')
+    gen_bi_test_parser.add_argument('--output_dir', default='data/bigram_test')
+    gen_bi_test_parser.add_argument('--fonts', default='default',
+                                    help='Font spec: "all", "default", or comma-separated names')
+
+    train_bi_parser = subparsers.add_parser('train_bigrams')
+    train_bi_parser.add_argument('--data_dir', required=True)
+    train_bi_parser.add_argument('--epochs', type=int, default=100)
+    train_bi_parser.add_argument('--save_dir', default='bigram_models')
+    train_bi_parser.add_argument('--checkpoint_interval', type=int, default=10)
+    train_bi_parser.add_argument('--n_glimpses', type=int, default=15)
+    train_bi_parser.add_argument('--patch_size', type=int, default=12)
+    train_bi_parser.add_argument('--n_scales', type=int, default=1)
+    train_bi_parser.add_argument('--device', default='auto',
+                                 choices=['auto', 'cpu', 'cuda'])
+    train_bi_parser.add_argument('--resume', default=None)
+    train_bi_parser.add_argument('--diversity_weight', type=float, default=1.0)
+    train_bi_parser.add_argument('--diversity_sigma', type=float, default=0.1)
+    train_bi_parser.add_argument('--guide_weight', type=float, default=8.0)
+    train_bi_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
+    train_bi_parser.add_argument('--batch_size', type=int, default=32)
+
+    chk_bi_parser = subparsers.add_parser('check_bigram_attention')
+    chk_bi_parser.add_argument('--data_dir', required=True)
+    chk_bi_parser.add_argument('--n_epochs', type=int, default=10)
+    chk_bi_parser.add_argument('--n_glimpses', type=int, default=15)
+    chk_bi_parser.add_argument('--patch_size', type=int, default=12)
+    chk_bi_parser.add_argument('--n_scales', type=int, default=1)
+    chk_bi_parser.add_argument('--device', default='auto',
+                                choices=['auto', 'cpu', 'cuda'])
+    chk_bi_parser.add_argument('--guide_weight', type=float, default=8.0)
+    chk_bi_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
+    chk_bi_parser.add_argument('--diversity_weight', type=float, default=1.0)
+    chk_bi_parser.add_argument('--diversity_sigma', type=float, default=0.1)
+
+    test_bi_parser = subparsers.add_parser('test_bigrams')
+    test_bi_parser.add_argument('--model_dir', required=True)
+    test_bi_parser.add_argument('--test_data_dir', required=True)
+    test_bi_parser.add_argument('--output_dir', default='bigram_results')
+    test_bi_parser.add_argument('--device', default='auto',
+                                 choices=['auto', 'cpu', 'cuda'])
+
     args = parser.parse_args()
 
     if args.command == 'generate':
@@ -151,3 +201,35 @@ if __name__ == '__main__':
         orig_mb = os.path.getsize(args.input) / 1048576
         comp_mb = os.path.getsize(args.output) / 1048576
         print(f"fp16+gzip: {orig_mb:.0f}MB -> {comp_mb:.0f}MB ({comp_mb/orig_mb:.0%})")
+
+    # --- Bigram commands ---
+    elif args.command == 'generate_bigrams':
+        generate_bigram_dataset(args.output_dir, args.noise_level, args.num_variants,
+                                font_spec=args.fonts)
+
+    elif args.command == 'generate_bigrams_test':
+        generate_bigram_test(args.output_dir, font_spec=args.fonts)
+
+    elif args.command == 'train_bigrams':
+        train_bigram_model(args.data_dir, args.epochs, args.resume, args.save_dir,
+                           args.checkpoint_interval, n_glimpses=args.n_glimpses,
+                           patch_size=args.patch_size, n_scales=args.n_scales,
+                           device=args.device,
+                           diversity_weight=args.diversity_weight,
+                           diversity_sigma=args.diversity_sigma,
+                           guide_weight=args.guide_weight,
+                           blur_sigma_ratio=args.blur_sigma_ratio,
+                           batch_size=args.batch_size)
+
+    elif args.command == 'check_bigram_attention':
+        check_bigram_attention(args.data_dir, n_epochs=args.n_epochs,
+                               n_glimpses=args.n_glimpses, patch_size=args.patch_size,
+                               n_scales=args.n_scales, device=args.device,
+                               guide_weight=args.guide_weight,
+                               blur_sigma_ratio=args.blur_sigma_ratio,
+                               diversity_weight=args.diversity_weight,
+                               diversity_sigma=args.diversity_sigma)
+
+    elif args.command == 'test_bigrams':
+        test_bigram_model(args.model_dir, args.test_data_dir, args.output_dir,
+                          device=args.device)

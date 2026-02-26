@@ -8,8 +8,8 @@ import os
 import time
 
 from fbrl import _resolve_device
-from fbrl.data import LetterDataset
-from fbrl.model import VisionModel
+from fbrl.data import LetterDataset, BigramDataset
+from fbrl.model import VisionModel, BigramVisionModel
 from fbrl.losses import attention_content_loss, fixation_diversity_loss, fixation_hit_rate
 
 
@@ -341,6 +341,350 @@ def check_attention(data_dir, n_epochs=10, n_glimpses=10, patch_size=12,
             case_float = case_idx.float().unsqueeze(1)
 
             _, _, _, locations, _ = model(img, case_float)
+
+            attn_loss = attention_content_loss(
+                clean, locations, blur_sigma_ratio=blur_sigma_ratio,
+            )
+            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma)
+            loss = guide_weight * attn_loss + diversity_weight * div_loss
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
+
+            with torch.no_grad():
+                hr, _ = fixation_hit_rate(clean, locations)
+                total_hr += hr
+                total_attn += attn_loss.item()
+            n += 1
+
+        avg_hr = total_hr / n
+        avg_attn = total_attn / n
+        hit_rates.append(avg_hr)
+        print(f"  Epoch {epoch+1}/{n_epochs}: Hit {avg_hr:.0%}  Attn {avg_attn:.4f}")
+
+    initial_hr = hit_rates[0]
+    final_hr = hit_rates[-1]
+    peak_hr = max(hit_rates)
+    improved = peak_hr > initial_hr + 0.05
+
+    print()
+    if peak_hr >= 0.20:
+        print(f"PASS: Hit rate {initial_hr:.0%} -> {final_hr:.0%} "
+              f"(peak {peak_hr:.0%}). Attention guide is working.")
+        return True
+    elif improved:
+        print(f"WEAK: Hit rate {initial_hr:.0%} -> {final_hr:.0%} "
+              f"(peak {peak_hr:.0%}). Improving but low — consider "
+              f"increasing guide_weight (current: {guide_weight}).")
+        return True
+    else:
+        print(f"FAIL: Hit rate {initial_hr:.0%} -> {final_hr:.0%} "
+              f"(peak {peak_hr:.0%}). Attention guide has no effect. "
+              f"Increase blur_sigma_ratio (current: {blur_sigma_ratio}) "
+              f"or guide_weight (current: {guide_weight}).")
+        return False
+
+
+# --- Bigram Training ---
+
+def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_models',
+                       checkpoint_interval=10, n_glimpses=15, patch_size=12,
+                       n_scales=1, device='auto',
+                       diversity_weight=1.0, diversity_sigma=0.1,
+                       guide_weight=8.0, blur_sigma_ratio=0.16,
+                       batch_size=32):
+    """Train a BigramVisionModel on 256x128 bigram images.
+
+    Loss = recon + letter1_cls + letter2_cls + guide_weight * attn + diversity * div
+    No case classifier, no recode loss (lowercase only).
+    """
+    device = _resolve_device(device)
+    print(f"Bigram training on: {device}")
+    print(f"Attention: guide_weight={guide_weight}  blur_sigma_ratio={blur_sigma_ratio}  "
+          f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}  "
+          f"batch_size={batch_size}  n_glimpses={n_glimpses}")
+
+    os.makedirs(save_dir, exist_ok=True)
+    dataset = BigramDataset(data_dir)
+    use_cuda = device.type == 'cuda'
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=use_cuda)
+
+    model = BigramVisionModel(
+        n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
+    ).to(device)
+
+    start_epoch = 0
+    losses_recon = []
+    losses_pos1_cls = []
+    losses_pos2_cls = []
+    losses_attn = []
+    losses_div = []
+    hist_hit_rate = []
+    hist_hit_intensity = []
+
+    if resume:
+        checkpoint = torch.load(resume, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint['model'], strict=False)
+        start_epoch = checkpoint['epoch'] + 1
+        if 'losses' in checkpoint:
+            h = checkpoint['losses']
+            losses_recon = h.get('recon', [])
+            losses_pos1_cls = h.get('pos1_cls', [])
+            losses_pos2_cls = h.get('pos2_cls', [])
+            losses_attn = h.get('attn', [])
+            losses_div = h.get('div', [])
+            hist_hit_rate = h.get('hit_rate', [])
+            hist_hit_intensity = h.get('hit_intensity', [])
+        print(f"Resumed from epoch {start_epoch} ({len(losses_pos1_cls)} prior epochs of history)")
+
+    # Separate param groups: encoder (visual GRU + glimpse sensor) gets 10x lower lr
+    # than the readout path (readout GRU + classifiers + decoder + readout tokens).
+    # This lets classification gradients teach the encoder what to look for, while
+    # keeping the saccade controller stable (prevents the epoch ~39 divergence).
+    encoder_params = set(model.encoder.parameters())
+    readout_params = [p for p in model.parameters() if p not in encoder_params]
+    optimizer = optim.Adam([
+        {'params': list(model.encoder.parameters()), 'lr': 0.0001},  # 10x lower
+        {'params': readout_params, 'lr': 0.001},
+    ])
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    criterion = torch.nn.MSELoss()
+
+    print(f"Param groups: encoder lr=0.0001, readout lr=0.001")
+
+    end_epoch = start_epoch + epochs
+    train_start = time.time()
+
+    log_path = os.path.join(save_dir, 'training.log')
+    log_file = open(log_path, 'a')
+    if start_epoch == 0:
+        log_file.write("epoch  recon    pos1     pos2     attn     div      hit      lr_enc   lr_read\n")
+        log_file.write("-" * 80 + "\n")
+    log_file.flush()
+
+    for epoch in range(start_epoch, end_epoch):
+        epoch_start = time.time()
+        total_loss_recon = 0
+        total_loss_pos1 = 0
+        total_loss_pos2 = 0
+        total_loss_attn = 0
+        total_loss_div = 0
+        total_hit_rate = 0
+        total_hit_intensity = 0
+        total_pos1_correct = 0
+        total_pos2_correct = 0
+        total_samples = 0
+
+        for img, clean, letter1s, letter2s, _bigrams, _fonts in dataloader:
+            img = img.to(device)
+            clean = clean.to(device)
+
+            # Labels: a=0 .. z=25
+            idx1 = torch.tensor(
+                [ord(l) - ord('a') for l in letter1s], device=device,
+            )
+            idx2 = torch.tensor(
+                [ord(l) - ord('a') for l in letter2s], device=device,
+            )
+
+            # Forward
+            recon, logits_list, locations, _readout_states = model(img)
+
+            # Losses
+            recon_loss = criterion(recon, img)
+            pos1_cls_loss = F.cross_entropy(logits_list[0], idx1)
+            pos2_cls_loss = F.cross_entropy(logits_list[1], idx2)
+            attn_loss = attention_content_loss(clean, locations, blur_sigma_ratio=blur_sigma_ratio)
+            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma)
+
+            total_loss = (recon_loss + pos1_cls_loss + pos2_cls_loss
+                          + guide_weight * attn_loss
+                          + diversity_weight * div_loss)
+
+            optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
+
+            total_loss_recon += recon_loss.item()
+            total_loss_pos1 += pos1_cls_loss.item()
+            total_loss_pos2 += pos2_cls_loss.item()
+            total_loss_attn += attn_loss.item()
+            total_loss_div += div_loss.item()
+
+            # Accuracy tracking
+            with torch.no_grad():
+                total_pos1_correct += (logits_list[0].argmax(1) == idx1).sum().item()
+                total_pos2_correct += (logits_list[1].argmax(1) == idx2).sum().item()
+                total_samples += img.shape[0]
+                hr, hi = fixation_hit_rate(clean, locations)
+                total_hit_rate += hr
+                total_hit_intensity += hi
+
+        n = len(dataloader)
+        avg_recon = total_loss_recon / n
+        avg_pos1 = total_loss_pos1 / n
+        avg_pos2 = total_loss_pos2 / n
+        avg_attn = total_loss_attn / n
+        avg_div = total_loss_div / n
+        avg_hr = total_hit_rate / n
+        avg_hi = total_hit_intensity / n
+        acc1 = total_pos1_correct / total_samples if total_samples > 0 else 0
+        acc2 = total_pos2_correct / total_samples if total_samples > 0 else 0
+
+        losses_recon.append(avg_recon)
+        losses_pos1_cls.append(avg_pos1)
+        losses_pos2_cls.append(avg_pos2)
+        losses_attn.append(avg_attn)
+        losses_div.append(avg_div)
+        hist_hit_rate.append(avg_hr)
+        hist_hit_intensity.append(avg_hi)
+
+        epoch_time = time.time() - epoch_start
+        elapsed = time.time() - train_start
+        done = epoch - start_epoch + 1
+        remaining = epochs - done
+        eta_sec = remaining * (elapsed / done)
+        eta_min, eta_s = divmod(int(eta_sec), 60)
+
+        lrs = scheduler.get_last_lr()
+        lr_enc = lrs[0]
+        lr_read = lrs[1] if len(lrs) > 1 else lrs[0]
+        print(f"Epoch {epoch+1}/{end_epoch}: "
+              f"Recon {avg_recon:.4f}  Pos1 {avg_pos1:.4f} ({acc1:.0%})  "
+              f"Pos2 {avg_pos2:.4f} ({acc2:.0%})  Attn {avg_attn:.4f}  "
+              f"Div {avg_div:.4f}  Hit {avg_hr:.0%}  "
+              f"lr {lr_enc:.6f}/{lr_read:.6f}  "
+              f"[{epoch_time:.1f}s  ETA {eta_min}m{eta_s:02d}s]")
+
+        log_file.write(f"{epoch+1:>5d}  {avg_recon:.4f}  {avg_pos1:.4f}  "
+                       f"{avg_pos2:.4f}  {avg_attn:.4f}  {avg_div:.4f}  "
+                       f"{avg_hr:.4f}  {lr_enc:.6f}  {lr_read:.6f}\n")
+        log_file.flush()
+
+        scheduler.step()
+
+        if (epoch + 1 - start_epoch) % checkpoint_interval == 0:
+            _save_bigram_checkpoint(model, epoch, n_glimpses, patch_size, n_scales,
+                                   losses_recon, losses_pos1_cls, losses_pos2_cls,
+                                   losses_attn, losses_div, hist_hit_rate, hist_hit_intensity,
+                                   os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth'))
+
+    log_file.close()
+    print(f"Training log saved to {log_path}")
+
+    _save_bigram_checkpoint(model, end_epoch - 1, n_glimpses, patch_size, n_scales,
+                            losses_recon, losses_pos1_cls, losses_pos2_cls,
+                            losses_attn, losses_div, hist_hit_rate, hist_hit_intensity,
+                            os.path.join(save_dir, 'model_final.pth'))
+
+    # Training metrics graph (5 subplots — no case/recode for bigrams)
+    epochs_x = range(end_epoch - len(losses_recon) + 1, end_epoch + 1)
+    fig, axes = plt.subplots(5, 1, figsize=(8, 12), sharex=True)
+
+    axes[0].plot(epochs_x, losses_recon, label='Recon', color='tab:blue')
+    axes[0].set_ylabel('MSE')
+    axes[0].legend(loc='upper right')
+    axes[0].set_title('Reconstruction (256x128)')
+
+    axes[1].plot(epochs_x, losses_pos1_cls, label='Pos 1', color='tab:red')
+    axes[1].plot(epochs_x, losses_pos2_cls, label='Pos 2', color='tab:orange',
+                 linestyle='--')
+    axes[1].axhline(y=np.log(26), color='gray', linestyle='--',
+                    label=f'Random ({np.log(26):.1f})')
+    axes[1].set_ylabel('Cross-Entropy')
+    axes[1].legend(loc='upper right')
+    axes[1].set_title('Letter Classification (26-class, per position)')
+
+    axes[2].plot(epochs_x, losses_attn, label='Guide', color='tab:green')
+    axes[2].set_ylabel('Loss')
+    axes[2].legend(loc='upper right')
+    axes[2].set_title('Attention guide (lower = fixations on letters)')
+
+    axes[3].plot(epochs_x, losses_div, label='Diversity', color='tab:orange')
+    axes[3].set_ylabel('Repulsion')
+    axes[3].legend(loc='upper right')
+    axes[3].set_title('Fixation diversity (lower = more spread)')
+
+    axes[4].plot(epochs_x, hist_hit_rate, label='Hit rate', color='tab:purple')
+    axes[4].plot(epochs_x, hist_hit_intensity, label='Intensity',
+                 color='tab:purple', linestyle='--', alpha=0.6)
+    axes[4].set_xlabel('Epoch')
+    axes[4].set_ylabel('Rate / Intensity')
+    axes[4].set_ylim(0, 1)
+    axes[4].legend(loc='upper right')
+    axes[4].set_title('Fixation hit rate (on sharp letter pixels)')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'training_metrics.png'), dpi=150)
+    plt.close()
+
+    total_time = time.time() - train_start
+    total_min, total_s = divmod(int(total_time), 60)
+    print(f"Training complete in {total_min}m{total_s:02d}s. "
+          f"Model and graph saved in {save_dir}")
+
+
+def _save_bigram_checkpoint(model, epoch, n_glimpses, patch_size, n_scales,
+                            losses_recon, losses_pos1, losses_pos2,
+                            losses_attn, losses_div, hist_hr, hist_hi, path):
+    """Save a bigram model checkpoint with model_type marker."""
+    torch.save({
+        'epoch': epoch,
+        'model': {k: v.cpu() for k, v in model.state_dict().items()},
+        'model_type': 'bigram',
+        'n_glimpses': n_glimpses, 'patch_size': patch_size, 'n_scales': n_scales,
+        'image_size': (128, 192),  # (H, W)
+        'losses': {
+            'recon': losses_recon, 'pos1_cls': losses_pos1,
+            'pos2_cls': losses_pos2, 'attn': losses_attn,
+            'div': losses_div,
+            'hit_rate': hist_hr, 'hit_intensity': hist_hi,
+        },
+    }, path)
+
+
+# --- Bigram Attention Pre-Check ---
+
+def check_bigram_attention(data_dir, n_epochs=10, n_glimpses=15, patch_size=12,
+                           n_scales=1, device='auto',
+                           guide_weight=8.0, blur_sigma_ratio=0.16,
+                           diversity_weight=1.0, diversity_sigma=0.1):
+    """Quick diagnostic: can the attention guide pull fixations onto bigram letter content?
+
+    Runs a few epochs with ONLY attention + diversity loss on 256x128 bigram images.
+    """
+    device = _resolve_device(device)
+    dataset = BigramDataset(data_dir)
+    dataloader = DataLoader(dataset, batch_size=32, shuffle=True,
+                            pin_memory=device.type == 'cuda')
+
+    model = BigramVisionModel(
+        n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
+    ).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+    sample_img = dataset[0][0]
+    img_h, img_w = sample_img.shape[1], sample_img.shape[2]
+    effective_sigma = blur_sigma_ratio * min(img_h, img_w)
+
+    print(f"Bigram attention pre-check on {device}")
+    print(f"Image: {img_h}x{img_w}  blur_sigma_ratio={blur_sigma_ratio} "
+          f"-> {effective_sigma:.1f}px  guide_weight={guide_weight}")
+    print(f"Running {n_epochs} diagnostic epochs (attention + diversity only)...")
+
+    hit_rates = []
+    for epoch in range(n_epochs):
+        total_hr = 0
+        total_attn = 0
+        n = 0
+        for img, clean, _l1, _l2, _bigrams, _fonts in dataloader:
+            img = img.to(device)
+            clean = clean.to(device)
+
+            _, _, locations, _ = model(img)
 
             attn_loss = attention_content_loss(
                 clean, locations, blur_sigma_ratio=blur_sigma_ratio,

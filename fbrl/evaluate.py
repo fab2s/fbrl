@@ -9,17 +9,21 @@ import io
 from PIL import Image
 
 from fbrl import _resolve_device
-from fbrl.data import LetterDataset
-from fbrl.model import VisionModel
+from fbrl.data import LetterDataset, BigramDataset
+from fbrl.model import VisionModel, BigramVisionModel
 from fbrl.losses import fixation_hit_rate
 
 
 # --- Model Loading ---
 
 def _load_model(model_dir, device):
-    """Load a trained VisionModel from a checkpoint directory.
+    """Load a trained model from a checkpoint directory.
 
-    Returns (model, n_glimpses) with the model in eval mode on the given device.
+    Detects model_type in checkpoint ('single' or 'bigram') and instantiates
+    the appropriate class.
+
+    Returns (model, n_glimpses, model_type) with the model in eval mode.
+    Backwards compatible: checkpoints without model_type default to 'single'.
     """
     ckpt = torch.load(os.path.join(model_dir, 'model_final.pth'),
                       map_location=device, weights_only=False)
@@ -27,17 +31,25 @@ def _load_model(model_dir, device):
         n_glimpses = ckpt.get('n_glimpses', 10)
         patch_size = ckpt.get('patch_size', 12)
         n_scales = ckpt.get('n_scales', 1)
+        model_type = ckpt.get('model_type', 'single')
         state_dict = ckpt['model']
     else:
         n_glimpses, patch_size, n_scales = 10, 12, 1
+        model_type = 'single'
         state_dict = ckpt
 
-    model = VisionModel(
-        n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
-    ).to(device)
+    if model_type == 'bigram':
+        model = BigramVisionModel(
+            n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
+        ).to(device)
+    else:
+        model = VisionModel(
+            n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
+        ).to(device)
+
     model.load_state_dict(state_dict, strict=False)
     model.eval()
-    return model, n_glimpses
+    return model, n_glimpses, model_type
 
 
 # --- Attention Visualization ---
@@ -94,7 +106,7 @@ def test_model(model_dir, test_data_dir, output_dir='results', device='auto'):
 
     os.makedirs(output_dir, exist_ok=True)
 
-    model, _ = _load_model(model_dir, device)
+    model, _, _model_type = _load_model(model_dir, device)
     dataset = LetterDataset(test_data_dir)
 
     letter_correct = 0
@@ -215,7 +227,7 @@ def visualize_model(model_dir, data_dir, output_dir='visualizations', device='au
 
     os.makedirs(output_dir, exist_ok=True)
 
-    model, _ = _load_model(model_dir, device)
+    model, _, _model_type = _load_model(model_dir, device)
     dataset = LetterDataset(data_dir)
 
     multi_font = len(set(dataset.fonts)) > 1
@@ -611,7 +623,7 @@ def generate_atlas(model_dir, test_data_dir, output_path='data/atlas.html', devi
     device = _resolve_device(device)
     print(f"Generating attention atlas on: {device}")
 
-    model, n_glimpses = _load_model(model_dir, device)
+    model, n_glimpses, _model_type = _load_model(model_dir, device)
     dataset = LetterDataset(test_data_dir)
     font_names = sorted(set(dataset.fonts))
 
@@ -686,3 +698,105 @@ def generate_atlas(model_dir, test_data_dir, output_path='data/atlas.html', devi
     print(f"\nAtlas: {len(letters_list)} letters x {len(font_names)} fonts = {total} samples")
     print(f"Accuracy: {correct}/{total} ({correct/total*100:.1f}%)")
     print(f"Written to {output_path} ({size_kb:.0f} KB)")
+
+
+# --- Bigram Testing ---
+
+def test_bigram_model(model_dir, test_data_dir, output_dir='bigram_results', device='auto'):
+    """Test a trained BigramVisionModel on bigram test data.
+
+    Reports per-position accuracy, both-correct accuracy, and reconstruction MSE.
+    """
+    device = _resolve_device(device)
+    print(f"Bigram testing on: {device}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    model, _, model_type = _load_model(model_dir, device)
+    if model_type != 'bigram':
+        print(f"Warning: checkpoint model_type is '{model_type}', expected 'bigram'")
+
+    dataset = BigramDataset(test_data_dir)
+
+    pos1_correct = 0
+    pos2_correct = 0
+    both_correct = 0
+    total = 0
+    mse_scores = []
+
+    # Per-font tracking
+    font_stats = {}
+
+    for i in range(len(dataset)):
+        img, clean, letter1, letter2, bigram, font = dataset[i]
+        img = img.unsqueeze(0).to(device)
+
+        idx1 = ord(letter1) - ord('a')
+        idx2 = ord(letter2) - ord('a')
+
+        with torch.no_grad():
+            recon, logits_list, locations, _ = model(img)
+
+        pred1 = logits_list[0].argmax(dim=1).item()
+        pred2 = logits_list[1].argmax(dim=1).item()
+        ok1 = pred1 == idx1
+        ok2 = pred2 == idx2
+        ok_both = ok1 and ok2
+
+        pos1_correct += int(ok1)
+        pos2_correct += int(ok2)
+        both_correct += int(ok_both)
+        total += 1
+
+        # Per-font stats
+        if font not in font_stats:
+            font_stats[font] = {'pos1_ok': 0, 'pos2_ok': 0, 'both_ok': 0, 'total': 0}
+        font_stats[font]['pos1_ok'] += int(ok1)
+        font_stats[font]['pos2_ok'] += int(ok2)
+        font_stats[font]['both_ok'] += int(ok_both)
+        font_stats[font]['total'] += 1
+
+        mse = F.mse_loss(recon, img).item()
+        mse_scores.append(mse)
+
+        # Display
+        pred1_char = chr(pred1 + ord('a'))
+        pred2_char = chr(pred2 + ord('a'))
+        mark1 = 'OK' if ok1 else f'WRONG({pred1_char})'
+        mark2 = 'OK' if ok2 else f'WRONG({pred2_char})'
+        font_tag = f'  [{font}]' if len(font_stats) > 1 or font != 'default' else ''
+        print(f"  {bigram}{font_tag}: P1={mark1}  P2={mark2}  MSE={mse:.4f}")
+
+        # Save attention overlay
+        visualize_attention(
+            img.squeeze(0), locations,
+            os.path.join(output_dir, f'attention_{bigram}_{font}.png'),
+        )
+
+        # Save reconstruction
+        recon_img = recon.squeeze().cpu().clamp(0, 1).detach().numpy()
+        Image.fromarray((recon_img * 255).astype(np.uint8)).save(
+            os.path.join(output_dir, f'recon_{bigram}_{font}.png'),
+        )
+
+    acc1 = pos1_correct / total if total > 0 else 0
+    acc2 = pos2_correct / total if total > 0 else 0
+    acc_both = both_correct / total if total > 0 else 0
+    avg_mse = np.mean(mse_scores) if mse_scores else 0
+
+    print(f"\nPos 1 accuracy:  {pos1_correct}/{total} ({acc1:.1%})")
+    print(f"Pos 2 accuracy:  {pos2_correct}/{total} ({acc2:.1%})")
+    print(f"Both correct:    {both_correct}/{total} ({acc_both:.1%})")
+    print(f"Avg reconstruction MSE: {avg_mse:.4f}")
+
+    # Per-font breakdown
+    if len(font_stats) > 1:
+        print(f"\nPer-font breakdown:")
+        for fname in sorted(font_stats.keys()):
+            s = font_stats[fname]
+            a1 = s['pos1_ok'] / s['total'] * 100
+            a2 = s['pos2_ok'] / s['total'] * 100
+            ab = s['both_ok'] / s['total'] * 100
+            print(f"  {fname:<24s}: P1 {a1:5.1f}%  P2 {a2:5.1f}%  Both {ab:5.1f}%  ({s['total']} samples)")
+
+    print(f"Results saved in {output_dir}")

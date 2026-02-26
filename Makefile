@@ -75,4 +75,23 @@ endif
 	@echo "guide: $(GUIDE)" >> runs/$(NAME)/info.txt
 	@echo "Archived to runs/$(NAME)/"
 
-.PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive
+# Bigram pipeline (separate data dirs from single-letter)
+generate-bigrams:
+	$(RUN) generate_bigrams --num_variants $(VARIANTS) --noise_level $(NOISE) --output_dir data/bigrams --fonts $(FONTS)
+
+generate-bigrams-test:
+	$(RUN) generate_bigrams_test --output_dir data/bigram_test --fonts $(FONTS)
+
+train-bigrams:
+	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_glimpses 15 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE)
+
+resume-bigrams:
+	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_glimpses 15 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --resume data/bigram_models/model_final.pth
+
+test-bigrams:
+	$(RUN) test_bigrams --model_dir data/bigram_models --test_data_dir data/bigram_test --output_dir data/bigram_results --device $(DEVICE)
+
+check-bigram-attention:
+	$(RUN) check_bigram_attention --data_dir data/bigrams --device $(DEVICE)
+
+.PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive generate-bigrams generate-bigrams-test train-bigrams resume-bigrams test-bigrams check-bigram-attention

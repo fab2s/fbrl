@@ -7,6 +7,33 @@ from torch.utils.data import Dataset
 from PIL import Image, ImageDraw, ImageFont
 
 
+# --- Top 200 English Bigrams (Norvig / Google Books corpus) ---
+# Last two entries swapped from corpus order ("rk","ys") to ("ju","ze")
+# so that all 26 letters appear at least once across the bigram set.
+BIGRAMS_200 = [
+    "th", "he", "in", "er", "an", "re", "on", "at", "en", "nd",
+    "ti", "es", "or", "te", "of", "ed", "is", "it", "al", "ar",
+    "st", "to", "nt", "ng", "se", "ha", "as", "ou", "io", "le",
+    "ve", "co", "me", "de", "hi", "ri", "ro", "ic", "ne", "ea",
+    "ra", "ce", "li", "ch", "ll", "be", "ma", "si", "om", "ur",
+    "ca", "el", "ta", "la", "ns", "di", "fo", "ho", "pe", "ec",
+    "pr", "no", "ct", "us", "ac", "ot", "il", "tr", "ly", "nc",
+    "et", "ut", "ss", "so", "rs", "un", "lo", "wa", "ge", "ie",
+    "wh", "ee", "wi", "em", "ad", "ol", "rt", "po", "we", "na",
+    "ul", "ni", "ts", "mo", "ow", "pa", "im", "mi", "ai", "sh",
+    "ir", "su", "id", "os", "iv", "ia", "am", "fi", "ci", "vi",
+    "pl", "ig", "tu", "ev", "ld", "ry", "mp", "fe", "bl", "ab",
+    "gh", "ty", "op", "wo", "sa", "ay", "ex", "ke", "fr", "oo",
+    "av", "ag", "if", "ap", "gr", "od", "bo", "sp", "rd", "do",
+    "uc", "bu", "ei", "ov", "by", "rm", "ep", "tt", "oc", "fa",
+    "ef", "cu", "rn", "sc", "gi", "da", "yo", "cr", "cl", "du",
+    "ga", "qu", "ue", "ff", "ba", "ey", "ls", "va", "um", "pp",
+    "ua", "up", "lu", "go", "ht", "ru", "ug", "ds", "lt", "pi",
+    "rc", "rr", "eg", "au", "ck", "ew", "mu", "br", "bi", "pt",
+    "ak", "pu", "ui", "rg", "ib", "tl", "ny", "ki", "ju", "ze",
+]
+
+
 # --- Font Registry ---
 
 # Short name -> TTF path (None = Pillow built-in default)
@@ -210,3 +237,149 @@ class LetterDataset(Dataset):
         return (self.images[idx], self.clean_images[idx],
                 self.letters[idx], self.cases[idx],
                 self.fonts[idx], self.partner_clean[idx])
+
+
+# --- Bigram Data Generation ---
+
+def generate_bigram_dataset(output_dir, noise_level=0.01, num_variants=1,
+                            font_spec='default'):
+    """Render 192x128 images with natural bigram strings.
+
+    The two-character string is rendered with natural kerning (as real text),
+    centered on a 192x128 canvas. This is much tighter than the old 256x128
+    layout where each letter sat in its own 128px half.
+    Uses BIGRAMS_200 as the bigram set.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    fonts = discover_fonts(font_spec)
+    print(f"Generating bigrams with {len(fonts)} font(s): {', '.join(n for n, _ in fonts)}")
+
+    metadata = {}
+    for font_name, font_path in fonts:
+        font = load_font(font_path, size=60)
+        for bigram in BIGRAMS_200:
+            letter1, letter2 = bigram[0], bigram[1]
+
+            # Render clean 192x128 image: bigram as a natural 2-char string, centered
+            img = Image.new('L', (192, 128), color=0)
+            draw = ImageDraw.Draw(img)
+            bbox = draw.textbbox((0, 0), bigram, font=font)
+            x = (192 - bbox[2] - bbox[0]) / 2
+            y = (128 - bbox[3] - bbox[1]) / 2
+            draw.text((x, y), bigram, fill=255, font=font)
+
+            clean_path = os.path.join(output_dir, f'clean_{bigram}_{font_name}.png')
+            img.save(clean_path)
+
+            img_array = np.array(img) / 255.0
+
+            for v in range(num_variants):
+                noisy = img_array + np.random.normal(0, noise_level, img_array.shape)
+                noisy = np.clip(noisy, 0, 1)
+                noisy_img = Image.fromarray((noisy * 255).astype(np.uint8))
+                img_path = os.path.join(output_dir, f'img_{bigram}_{font_name}_{v}.png')
+                noisy_img.save(img_path)
+                key = f'{bigram}_{font_name}_{v}'
+                metadata[key] = {
+                    'image': img_path,
+                    'clean': clean_path,
+                    'bigram': bigram,
+                    'letter1': letter1,
+                    'letter2': letter2,
+                    'font': font_name,
+                }
+
+    with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
+        json.dump(metadata, f)
+    print(f"Bigram dataset generated in {output_dir}: {len(metadata)} samples "
+          f"({len(fonts)} fonts x {len(BIGRAMS_200)} bigrams x {num_variants} variants)")
+
+
+def generate_bigram_test(output_dir, font_spec='default'):
+    """Generate clean (no noise) bigram test set — one image per bigram per font."""
+    os.makedirs(output_dir, exist_ok=True)
+    fonts = discover_fonts(font_spec)
+    print(f"Generating bigram test with {len(fonts)} font(s): {', '.join(n for n, _ in fonts)}")
+
+    metadata = {}
+    for font_name, font_path in fonts:
+        font = load_font(font_path, size=60)
+        for bigram in BIGRAMS_200:
+            letter1, letter2 = bigram[0], bigram[1]
+
+            img = Image.new('L', (192, 128), color=0)
+            draw = ImageDraw.Draw(img)
+            bbox = draw.textbbox((0, 0), bigram, font=font)
+            x = (192 - bbox[2] - bbox[0]) / 2
+            y = (128 - bbox[3] - bbox[1]) / 2
+            draw.text((x, y), bigram, fill=255, font=font)
+
+            img_path = os.path.join(output_dir, f'img_{bigram}_{font_name}.png')
+            img.save(img_path)
+            key = f'{bigram}_{font_name}'
+            metadata[key] = {
+                'image': img_path,
+                'bigram': bigram,
+                'letter1': letter1,
+                'letter2': letter2,
+                'font': font_name,
+            }
+
+    with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
+        json.dump(metadata, f)
+    print(f"Bigram test data generated in {output_dir}: {len(metadata)} samples "
+          f"({len(fonts)} fonts x {len(BIGRAMS_200)} bigrams)")
+
+
+# --- Bigram Dataset ---
+
+class BigramDataset(Dataset):
+    """Loads bigram images. Returns (img, clean, letter1, letter2, bigram, font)."""
+    def __init__(self, data_dir):
+        with open(os.path.join(data_dir, 'metadata.json'), 'r') as f:
+            metadata = json.load(f)
+
+        print(f"Loading {len(metadata)} bigram samples into memory...", end=' ', flush=True)
+        t0 = time.time()
+        self.images = []
+        self.clean_images = []
+        self.letter1s = []
+        self.letter2s = []
+        self.bigrams = []
+        self.fonts = []
+
+        # Cache clean images (one per bigram+font, shared across variants)
+        clean_cache = {}
+
+        for key in metadata:
+            entry = metadata[key]
+            img = Image.open(entry['image']).convert('L')
+            img_tensor = torch.tensor(
+                np.array(img) / 255.0, dtype=torch.float32,
+            ).unsqueeze(0)  # (1, H, W) = (1, 128, 256)
+            self.images.append(img_tensor)
+            self.letter1s.append(entry['letter1'])
+            self.letter2s.append(entry['letter2'])
+            self.bigrams.append(entry['bigram'])
+            self.fonts.append(entry.get('font', 'default'))
+
+            clean_path = entry.get('clean')
+            if clean_path:
+                if clean_path not in clean_cache:
+                    cimg = Image.open(clean_path).convert('L')
+                    clean_cache[clean_path] = torch.tensor(
+                        np.array(cimg) / 255.0, dtype=torch.float32,
+                    ).unsqueeze(0)
+                self.clean_images.append(clean_cache[clean_path])
+            else:
+                self.clean_images.append(img_tensor)
+
+        print(f"done ({time.time() - t0:.1f}s)")
+
+    def __len__(self):
+        return len(self.bigrams)
+
+    def __getitem__(self, idx):
+        return (self.images[idx], self.clean_images[idx],
+                self.letter1s[idx], self.letter2s[idx],
+                self.bigrams[idx], self.fonts[idx])

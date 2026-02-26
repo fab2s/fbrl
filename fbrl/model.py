@@ -246,3 +246,141 @@ class VisionModel(nn.Module):
         latent, locations = self.encoder(img)
         recon = self.decoder(latent, target_case)
         return recon, locations
+
+
+# --- Bigram (Letter-Pair) Reading ---
+
+class BigramDecoder(nn.Module):
+    """Generates 192x128 images from concatenated readout states.
+
+    Input: concatenated readout states (2 * latent_dim = 512 by default).
+    FC projects to 128 channels x 32(H) x 48(W), then two stride-2 deconvs.
+    Output: (B, 1, 128, 192).
+    """
+    def __init__(self, latent_dim=256, n_positions=2):
+        super().__init__()
+        input_dim = latent_dim * n_positions  # 512 by default
+        # FC expands to spatial feature map: 128 channels x 32(H) x 48(W)
+        # Two stride-2 deconvs: 32x48 -> 64x96 -> 128x192
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, 128 * 32 * 48),
+            nn.ReLU(),
+        )
+        # Transposed convolutions: 32x48 -> 64x96 -> 128x192
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # 32x48 -> 64x96
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, 5, stride=2, padding=2, output_padding=1),  # 64x96 -> 128x192
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, 1, 3, padding=1),  # final 1-channel output
+            nn.Sigmoid(),
+        )
+
+    def forward(self, readout_states):
+        """Decode concatenated readout states into a 192x128 image.
+
+        Args:
+            readout_states: (B, n_positions * latent_dim) — concatenated readout hidden states
+        Returns:
+            (B, 1, 128, 192) reconstructed bigram image
+        """
+        x = self.fc(readout_states)
+        x = x.view(-1, 128, 32, 48)  # (B, 128, H=32, W=48)
+        return self.deconv(x)
+
+
+class BigramVisionModel(nn.Module):
+    """Full bigram model: encoder (attention) + readout GRU + decoder + classifiers.
+
+    Two-phase architecture with separate GRUs to partially isolate gradient flows:
+      Phase 1 (visual GRU):  saccade planning — trained by all losses, but at lower lr
+      Phase 2 (readout GRU): information extraction — trained by classification at full lr
+
+    Classification gradients flow back into the visual GRU (no detach), so it learns
+    to encode letter identity. Stability comes from separate param groups: the encoder
+    gets 10x lower lr than the readout path, preventing the catastrophic divergence
+    seen with a single shared GRU at equal lr.
+
+    Steps 1..n_glimpses:  visual saccades on 256x128 image  (visual GRU)
+    Steps n+1..n+n_pos:   readout tokens -> classify each position  (readout GRU)
+    """
+    def __init__(self, n_classes=26, latent_dim=256, n_glimpses=15,
+                 patch_size=12, n_scales=1, n_positions=2):
+        super().__init__()
+        self.n_positions = n_positions
+        self.latent_dim = latent_dim
+        self.encoder = VisualAttentionEncoder(
+            n_glimpses=n_glimpses, patch_size=patch_size,
+            n_scales=n_scales, latent_dim=latent_dim,
+        )
+        self.decoder = BigramDecoder(latent_dim=latent_dim, n_positions=n_positions)
+
+        # Separate readout GRU — same architecture as the visual GRU but independent weights.
+        # Receives the visual GRU's final hidden state (detached) as initialization.
+        self.readout_gru = nn.GRUCell(latent_dim, latent_dim)
+
+        # Learned readout tokens — one per letter position.
+        # Initialized with left/right spatial bias to break symmetry:
+        # token 0 biased toward x=-0.5 (left half), token 1 toward x=+0.5 (right half).
+        self.readout_tokens = nn.Parameter(torch.zeros(n_positions, latent_dim))
+        with torch.no_grad():
+            self.readout_tokens[0, 0] = -1.0   # left bias
+            self.readout_tokens[1, 0] = +1.0   # right bias
+
+        # Per-position letter classifiers (26-class each: a-z)
+        self.classifiers = nn.ModuleList([
+            nn.Linear(latent_dim, n_classes) for _ in range(n_positions)
+        ])
+
+    def forward(self, img):
+        """Forward pass with two-GRU architecture.
+
+        Args:
+            img: (B, 1, 128, 192) bigram input image
+        Returns:
+            recon: (B, 1, 128, 192) reconstructed image
+            logits_list: [logits_pos1, logits_pos2] each (B, 26)
+            locations: list of (B, 2) fixation coords (visual phase only)
+            readout_states: (B, n_positions, latent_dim) per-position hidden states
+        """
+        B = img.shape[0]
+        controller = self.encoder.attention_controller
+        sensor = self.encoder.glimpse_sensor
+
+        # --- Phase 1: Visual glimpses (visual GRU — saccade planning) ---
+        h = controller.h0.expand(B, -1).contiguous()
+        location = torch.zeros(B, 2, device=img.device)
+        locations = [location]
+
+        for t in range(self.encoder.n_glimpses):
+            glimpse = sensor(img, location)
+            h = controller.gru(glimpse, h)
+            location = torch.tanh(controller.location_head(h))
+            locations.append(location)
+
+        # --- Phase 2: Readout tokens (readout GRU — information extraction) ---
+        # No detach: classification gradients flow back into the visual GRU, but
+        # the training loop uses separate param groups with 10x lower lr for the
+        # encoder, preventing the destabilization seen with equal lr.
+        h_readout = h
+
+        readout_states = []
+        for i in range(self.n_positions):
+            token = self.readout_tokens[i].unsqueeze(0).expand(B, -1)  # (B, latent_dim)
+            h_readout = self.readout_gru(token, h_readout)
+            readout_states.append(h_readout)
+
+        readout_states = torch.stack(readout_states, dim=1)  # (B, n_positions, latent_dim)
+
+        # --- Classify each position ---
+        logits_list = []
+        for i in range(self.n_positions):
+            logits_list.append(self.classifiers[i](readout_states[:, i]))
+
+        # --- Reconstruct from concatenated readout states ---
+        concat = readout_states.view(B, -1)  # (B, n_positions * latent_dim)
+        recon = self.decoder(concat)
+
+        return recon, logits_list, locations, readout_states
