@@ -291,20 +291,73 @@ class BigramDecoder(nn.Module):
         return self.deconv(x)
 
 
+class CrossAttentionReadout(nn.Module):
+    """Cross-attention readout: position tokens query the visual glimpse history.
+
+    Instead of a sequential GRU that processes positions one after another
+    (where pos2 depends on pos1's output), each position token independently
+    attends to all glimpse hidden states in parallel.
+
+    The left token naturally learns to attend to glimpses that fixated on the
+    left letter, and the right token to right-letter glimpses. Both positions
+    get equal access to the full visual memory — no asymmetry.
+    """
+    def __init__(self, latent_dim=256, n_positions=2):
+        super().__init__()
+        self.scale = latent_dim ** -0.5
+
+        # Learned position query tokens — initialized with left/right bias
+        self.query_tokens = nn.Parameter(torch.zeros(n_positions, latent_dim))
+        with torch.no_grad():
+            self.query_tokens[0, 0] = -1.0   # left bias
+            self.query_tokens[1, 0] = +1.0   # right bias
+
+        # Projections for scaled dot-product attention
+        self.query_proj = nn.Linear(latent_dim, latent_dim)
+        self.key_proj = nn.Linear(latent_dim, latent_dim)
+        self.value_proj = nn.Linear(latent_dim, latent_dim)
+        self.out_proj = nn.Linear(latent_dim, latent_dim)
+
+    def forward(self, glimpse_states):
+        """Cross-attend position tokens over glimpse history.
+
+        Args:
+            glimpse_states: (B, T, latent_dim) hidden states from all visual glimpses
+        Returns:
+            readout_states: (B, n_positions, latent_dim) per-position outputs
+        """
+        B = glimpse_states.shape[0]
+
+        Q = self.query_proj(
+            self.query_tokens.unsqueeze(0).expand(B, -1, -1)
+        )                                        # (B, n_positions, D)
+        K = self.key_proj(glimpse_states)         # (B, T, D)
+        V = self.value_proj(glimpse_states)       # (B, T, D)
+
+        # Scaled dot-product attention
+        attn = torch.bmm(Q, K.transpose(1, 2)) * self.scale  # (B, n_pos, T)
+        attn = F.softmax(attn, dim=-1)
+
+        out = torch.bmm(attn, V)      # (B, n_positions, D)
+        return self.out_proj(out)
+
+
 class BigramVisionModel(nn.Module):
-    """Full bigram model: encoder (attention) + readout GRU + decoder + classifiers.
+    """Full bigram model: encoder (attention) + cross-attention readout + decoder + classifiers.
 
-    Two-phase architecture with separate GRUs to partially isolate gradient flows:
-      Phase 1 (visual GRU):  saccade planning — trained by all losses, but at lower lr
-      Phase 2 (readout GRU): information extraction — trained by classification at full lr
+    Two-phase architecture:
+      Phase 1 (visual GRU):  saccade planning — 15 glimpses, builds a history of hidden states
+      Phase 2 (cross-attention): position tokens query the glimpse history in parallel
 
-    Classification gradients flow back into the visual GRU (no detach), so it learns
-    to encode letter identity. Stability comes from separate param groups: the encoder
-    gets 10x lower lr than the readout path, preventing the catastrophic divergence
-    seen with a single shared GRU at equal lr.
+    The cross-attention readout replaces the earlier sequential GRU readout.
+    Both position tokens attend independently to the full glimpse history, so
+    there's no asymmetry between positions. Each token learns which glimpses
+    carry information relevant to its letter (left token -> left-fixation
+    glimpses, right token -> right-fixation glimpses).
 
-    Steps 1..n_glimpses:  visual saccades on 256x128 image  (visual GRU)
-    Steps n+1..n+n_pos:   readout tokens -> classify each position  (readout GRU)
+    Classification gradients flow back into the visual GRU (no detach). Stability
+    comes from separate param groups: the encoder gets 10x lower lr than the
+    readout path.
     """
     def __init__(self, n_classes=26, latent_dim=256, n_glimpses=15,
                  patch_size=12, n_scales=1, n_positions=2):
@@ -317,17 +370,10 @@ class BigramVisionModel(nn.Module):
         )
         self.decoder = BigramDecoder(latent_dim=latent_dim, n_positions=n_positions)
 
-        # Separate readout GRU — same architecture as the visual GRU but independent weights.
-        # Receives the visual GRU's final hidden state (detached) as initialization.
-        self.readout_gru = nn.GRUCell(latent_dim, latent_dim)
-
-        # Learned readout tokens — one per letter position.
-        # Initialized with left/right spatial bias to break symmetry:
-        # token 0 biased toward x=-0.5 (left half), token 1 toward x=+0.5 (right half).
-        self.readout_tokens = nn.Parameter(torch.zeros(n_positions, latent_dim))
-        with torch.no_grad():
-            self.readout_tokens[0, 0] = -1.0   # left bias
-            self.readout_tokens[1, 0] = +1.0   # right bias
+        # Cross-attention readout — position tokens query full glimpse history
+        self.readout = CrossAttentionReadout(
+            latent_dim=latent_dim, n_positions=n_positions,
+        )
 
         # Per-position letter classifiers (26-class each: a-z)
         self.classifiers = nn.ModuleList([
@@ -335,7 +381,7 @@ class BigramVisionModel(nn.Module):
         ])
 
     def forward(self, img):
-        """Forward pass with two-GRU architecture.
+        """Forward pass with cross-attention readout.
 
         Args:
             img: (B, 1, 128, 192) bigram input image
@@ -350,29 +396,29 @@ class BigramVisionModel(nn.Module):
         sensor = self.encoder.glimpse_sensor
 
         # --- Phase 1: Visual glimpses (visual GRU — saccade planning) ---
+        # Collect ALL intermediate hidden states for cross-attention readout.
+        # The visual GRU scans the image like an eye sweep; the readout then
+        # goes back and selectively attends to relevant glimpses.
         h = controller.h0.expand(B, -1).contiguous()
-        location = torch.zeros(B, 2, device=img.device)
+        # Start at left-center: natural reading start position.
+        location = torch.tensor([[-0.3, 0.0]], device=img.device).expand(B, -1)
         locations = [location]
+        glimpse_states = []
 
         for t in range(self.encoder.n_glimpses):
             glimpse = sensor(img, location)
             h = controller.gru(glimpse, h)
             location = torch.tanh(controller.location_head(h))
             locations.append(location)
+            glimpse_states.append(h)
 
-        # --- Phase 2: Readout tokens (readout GRU — information extraction) ---
-        # No detach: classification gradients flow back into the visual GRU, but
-        # the training loop uses separate param groups with 10x lower lr for the
-        # encoder, preventing the destabilization seen with equal lr.
-        h_readout = h
+        # Stack into (B, T, latent_dim) for cross-attention
+        glimpse_states = torch.stack(glimpse_states, dim=1)
 
-        readout_states = []
-        for i in range(self.n_positions):
-            token = self.readout_tokens[i].unsqueeze(0).expand(B, -1)  # (B, latent_dim)
-            h_readout = self.readout_gru(token, h_readout)
-            readout_states.append(h_readout)
-
-        readout_states = torch.stack(readout_states, dim=1)  # (B, n_positions, latent_dim)
+        # --- Phase 2: Cross-attention readout ---
+        # Both position tokens attend to the full glimpse history in parallel.
+        # No sequential dependency — pos1 and pos2 get equal access.
+        readout_states = self.readout(glimpse_states)  # (B, n_positions, latent_dim)
 
         # --- Classify each position ---
         logits_list = []

@@ -38,6 +38,78 @@ def attention_content_loss(image, locations, blur_sigma_ratio=0.16):
     return -total / len(locations[1:])
 
 
+# --- Temporal Attention Guide (left-to-right scaffold for bigrams) ---
+
+def temporal_attention_content_loss(image, locations, blur_sigma_ratio=0.16,
+                                     scaffold_weight=1.0):
+    """Position-aware attention guide that teaches left-to-right scanning.
+
+    Divides glimpses into three equal phases:
+      Phase 1 (first third):  guide from LEFT half of image only
+      Phase 2 (middle third): guide from RIGHT half of image only
+      Phase 3 (final third):  guide from FULL image (holistic)
+
+    scaffold_weight controls the blend between position-specific and full guides:
+      1.0 = full scaffolding (position-specific guides for phases 1-2)
+      0.0 = no scaffolding (equivalent to standard attention_content_loss)
+
+    The scaffold is designed to be annealed over training: teach the scanning
+    pattern early, then remove the training wheels once classification reward
+    sustains the behavior on its own.
+    """
+    B, C, H, W = image.shape
+    blur_sigma = blur_sigma_ratio * min(H, W)
+
+    # Build Gaussian blur kernel (same as attention_content_loss)
+    k = int(4 * blur_sigma) | 1
+    x = torch.arange(k, device=image.device, dtype=image.dtype) - k // 2
+    gauss = torch.exp(-x ** 2 / (2 * blur_sigma ** 2))
+    gauss = gauss / gauss.sum()
+
+    def _blur(img):
+        out = F.conv2d(img, gauss.view(1, 1, k, 1), padding=(k // 2, 0))
+        return F.conv2d(out, gauss.view(1, 1, 1, k), padding=(0, k // 2))
+
+    # Full guide field (used for holistic phase and as the non-scaffold baseline)
+    guide_full = _blur(image)
+
+    if scaffold_weight > 0:
+        # Create masked images: left half and right half
+        # Mask before blurring so the guide field fades naturally at the boundary
+        mid = W // 2
+        left_img = image.clone()
+        left_img[:, :, :, mid:] = 0   # zero out right half
+        right_img = image.clone()
+        right_img[:, :, :, :mid] = 0  # zero out left half
+
+        guide_left = _blur(left_img)
+        guide_right = _blur(right_img)
+
+    # Divide glimpses into three phases (equal thirds)
+    n_locs = len(locations) - 1  # skip locations[0] (fixed start point)
+    phase1_end = n_locs // 3           # end of left-letter phase
+    phase2_end = 2 * n_locs // 3       # end of right-letter phase
+
+    total = 0
+    for t, loc in enumerate(locations[1:]):
+        grid = loc.view(B, 1, 1, 2)
+
+        if scaffold_weight > 0 and t < phase1_end:
+            # Phase 1: left letter — blend left guide with full guide
+            guide = scaffold_weight * guide_left + (1 - scaffold_weight) * guide_full
+        elif scaffold_weight > 0 and t < phase2_end:
+            # Phase 2: right letter — blend right guide with full guide
+            guide = scaffold_weight * guide_right + (1 - scaffold_weight) * guide_full
+        else:
+            # Phase 3 (holistic) or scaffold disabled: full guide
+            guide = guide_full
+
+        sampled = F.grid_sample(guide, grid, align_corners=True, padding_mode='zeros')
+        total = total + sampled.mean()
+
+    return -total / n_locs
+
+
 # --- Fixation Diversity Loss ---
 
 def fixation_diversity_loss(locations, sigma=0.1):

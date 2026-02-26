@@ -124,6 +124,11 @@ if __name__ == '__main__':
     train_bi_parser.add_argument('--guide_weight', type=float, default=8.0)
     train_bi_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
     train_bi_parser.add_argument('--batch_size', type=int, default=32)
+    train_bi_parser.add_argument('--scaffold_epochs', type=int, default=200,
+                                 help='Epochs to anneal temporal attention scaffold '
+                                      '(0=disabled)')
+    train_bi_parser.add_argument('--transfer', default=None,
+                                 help='Path to single-letter .pth/.pth.gz for transfer learning')
 
     chk_bi_parser = subparsers.add_parser('check_bigram_attention')
     chk_bi_parser.add_argument('--data_dir', required=True)
@@ -219,7 +224,9 @@ if __name__ == '__main__':
                            diversity_sigma=args.diversity_sigma,
                            guide_weight=args.guide_weight,
                            blur_sigma_ratio=args.blur_sigma_ratio,
-                           batch_size=args.batch_size)
+                           batch_size=args.batch_size,
+                           scaffold_epochs=args.scaffold_epochs,
+                           transfer_from=args.transfer)
 
     elif args.command == 'check_bigram_attention':
         check_bigram_attention(args.data_dir, n_epochs=args.n_epochs,

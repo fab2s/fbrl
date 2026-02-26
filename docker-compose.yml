@@ -4,6 +4,7 @@ services:
     entrypoint: ["tail", "-f", "/dev/null"]
     volumes:
       - ./data:/app/data
+      - ./runs:/app/runs
       - ./vision_training.py:/app/vision_training.py
       - ./fbrl:/app/fbrl
     deploy:
