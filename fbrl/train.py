@@ -19,13 +19,14 @@ from fbrl.losses import (attention_content_loss, temporal_attention_content_loss
 def train_model(data_dir, epochs=200, resume=None, save_dir='models',
                 checkpoint_interval=10, n_glimpses=10, patch_size=12,
                 n_scales=1, device='auto',
-                diversity_weight=1.0, diversity_sigma=0.1,
+                diversity_weight=1.0, diversity_sigma=0.1, diversity_vy=1.0,
                 recode_weight=1.0, guide_weight=8.0, blur_sigma_ratio=0.16,
                 batch_size=52):
     device = _resolve_device(device)
     print(f"Training on: {device}")
+    vy_str = f"  diversity_vy={diversity_vy}" if diversity_vy != 1.0 else ""
     print(f"Attention: guide_weight={guide_weight}  blur_sigma_ratio={blur_sigma_ratio}  "
-          f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}  "
+          f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}{vy_str}  "
           f"recode_weight={recode_weight}  batch_size={batch_size}")
 
     os.makedirs(save_dir, exist_ok=True)
@@ -85,8 +86,8 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
         os.rename(log_path, os.path.join(save_dir, f'training_{ts}.log'))
     log_file = open(log_path, 'a')
     if start_epoch == 0:
-        log_file.write("epoch  recon    ltr      case     attn     div      hit    recode   lr\n")
-        log_file.write("-" * 80 + "\n")
+        log_file.write("epoch  recon    ltr      case     attn     div      hit    recode   lr         time\n")
+        log_file.write("-" * 90 + "\n")
     log_file.flush()
 
     for epoch in range(start_epoch, end_epoch):
@@ -133,7 +134,8 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
             #    (evaluated on clean image — noisy pixels would give false signal)
             attn_loss = attention_content_loss(clean, locations, blur_sigma_ratio=blur_sigma_ratio)
             # 5. Diversity: are fixations spread out, not clustered?
-            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma)
+            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma,
+                                               vy=diversity_vy)
 
             # Weighted sum — guide_weight is the critical knob. Too low and the
             # decoder learns to ignore attention; too high and it dominates training.
@@ -207,7 +209,8 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
         # Write to log file (machine-readable, tab-separated)
         log_file.write(f"{epoch+1:>5d}  {avg_recon:.4f}  {avg_letter_cls:.4f}  "
                        f"{avg_case_cls:.4f}  {avg_attn:.4f}  {avg_div:.4f}  "
-                       f"{avg_hr:.4f}  {avg_recode:.4f}  {current_lr:.6f}\n")
+                       f"{avg_hr:.4f}  {avg_recode:.4f}  {current_lr:.6f}  "
+                       f"{epoch_time:.1f}s\n")
         log_file.flush()
 
         # Step the learning rate schedule (once per epoch, after logging)
@@ -306,7 +309,8 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
 def check_attention(data_dir, n_epochs=10, n_glimpses=10, patch_size=12,
                     n_scales=1, device='auto',
                     guide_weight=8.0, blur_sigma_ratio=0.16,
-                    diversity_weight=1.0, diversity_sigma=0.1):
+                    diversity_weight=1.0, diversity_sigma=0.1,
+                    diversity_vy=1.0):
     """Quick diagnostic: can the attention guide pull fixations onto letter content?
 
     Runs a few epochs with ONLY attention + diversity loss (no cls/recon/recode).
@@ -327,9 +331,10 @@ def check_attention(data_dir, n_epochs=10, n_glimpses=10, patch_size=12,
     img_h, img_w = sample_img.shape[1], sample_img.shape[2]
     effective_sigma = blur_sigma_ratio * min(img_h, img_w)
 
+    vy_str = f"  diversity_vy={diversity_vy}" if diversity_vy != 1.0 else ""
     print(f"Attention pre-check on {device}")
     print(f"Image: {img_h}x{img_w}  blur_sigma_ratio={blur_sigma_ratio} "
-          f"-> {effective_sigma:.1f}px  guide_weight={guide_weight}")
+          f"-> {effective_sigma:.1f}px  guide_weight={guide_weight}{vy_str}")
     print(f"Running {n_epochs} diagnostic epochs (attention + diversity only)...")
 
     hit_rates = []
@@ -350,7 +355,8 @@ def check_attention(data_dir, n_epochs=10, n_glimpses=10, patch_size=12,
             attn_loss = attention_content_loss(
                 clean, locations, blur_sigma_ratio=blur_sigma_ratio,
             )
-            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma)
+            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma,
+                                                vy=diversity_vy)
             loss = guide_weight * attn_loss + diversity_weight * div_loss
 
             optimizer.zero_grad()
@@ -397,10 +403,11 @@ def check_attention(data_dir, n_epochs=10, n_glimpses=10, patch_size=12,
 def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_models',
                        checkpoint_interval=10, n_glimpses=15, patch_size=12,
                        n_scales=1, device='auto',
-                       diversity_weight=1.0, diversity_sigma=0.1,
+                       diversity_weight=1.0, diversity_sigma=0.1, diversity_vy=1.0,
                        guide_weight=8.0, blur_sigma_ratio=0.16,
                        batch_size=32, scaffold_epochs=200,
-                       transfer_from=None):
+                       scaffold_floor=0.0,
+                       transfer_from=None, mask_weight=0.5):
     """Train a BigramVisionModel on 256x128 bigram images.
 
     Loss = recon + letter1_cls + letter2_cls + guide_weight * attn + diversity * div
@@ -414,11 +421,14 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
     """
     device = _resolve_device(device)
     print(f"Bigram training on: {device}")
+    mask_str = f"  mask_weight={mask_weight}" if mask_weight > 0 else ""
+    vy_str = f"  diversity_vy={diversity_vy}" if diversity_vy != 1.0 else ""
     print(f"Attention: guide_weight={guide_weight}  blur_sigma_ratio={blur_sigma_ratio}  "
-          f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}  "
-          f"batch_size={batch_size}  n_glimpses={n_glimpses}")
+          f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}{vy_str}  "
+          f"batch_size={batch_size}  n_glimpses={n_glimpses}{mask_str}")
+    floor_str = f", floor={scaffold_floor}" if scaffold_floor > 0 else ""
     print(f"Temporal scaffold: {scaffold_epochs} epochs "
-          f"({'disabled' if scaffold_epochs == 0 else 'left→right→holistic'})")
+          f"({'disabled' if scaffold_epochs == 0 else 'left→right→holistic'}){floor_str}")
 
     os.makedirs(save_dir, exist_ok=True)
     dataset = BigramDataset(data_dir)
@@ -528,8 +538,9 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
         os.rename(log_path, os.path.join(save_dir, f'training_{ts}.log'))
     log_file = open(log_path, 'a')
     if start_epoch == 0:
-        log_file.write("epoch  recon    pos1     pos2     attn     div      hit      lr_enc   lr_read  scaff\n")
-        log_file.write("-" * 90 + "\n")
+        mask_hdr = "  mask" if mask_weight > 0 else ""
+        log_file.write(f"epoch  recon    pos1     pos2     attn     div      hit      lr_enc   lr_read  scaff{mask_hdr}  time\n")
+        log_file.write("-" * (96 + len(mask_hdr)) + "\n")
     log_file.flush()
 
     for epoch in range(start_epoch, end_epoch):
@@ -557,19 +568,20 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
         total_loss_pos2 = 0
         total_loss_attn = 0
         total_loss_div = 0
+        total_loss_mask = 0
         total_hit_rate = 0
         total_hit_intensity = 0
         total_pos1_correct = 0
         total_pos2_correct = 0
         total_samples = 0
 
-        # Scaffold annealing: linearly decay from 1.0 to 0.0 over scaffold_epochs.
-        # After scaffold_epochs, scaffold_weight=0 and the temporal guide becomes
-        # equivalent to the standard full-image guide.
+        # Scaffold annealing: linearly decay from 1.0 to scaffold_floor over
+        # scaffold_epochs.  A non-zero floor keeps gentle spatial pressure
+        # (left/right cluster separation) throughout training.
         if scaffold_epochs > 0:
-            scaffold_weight = max(0.0, 1.0 - epoch / scaffold_epochs)
+            scaffold_weight = max(scaffold_floor, 1.0 - epoch / scaffold_epochs)
         else:
-            scaffold_weight = 0.0
+            scaffold_weight = scaffold_floor
 
         for img, clean, letter1s, letter2s, _bigrams, _fonts in dataloader:
             img = img.to(device)
@@ -596,11 +608,36 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
                 clean, locations, blur_sigma_ratio=blur_sigma_ratio,
                 scaffold_weight=scaffold_weight,
             )
-            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma)
+            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma,
+                                               vy=diversity_vy)
 
             total_loss = (recon_loss + pos1_cls_loss + pos2_cls_loss
                           + guide_weight * attn_loss
                           + diversity_weight * div_loss)
+
+            # --- Masked-half auxiliary loss ---
+            # Force the model to classify each letter from glimpses on that
+            # letter alone: mask one half, require the visible letter correct.
+            if mask_weight > 0:
+                mid_w = img.shape[3] // 2
+                mask_left = torch.rand(img.shape[0], device=device) < 0.5
+                spatial_mask = torch.ones_like(img)
+                spatial_mask[mask_left, :, :, :mid_w] = 0.0
+                spatial_mask[~mask_left, :, :, mid_w:] = 0.0
+                masked_img = img * spatial_mask
+
+                _, logits_m, _, _ = model(masked_img)
+
+                # Only penalize the visible position
+                mask_cls = torch.tensor(0.0, device=device)
+                if mask_left.any():
+                    mask_cls = mask_cls + F.cross_entropy(
+                        logits_m[1][mask_left], idx2[mask_left])
+                if (~mask_left).any():
+                    mask_cls = mask_cls + F.cross_entropy(
+                        logits_m[0][~mask_left], idx1[~mask_left])
+                total_loss = total_loss + mask_weight * mask_cls
+                total_loss_mask += mask_cls.item()
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -651,18 +688,21 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
         lrs = scheduler.get_last_lr()
         lr_enc = lrs[0]
         lr_read = lrs[-1]
+        avg_mask = total_loss_mask / n
         scaff_str = f"  scaff {scaffold_weight:.2f}" if scaffold_epochs > 0 else ""
+        mask_str = f"  Mask {avg_mask:.4f}" if mask_weight > 0 else ""
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avg_recon:.4f}  Pos1 {avg_pos1:.4f} ({acc1:.0%})  "
               f"Pos2 {avg_pos2:.4f} ({acc2:.0%})  Attn {avg_attn:.4f}  "
-              f"Div {avg_div:.4f}  Hit {avg_hr:.0%}  "
+              f"Div {avg_div:.4f}  Hit {avg_hr:.0%}{mask_str}  "
               f"lr {lr_enc:.6f}/{lr_read:.6f}{scaff_str}  "
               f"[{epoch_time:.1f}s  ETA {eta_min}m{eta_s:02d}s]")
 
+        mask_log = f"  {avg_mask:.4f}" if mask_weight > 0 else ""
         log_file.write(f"{epoch+1:>5d}  {avg_recon:.4f}  {avg_pos1:.4f}  "
                        f"{avg_pos2:.4f}  {avg_attn:.4f}  {avg_div:.4f}  "
                        f"{avg_hr:.4f}  {lr_enc:.6f}  {lr_read:.6f}  "
-                       f"{scaffold_weight:.4f}\n")
+                       f"{scaffold_weight:.4f}{mask_log}  {epoch_time:.1f}s\n")
         log_file.flush()
 
         scheduler.step()
@@ -752,7 +792,8 @@ def _save_bigram_checkpoint(model, epoch, n_glimpses, patch_size, n_scales,
 def check_bigram_attention(data_dir, n_epochs=10, n_glimpses=15, patch_size=12,
                            n_scales=1, device='auto',
                            guide_weight=8.0, blur_sigma_ratio=0.16,
-                           diversity_weight=1.0, diversity_sigma=0.1):
+                           diversity_weight=1.0, diversity_sigma=0.1,
+                           diversity_vy=1.0):
     """Quick diagnostic: can the attention guide pull fixations onto bigram letter content?
 
     Runs a few epochs with ONLY attention + diversity loss on 256x128 bigram images.
@@ -771,9 +812,10 @@ def check_bigram_attention(data_dir, n_epochs=10, n_glimpses=15, patch_size=12,
     img_h, img_w = sample_img.shape[1], sample_img.shape[2]
     effective_sigma = blur_sigma_ratio * min(img_h, img_w)
 
+    vy_str = f"  diversity_vy={diversity_vy}" if diversity_vy != 1.0 else ""
     print(f"Bigram attention pre-check on {device}")
     print(f"Image: {img_h}x{img_w}  blur_sigma_ratio={blur_sigma_ratio} "
-          f"-> {effective_sigma:.1f}px  guide_weight={guide_weight}")
+          f"-> {effective_sigma:.1f}px  guide_weight={guide_weight}{vy_str}")
     print(f"Running {n_epochs} diagnostic epochs (attention + diversity only)...")
 
     hit_rates = []
@@ -790,7 +832,8 @@ def check_bigram_attention(data_dir, n_epochs=10, n_glimpses=15, patch_size=12,
             attn_loss = attention_content_loss(
                 clean, locations, blur_sigma_ratio=blur_sigma_ratio,
             )
-            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma)
+            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma,
+                                                vy=diversity_vy)
             loss = guide_weight * attn_loss + diversity_weight * div_loss
 
             optimizer.zero_grad()

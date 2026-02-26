@@ -12,7 +12,11 @@ FONTS    ?= all
 BATCH    ?= 52
 GUIDE    ?= 8.0
 SCAFFOLD ?= 200
+SCAFFOLD_FLOOR ?= 0.0
 TRANSFER ?=
+GLIMPSES ?= 15
+MASK     ?= 0.5
+VY       ?= 1.0
 
 # Lifecycle
 build:
@@ -32,6 +36,12 @@ logs:
 shell:
 	docker compose exec $(SERVICE) bash
 
+# Cleanup helpers — remove all files except .gitignore and archived logs
+CLEAN_MODELS = find data/models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_RESULTS = find data/results -type f ! -name .gitignore -delete 2>/dev/null; true
+CLEAN_BIGRAM_MODELS = find data/bigram_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_BIGRAM_RESULTS = find data/bigram_results -type f ! -name .gitignore -delete 2>/dev/null; true
+
 # Pipeline
 generate:
 	$(RUN) generate --letters $(LETTERS) --num_variants $(VARIANTS) --noise_level $(NOISE) --output_dir data/letters --fonts $(FONTS)
@@ -40,18 +50,21 @@ generate-test:
 	$(RUN) generate_test --letters $(LETTERS) --output_dir data/test --fonts $(FONTS)
 
 train:
-	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE)
+	@$(CLEAN_MODELS)
+	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --diversity_vy $(VY)
 
 resume:
-	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --resume data/models/model_final.pth
+	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --diversity_vy $(VY) --resume data/models/model_final.pth
 
 test:
+	@$(CLEAN_RESULTS)
 	$(RUN) test --model_dir data/models --test_data_dir data/test --output_dir data/results --device $(DEVICE)
 
 visualize:
 	$(RUN) visualize --model_dir data/models --data_dir data/letters --output_dir data/visualizations
 
 atlas:
+	@rm -f data/atlas.html
 	$(RUN) atlas --model_dir data/models --test_data_dir data/test --output data/atlas.html --device $(DEVICE)
 
 check-attention:
@@ -85,18 +98,21 @@ generate-bigrams-test:
 	$(RUN) generate_bigrams_test --output_dir data/bigram_test --fonts $(FONTS)
 
 train-bigrams:
-	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_glimpses 15 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --scaffold_epochs $(SCAFFOLD) $(if $(TRANSFER),--transfer $(TRANSFER))
+	@$(CLEAN_BIGRAM_MODELS)
+	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_glimpses $(GLIMPSES) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --scaffold_epochs $(SCAFFOLD) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --diversity_vy $(VY) $(if $(TRANSFER),--transfer $(TRANSFER))
 
 resume-bigrams:
-	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_glimpses 15 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --scaffold_epochs $(SCAFFOLD) --resume data/bigram_models/model_final.pth
+	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_glimpses $(GLIMPSES) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --scaffold_epochs $(SCAFFOLD) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --diversity_vy $(VY) --resume data/bigram_models/model_final.pth
 
 test-bigrams:
+	@$(CLEAN_BIGRAM_RESULTS)
 	$(RUN) test_bigrams --model_dir data/bigram_models --test_data_dir data/bigram_test --output_dir data/bigram_results --device $(DEVICE)
 
 check-bigram-attention:
 	$(RUN) check_bigram_attention --data_dir data/bigrams --device $(DEVICE)
 
 bigram-atlas:
+	@rm -f data/bigram_atlas.html
 	$(RUN) bigram_atlas --model_dir data/bigram_models --test_data_dir data/bigram_test --output data/bigram_atlas.html --device $(DEVICE)
 
 # Archive a trained bigram model: make archive-bigrams NAME=v4-bigram-transfer

@@ -112,17 +112,24 @@ def temporal_attention_content_loss(image, locations, blur_sigma_ratio=0.16,
 
 # --- Fixation Diversity Loss ---
 
-def fixation_diversity_loss(locations, sigma=0.1):
+def fixation_diversity_loss(locations, sigma=0.1, vy=1.0):
     """Pairwise repulsion between fixation points.
 
     Gaussian RBF kernel: fixations closer than ~sigma (in [-1,1] coords)
     repel each other strongly. At sigma=0.1, that's ~10% of image width.
+
+    vy > 1.0 makes vertical proximity more expensive, encouraging fixations
+    to spread vertically (useful for letters with ascenders/descenders).
     """
     # Stack all fixation points into (B, T, 2) tensor
     locs = torch.stack(locations[1:], dim=1)
     B, T, _ = locs.shape
     # Compute pairwise distances between all fixation pairs
     diff = locs.unsqueeze(2) - locs.unsqueeze(1)  # (B, T, T, 2)
+    # Scale y-component: vy > 1 makes vertical proximity more expensive
+    if vy != 1.0:
+        scale = torch.tensor([1.0, vy], device=locs.device)
+        diff = diff * scale
     dist_sq = (diff ** 2).sum(-1)                  # (B, T, T)
     # Gaussian RBF: close pairs -> repulsion near 1.0, far pairs -> near 0.0
     # This penalizes fixations that cluster together (forces spatial spread)

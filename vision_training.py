@@ -57,6 +57,8 @@ if __name__ == '__main__':
                               help='Blur sigma as fraction of image size (0.16=proven default)')
     train_parser.add_argument('--batch_size', type=int, default=52,
                               help='Training batch size (default 52)')
+    train_parser.add_argument('--diversity_vy', type=float, default=1.0,
+                              help='Vertical diversity multiplier (1.5 = 50%% stronger vertical repulsion)')
 
     test_parser = subparsers.add_parser('test')
     test_parser.add_argument('--model_dir', required=True)
@@ -91,6 +93,8 @@ if __name__ == '__main__':
     chk_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
     chk_parser.add_argument('--diversity_weight', type=float, default=1.0)
     chk_parser.add_argument('--diversity_sigma', type=float, default=0.1)
+    chk_parser.add_argument('--diversity_vy', type=float, default=1.0,
+                            help='Vertical diversity multiplier (1.5 = 50%% stronger vertical repulsion)')
 
     compress_parser = subparsers.add_parser('compress_model')
     compress_parser.add_argument('--input', required=True)
@@ -128,8 +132,15 @@ if __name__ == '__main__':
     train_bi_parser.add_argument('--scaffold_epochs', type=int, default=200,
                                  help='Epochs to anneal temporal attention scaffold '
                                       '(0=disabled)')
+    train_bi_parser.add_argument('--scaffold_floor', type=float, default=0.0,
+                                 help='Minimum scaffold weight after annealing '
+                                      '(0.05 keeps gentle spatial pressure)')
     train_bi_parser.add_argument('--transfer', default=None,
                                  help='Path to single-letter .pth/.pth.gz for transfer learning')
+    train_bi_parser.add_argument('--mask_weight', type=float, default=0.5,
+                                 help='Weight for masked-half auxiliary loss (0=disabled)')
+    train_bi_parser.add_argument('--diversity_vy', type=float, default=1.0,
+                                 help='Vertical diversity multiplier (1.5 = 50%% stronger vertical repulsion)')
 
     chk_bi_parser = subparsers.add_parser('check_bigram_attention')
     chk_bi_parser.add_argument('--data_dir', required=True)
@@ -143,6 +154,8 @@ if __name__ == '__main__':
     chk_bi_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
     chk_bi_parser.add_argument('--diversity_weight', type=float, default=1.0)
     chk_bi_parser.add_argument('--diversity_sigma', type=float, default=0.1)
+    chk_bi_parser.add_argument('--diversity_vy', type=float, default=1.0,
+                                help='Vertical diversity multiplier (1.5 = 50%% stronger vertical repulsion)')
 
     test_bi_parser = subparsers.add_parser('test_bigrams')
     test_bi_parser.add_argument('--model_dir', required=True)
@@ -176,6 +189,7 @@ if __name__ == '__main__':
                     device=args.device,
                     diversity_weight=args.diversity_weight,
                     diversity_sigma=args.diversity_sigma,
+                    diversity_vy=args.diversity_vy,
                     recode_weight=args.recode_weight,
                     guide_weight=args.guide_weight,
                     blur_sigma_ratio=args.blur_sigma_ratio,
@@ -200,7 +214,8 @@ if __name__ == '__main__':
                         guide_weight=args.guide_weight,
                         blur_sigma_ratio=args.blur_sigma_ratio,
                         diversity_weight=args.diversity_weight,
-                        diversity_sigma=args.diversity_sigma)
+                        diversity_sigma=args.diversity_sigma,
+                        diversity_vy=args.diversity_vy)
 
     elif args.command == 'compress_model':
         import torch, gzip, io, os
@@ -230,11 +245,14 @@ if __name__ == '__main__':
                            device=args.device,
                            diversity_weight=args.diversity_weight,
                            diversity_sigma=args.diversity_sigma,
+                           diversity_vy=args.diversity_vy,
                            guide_weight=args.guide_weight,
                            blur_sigma_ratio=args.blur_sigma_ratio,
                            batch_size=args.batch_size,
                            scaffold_epochs=args.scaffold_epochs,
-                           transfer_from=args.transfer)
+                           scaffold_floor=args.scaffold_floor,
+                           transfer_from=args.transfer,
+                           mask_weight=args.mask_weight)
 
     elif args.command == 'check_bigram_attention':
         check_bigram_attention(args.data_dir, n_epochs=args.n_epochs,
@@ -243,7 +261,8 @@ if __name__ == '__main__':
                                guide_weight=args.guide_weight,
                                blur_sigma_ratio=args.blur_sigma_ratio,
                                diversity_weight=args.diversity_weight,
-                               diversity_sigma=args.diversity_sigma)
+                               diversity_sigma=args.diversity_sigma,
+                               diversity_vy=args.diversity_vy)
 
     elif args.command == 'test_bigrams':
         test_bigram_model(args.model_dir, args.test_data_dir, args.output_dir,

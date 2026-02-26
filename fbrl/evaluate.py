@@ -114,6 +114,8 @@ def test_model(model_dir, test_data_dir, output_dir='results', device='auto'):
     total = 0
     mse_scores = []
     recode_mse_scores = []
+    errors = []
+    correct_list = []
 
     # Per-font tracking
     font_stats = {}  # font_name -> {'letter_ok': int, 'case_ok': int, 'total': int}
@@ -196,6 +198,13 @@ def test_model(model_dir, test_data_dir, output_dir='results', device='auto'):
             recode_mse = F.mse_loss(recode_recon, partner_clean).item()
             recode_mse_scores.append(recode_mse)
 
+        # Track for summary
+        if letter_ok and case_ok:
+            correct_list.append((original_char, font))
+        else:
+            pred_display = pred_letter.lower() if case == 'lower' else pred_letter
+            errors.append((original_char, font, pred_display, letter_ok, case_ok))
+
     letter_acc = letter_correct / total if total > 0 else 0
     case_acc = case_correct / total if total > 0 else 0
     avg_mse = np.mean(mse_scores) if mse_scores else 0
@@ -216,6 +225,48 @@ def test_model(model_dir, test_data_dir, output_dir='results', device='auto'):
             cs_acc = s['case_ok'] / s['total'] * 100
             print(f"  {fname:<24s}: Letter {lt_acc:5.1f}%  Case {cs_acc:5.1f}%  ({s['total']} samples)")
 
+    # Write summary file
+    summary_path = os.path.join(output_dir, 'summary.txt')
+    with open(summary_path, 'w') as f:
+        f.write(f"Letter: {letter_correct}/{total} ({letter_acc:.1%})\n")
+        f.write(f"Case:   {case_correct}/{total} ({case_acc:.1%})\n")
+        f.write(f"Avg MSE:      {avg_mse:.4f}\n")
+        if recode_mse_scores:
+            f.write(f"Avg recode:   {avg_recode_mse:.4f}\n")
+
+        if errors:
+            f.write(f"\nErrors ({len(errors)}):\n")
+            for char, font, pred, l_ok, c_ok in sorted(errors):
+                parts = []
+                if not l_ok:
+                    parts.append(f"ltr: {char}→{pred}")
+                if not c_ok:
+                    parts.append(f"case wrong")
+                font_tag = f"  [{font}]" if font != 'default' else ''
+                f.write(f"  {char}{font_tag}  ({', '.join(parts)})\n")
+
+        if len(font_stats) > 1:
+            f.write(f"\nPer-font:\n")
+            for fname in sorted(font_stats.keys()):
+                s = font_stats[fname]
+                lt_acc = s['letter_ok'] / s['total'] * 100
+                cs_acc = s['case_ok'] / s['total'] * 100
+                f.write(f"  {fname:<24s}: Letter {lt_acc:5.1f}%  Case {cs_acc:5.1f}%  "
+                        f"({s['total']})\n")
+
+        f.write(f"\nCorrect ({len(correct_list)}):\n")
+        line = '  '
+        for i, (char, _font) in enumerate(sorted(correct_list)):
+            line += char
+            if i < len(correct_list) - 1:
+                line += ', '
+            if len(line) > 78:
+                f.write(line + '\n')
+                line = '  '
+        if line.strip():
+            f.write(line + '\n')
+
+    print(f"Summary written to {summary_path}")
     print(f"Results saved in {output_dir}")
 
 
@@ -314,7 +365,7 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; 
 }
 .detail-cell.correct { border-color: #2ecc71; }
 .detail-cell.wrong { border-color: #e74c3c; }
-.detail-cell canvas { width: 120px; height: 120px; display: block; }
+.detail-cell canvas { width: 240px; height: 240px; display: block; }
 .detail-cell .font-name { font-size: 11px; color: #a0a0c0; margin-top: 2px; }
 .detail-cell .pred-info { font-size: 10px; color: #888; }
 </style>
@@ -726,6 +777,9 @@ def test_bigram_model(model_dir, test_data_dir, output_dir='bigram_results', dev
 
     # Per-font tracking
     font_stats = {}
+    # Per-sample results for summary file
+    errors = []    # list of (bigram, font, pred1_char, pred2_char, ok1, ok2)
+    correct = []   # list of (bigram, font)
 
     for i in range(len(dataset)):
         img, clean, letter1, letter2, bigram, font = dataset[i]
@@ -767,6 +821,12 @@ def test_bigram_model(model_dir, test_data_dir, output_dir='bigram_results', dev
         font_tag = f'  [{font}]' if len(font_stats) > 1 or font != 'default' else ''
         print(f"  {bigram}{font_tag}: P1={mark1}  P2={mark2}  MSE={mse:.4f}")
 
+        # Track for summary
+        if ok_both:
+            correct.append((bigram, font))
+        else:
+            errors.append((bigram, font, pred1_char, pred2_char, ok1, ok2))
+
         # Save attention overlay
         visualize_attention(
             img.squeeze(0), locations,
@@ -799,6 +859,48 @@ def test_bigram_model(model_dir, test_data_dir, output_dir='bigram_results', dev
             ab = s['both_ok'] / s['total'] * 100
             print(f"  {fname:<24s}: P1 {a1:5.1f}%  P2 {a2:5.1f}%  Both {ab:5.1f}%  ({s['total']} samples)")
 
+    # Write summary file
+    summary_path = os.path.join(output_dir, 'summary.txt')
+    with open(summary_path, 'w') as f:
+        f.write(f"Both-correct: {both_correct}/{total} ({acc_both:.1%})\n")
+        f.write(f"Pos 1:        {pos1_correct}/{total} ({acc1:.1%})\n")
+        f.write(f"Pos 2:        {pos2_correct}/{total} ({acc2:.1%})\n")
+        f.write(f"Avg MSE:      {avg_mse:.4f}\n")
+
+        if errors:
+            f.write(f"\nErrors ({len(errors)}):\n")
+            for bigram, font, p1, p2, ok1, ok2 in sorted(errors):
+                parts = []
+                if not ok1:
+                    parts.append(f"pos1: {bigram[0]}→{p1}")
+                if not ok2:
+                    parts.append(f"pos2: {bigram[1]}→{p2}")
+                font_tag = f"  [{font}]" if font != 'default' else ''
+                f.write(f"  {bigram} → {p1}{p2}{font_tag}  ({', '.join(parts)})\n")
+
+        if len(font_stats) > 1:
+            f.write(f"\nPer-font:\n")
+            for fname in sorted(font_stats.keys()):
+                s = font_stats[fname]
+                a1 = s['pos1_ok'] / s['total'] * 100
+                a2 = s['pos2_ok'] / s['total'] * 100
+                ab = s['both_ok'] / s['total'] * 100
+                f.write(f"  {fname:<24s}: P1 {a1:5.1f}%  P2 {a2:5.1f}%  "
+                        f"Both {ab:5.1f}%  ({s['total']})\n")
+
+        f.write(f"\nCorrect ({len(correct)}):\n")
+        line = '  '
+        for i, (bigram, _font) in enumerate(sorted(correct)):
+            line += bigram
+            if i < len(correct) - 1:
+                line += ', '
+            if len(line) > 78:
+                f.write(line + '\n')
+                line = '  '
+        if line.strip():
+            f.write(line + '\n')
+
+    print(f"Summary written to {summary_path}")
     print(f"Results saved in {output_dir}")
 
 
@@ -868,7 +970,7 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; 
 .detail-cell.correct { border-color: #2ecc71; }
 .detail-cell.partial { border-color: #f39c12; }
 .detail-cell.wrong { border-color: #e74c3c; }
-.detail-cell canvas { width: 180px; height: 120px; display: block; }
+.detail-cell canvas { width: 360px; height: 240px; display: block; }
 .detail-cell .font-name { font-size: 11px; color: #a0a0c0; margin-top: 2px; }
 .detail-cell .pred-info { font-size: 10px; color: #888; }
 </style>

@@ -1,0 +1,7 @@
+git: 43dfb17
+date: 2026-02-26T19:03:16+01:00
+fonts: all
+letters: Aa-Zz
+epochs: 100
+batch: 52
+guide: 8.0
