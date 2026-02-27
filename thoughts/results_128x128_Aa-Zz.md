@@ -10,6 +10,21 @@
 - **Hit rate**: ~35% (diagnostic)
 - **Training time**: ~19 min on GPU (200 epochs, ~5.7s/epoch)
 
+## Training commands
+
+```bash
+# Generate data
+make generate FONTS=default LETTERS=Aa-Zz VARIANTS=20 NOISE=0.1
+make generate-test FONTS=default LETTERS=Aa-Zz
+
+# Train
+make train EPOCHS=200 DEVICE=cuda BATCH=26 GUIDE=8.0 FONTS=default
+
+# Full CLI equivalent
+python vision_training.py generate --letters Aa-Zz --num_variants 20 --noise_level 0.1 --output_dir data/letters --fonts default
+python vision_training.py train --data_dir data/letters --epochs 200 --save_dir data/models --checkpoint_interval 10 --n_glimpses 10 --patch_size 12 --n_scales 1 --device cuda --batch_size 26 --guide_weight 8.0 --diversity_weight 1.0 --diversity_sigma 0.1 --recode_weight 1.0 --blur_sigma_ratio 0.16 --diversity_vy 1.0
+```
+
 ## Final epoch losses
 ```
 Epoch 200/200: Recon 0.0035  Ltr 0.0001  Case 0.0001  Attn -0.1205  Div 0.0545  Hit 36%  Recode 0.0001

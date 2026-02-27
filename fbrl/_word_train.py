@@ -155,6 +155,25 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
             losses_isolation = h.get('isolation', [])
             hist_hit_rate = h.get('hit_rate', [])
             hist_hit_intensity = h.get('hit_intensity', [])
+
+        # Restore scaffold state from checkpoint (or infer from CLI args)
+        saved_scaffold = checkpoint.get('scaffold_epochs', 0)
+        if saved_scaffold == 0 and scaffold_epochs > 0 and start_epoch < scaffold_epochs:
+            # Old checkpoint without scaffold_epochs field — infer from CLI
+            saved_scaffold = scaffold_epochs
+            print(f"Resume: scaffold_epochs not in checkpoint, using CLI value {scaffold_epochs}")
+        if saved_scaffold > 0 and start_epoch < saved_scaffold:
+            transfer_scaffold = True
+            scaffold_epochs = saved_scaffold
+            for p in model.read_sensor.parameters():
+                p.requires_grad = False
+            for clf in model.classifiers:
+                for p in clf.parameters():
+                    p.requires_grad = False
+            print(f"Resume: scaffold active (read_sensor + classifiers frozen until epoch {scaffold_epochs})")
+        elif saved_scaffold > 0:
+            print(f"Resume: scaffold complete (ended at epoch {saved_scaffold})")
+
         print(f"Resumed from epoch {start_epoch} ({len(losses_recon)} prior epochs of history)")
 
     # --- Optimizer setup ---
@@ -237,6 +256,18 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
     if multi_head:
         attn_opt, cls_opt, recon_opt, attn_sched, cls_sched, recon_sched = \
             _make_multi_head_optimizers(transfer_scaffold, epochs)
+        # Restore optimizer states from checkpoint if available
+        if resume and checkpoint.get('multi_head', False):
+            if 'attn_optimizer' in checkpoint:
+                attn_opt.load_state_dict(checkpoint['attn_optimizer'])
+                cls_opt.load_state_dict(checkpoint['cls_optimizer'])
+                recon_opt.load_state_dict(checkpoint['recon_optimizer'])
+                attn_sched.load_state_dict(checkpoint['attn_scheduler'])
+                cls_sched.load_state_dict(checkpoint['cls_scheduler'])
+                recon_sched.load_state_dict(checkpoint['recon_scheduler'])
+                print(f"Resume: restored multi-head optimizer + scheduler states")
+            else:
+                print(f"Warning: checkpoint has no optimizer states, starting fresh")
     else:
         optimizer, scheduler = _make_single_optimizer(transfer_scaffold, epochs)
 
@@ -348,33 +379,42 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                     content_loss = content_loss + bce(logit, label)
                 content_loss = content_loss / len(scan_content_logits)
 
-            # Isolation: 128x128 single-letter images or legacy mask
+            # Isolation: prepare data (forward deferred in multi_head to save GPU memory)
             isolation_loss = torch.tensor(0.0, device=device)
+            iso_batch = None
+            iso_targets_t = None
+            iso_k = None
             if isolation_weight > 0 and iso_dataset is not None:
-                # 128x128 isolation: feed single-letter images to word model
-                k = torch.randint(0, n_positions, (1,)).item()
+                # 128x128 isolation: prepare single-letter image batch
+                iso_k = torch.randint(0, n_positions, (1,)).item()
                 iso_imgs = []
                 iso_targets = []
                 for b in range(B):
-                    letter_idx = idx_list[k][b].item()
+                    letter_idx = idx_list[iso_k][b].item()
                     if random.random() < isolation_random_prob:
                         letter_idx = random.randint(0, 25)
                     iso_imgs.append(iso_dataset.get_image(letter_idx, fonts_batch[b]))
                     iso_targets.append(letter_idx)
                 iso_batch = torch.stack(iso_imgs).to(device)  # (B, 1, 128, 128)
                 iso_targets_t = torch.tensor(iso_targets, device=device)
-                _, iso_logits, _, _, _ = model(iso_batch)
-                isolation_loss = F.cross_entropy(iso_logits[k], iso_targets_t)
+                if not multi_head:
+                    # Single optimizer: forward now (needed for total_loss sum)
+                    _, iso_logits, _, _, _ = model(iso_batch)
+                    isolation_loss = F.cross_entropy(iso_logits[iso_k], iso_targets_t)
             elif isolation_weight > 0:
                 # Legacy mask-based isolation (fallback)
-                k = torch.randint(0, n_positions, (1,)).item()
+                iso_k = torch.randint(0, n_positions, (1,)).item()
                 W = img.shape[3]
                 stripe_w = W // n_positions
                 mask = torch.zeros_like(img)
-                mask[:, :, :, k * stripe_w:(k + 1) * stripe_w] = 1.0
+                mask[:, :, :, iso_k * stripe_w:(iso_k + 1) * stripe_w] = 1.0
                 masked_img = img * mask
-                _, iso_logits, _, _, _ = model(masked_img)
-                isolation_loss = F.cross_entropy(iso_logits[k], idx_list[k])
+                if not multi_head:
+                    _, iso_logits, _, _, _ = model(masked_img)
+                    isolation_loss = F.cross_entropy(iso_logits[iso_k], idx_list[iso_k])
+                else:
+                    iso_batch = masked_img
+                    iso_targets_t = idx_list[iso_k]
 
             # --- Backward pass ---
             if multi_head:
@@ -403,10 +443,11 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                 # 3. Reconstruction loss -> decoder (last pass, frees main graph)
                 recon_loss.backward(inputs=recon_params)
 
-                # Isolation: separate forward -> separate computation graph
-                if isolation_weight > 0 and isolation_loss.requires_grad:
-                    if active_cls:
-                        (isolation_weight * isolation_loss).backward(inputs=active_cls)
+                # Isolation forward + backward AFTER main graph freed (saves GPU memory)
+                if isolation_weight > 0 and iso_batch is not None and active_cls:
+                    _, iso_logits, _, _, _ = model(iso_batch)
+                    isolation_loss = F.cross_entropy(iso_logits[iso_k], iso_targets_t)
+                    (isolation_weight * isolation_loss).backward(inputs=active_cls)
 
                 # Per-group clipping and step
                 for params, opt in [(active_attn, attn_opt), (active_cls, cls_opt),
@@ -529,7 +570,8 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                                   losses_content, losses_isolation, hist_hit_rate,
                                   hist_hit_intensity,
                                   os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth'),
-                                  multi_head=multi_head, opt_states=opt_states)
+                                  multi_head=multi_head, opt_states=opt_states,
+                                  scaffold_epochs=scaffold_epochs)
 
     log_file.close()
     print(f"Training log saved to {log_path}")
@@ -550,7 +592,8 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                            losses_content, losses_isolation, hist_hit_rate,
                            hist_hit_intensity,
                            os.path.join(save_dir, 'model_final.pth'),
-                           multi_head=multi_head, opt_states=opt_states)
+                           multi_head=multi_head, opt_states=opt_states,
+                           scaffold_epochs=scaffold_epochs)
 
     # Training metrics graph
     epochs_x = range(end_epoch - len(losses_recon) + 1, end_epoch + 1)
@@ -622,7 +665,7 @@ def _save_word_checkpoint(model, epoch, n_scan_glimpses, n_read_glimpses,
                            scan_patch_size, read_patch_size, n_scales, n_positions,
                            losses_recon, losses_pos_cls, losses_attn, losses_div,
                            losses_content, losses_isolation, hist_hr, hist_hi, path,
-                           multi_head=False, opt_states=None):
+                           multi_head=False, opt_states=None, scaffold_epochs=0):
     """Save a word model checkpoint with two-phase metadata."""
     losses = {
         'recon': losses_recon, 'attn': losses_attn,
@@ -647,6 +690,7 @@ def _save_word_checkpoint(model, epoch, n_scan_glimpses, n_read_glimpses,
         'image_size': (128, 256),
         'losses': losses,
         'multi_head': multi_head,
+        'scaffold_epochs': scaffold_epochs,
     }
     if multi_head and opt_states:
         ckpt.update(opt_states)

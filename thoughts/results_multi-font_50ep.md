@@ -10,6 +10,20 @@
 - **Dataset**: 11,440 training samples (52 letters x 20 variants x 11 fonts)
 - **Test set**: 572 samples (52 letters x 11 fonts)
 
+## Training commands
+
+```bash
+# Generate data (11 fonts)
+make generate FONTS=all LETTERS=Aa-Zz VARIANTS=20 NOISE=0.1
+make generate-test FONTS=all LETTERS=Aa-Zz
+
+# Train
+make train EPOCHS=50 DEVICE=cuda BATCH=52 GUIDE=8.0 FONTS=all
+
+# Full CLI equivalent
+python vision_training.py train --data_dir data/letters --epochs 50 --save_dir data/models --checkpoint_interval 10 --n_glimpses 10 --patch_size 12 --n_scales 1 --device cuda --batch_size 52 --guide_weight 8.0 --diversity_weight 1.0 --diversity_sigma 0.1 --recode_weight 1.0 --blur_sigma_ratio 0.16 --diversity_vy 1.0
+```
+
 ## Final epoch losses
 ```
 Epoch 50/50: Recon 0.0081  Ltr 0.0350  Case 0.0139  Attn -0.1558  Div 0.1033  Hit 44%  Recode 0.0063

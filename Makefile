@@ -13,6 +13,7 @@ BATCH    ?= 52
 GUIDE    ?= 8.0
 SCAFFOLD_RATIO ?= 0.67
 SCAFFOLD_FLOOR ?= 0.0
+SCAFFOLD_EPOCHS ?=
 TRANSFER ?=
 SCAN_GLIMPSES ?= 5
 READ_GLIMPSES ?= 6
@@ -31,6 +32,7 @@ WORD_READ_GLIMPSES ?= 12
 ISOLATION_DATA ?=
 MULTI_HEAD ?=
 ISO_RANDOM ?= 0.0
+RESUME_FROM ?= model_final.pth
 
 # Lifecycle
 build:
@@ -70,7 +72,7 @@ train:
 	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --diversity_vy $(VY)
 
 resume:
-	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --diversity_vy $(VY) --resume data/models/model_final.pth
+	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --diversity_vy $(VY) --resume data/models/$(RESUME_FROM)
 
 test:
 	@$(CLEAN_RESULTS)
@@ -104,6 +106,8 @@ endif
 	@echo "epochs: $(EPOCHS)" >> runs/$(NAME)/info.txt
 	@echo "batch: $(BATCH)" >> runs/$(NAME)/info.txt
 	@echo "guide: $(GUIDE)" >> runs/$(NAME)/info.txt
+	@echo "make: make train EPOCHS=$(EPOCHS) DEVICE=$(DEVICE) BATCH=$(BATCH) GUIDE=$(GUIDE) VY=$(VY) FONTS=$(FONTS)" >> runs/$(NAME)/info.txt
+	@echo "cli: python vision_training.py train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --patch_size 12 --n_scales 1 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --diversity_weight 1.0 --diversity_sigma 0.1 --recode_weight 1.0 --blur_sigma_ratio 0.16 --diversity_vy $(VY)" >> runs/$(NAME)/info.txt
 	@echo "Archived to runs/$(NAME)/"
 
 # Bigram pipeline (separate data dirs from single-letter)
@@ -118,7 +122,7 @@ train-bigrams:
 	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(SCAN_GLIMPSES) --n_read_glimpses $(READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER))
 
 resume-bigrams:
-	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(SCAN_GLIMPSES) --n_read_glimpses $(READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --resume data/bigram_models/model_final.pth
+	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(SCAN_GLIMPSES) --n_read_glimpses $(READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --resume data/bigram_models/$(RESUME_FROM)
 
 test-bigrams:
 	@$(CLEAN_BIGRAM_RESULTS)
@@ -152,6 +156,8 @@ endif
 	@echo "scan: $(SCAN_GLIMPSES) glimpses, patch $(SCAN_PATCH)" >> runs/$(NAME)/info.txt
 	@echo "read: $(READ_GLIMPSES) glimpses, patch $(READ_PATCH)" >> runs/$(NAME)/info.txt
 	@echo "scaffold_ratio: $(SCAFFOLD_RATIO)" >> runs/$(NAME)/info.txt
+	@echo "make: make train-bigrams EPOCHS=$(EPOCHS) DEVICE=$(DEVICE) BATCH=$(BATCH) GUIDE=$(GUIDE) SCAFFOLD_RATIO=$(SCAFFOLD_RATIO) SCAFFOLD_FLOOR=$(SCAFFOLD_FLOOR) SCAN_VY=$(SCAN_VY) READ_VY=$(READ_VY) MASK=$(MASK) EDGE=$(EDGE) FONTS=$(FONTS)$(if $(SCAN_GUIDE), SCAN_GUIDE=$(SCAN_GUIDE))$(if $(TRANSFER), TRANSFER=$(TRANSFER))" >> runs/$(NAME)/info.txt
+	@echo "cli: python vision_training.py train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(SCAN_GLIMPSES) --n_read_glimpses $(READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --n_scales 1 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --blur_sigma_ratio 0.16 --diversity_weight 1.0 --diversity_sigma 0.1$(if $(SCAN_GUIDE), --scan_guide_weight $(SCAN_GUIDE))$(if $(TRANSFER), --transfer $(TRANSFER))" >> runs/$(NAME)/info.txt
 	@echo "Archived to runs/$(NAME)/"
 
 # Word pipeline (4-letter words, 256x128 canvas, prescribed x-scan)
@@ -163,10 +169,10 @@ generate-words-test:
 
 train-words:
 	@$(CLEAN_WORD_MODELS)
-	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER)) $(if $(ISOLATION_DATA),--isolation_data_dir $(ISOLATION_DATA)) --isolation_random_prob $(ISO_RANDOM) $(if $(MULTI_HEAD),--multi_head)
+	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) $(if $(SCAFFOLD_EPOCHS),--scaffold_epochs $(SCAFFOLD_EPOCHS)) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER)) $(if $(ISOLATION_DATA),--isolation_data_dir $(ISOLATION_DATA)) --isolation_random_prob $(ISO_RANDOM) $(if $(MULTI_HEAD),--multi_head)
 
 resume-words:
-	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --resume data/word_models/model_final.pth $(if $(ISOLATION_DATA),--isolation_data_dir $(ISOLATION_DATA)) --isolation_random_prob $(ISO_RANDOM) $(if $(MULTI_HEAD),--multi_head)
+	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) $(if $(SCAFFOLD_EPOCHS),--scaffold_epochs $(SCAFFOLD_EPOCHS)) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --resume data/word_models/$(RESUME_FROM) $(if $(ISOLATION_DATA),--isolation_data_dir $(ISOLATION_DATA)) --isolation_random_prob $(ISO_RANDOM) $(if $(MULTI_HEAD),--multi_head)
 
 test-words:
 	@$(CLEAN_WORD_RESULTS)
@@ -198,6 +204,8 @@ endif
 	@echo "read: $(WORD_READ_GLIMPSES) glimpses (free), patch $(READ_PATCH)" >> runs/$(NAME)/info.txt
 	@echo "scaffold_ratio: $(SCAFFOLD_RATIO)" >> runs/$(NAME)/info.txt
 	@echo "content_weight: $(CONTENT)" >> runs/$(NAME)/info.txt
+	@echo "make: make train-words EPOCHS=$(EPOCHS) DEVICE=$(DEVICE) BATCH=$(BATCH) GUIDE=$(GUIDE) SCAFFOLD_RATIO=$(SCAFFOLD_RATIO) SCAFFOLD_FLOOR=$(SCAFFOLD_FLOOR) CONTENT=$(CONTENT) ISOLATION=$(ISOLATION) SCAN_VY=$(SCAN_VY) READ_VY=$(READ_VY) EDGE=$(EDGE) FONTS=$(FONTS) ISO_RANDOM=$(ISO_RANDOM)$(if $(SCAN_GUIDE), SCAN_GUIDE=$(SCAN_GUIDE))$(if $(TRANSFER), TRANSFER=$(TRANSFER))$(if $(ISOLATION_DATA), ISOLATION_DATA=$(ISOLATION_DATA))$(if $(MULTI_HEAD), MULTI_HEAD=$(MULTI_HEAD))" >> runs/$(NAME)/info.txt
+	@echo "cli: python vision_training.py train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --n_scales 1 --n_positions 4 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --blur_sigma_ratio 0.16 --diversity_weight 1.0 --diversity_sigma 0.1 --isolation_random_prob $(ISO_RANDOM)$(if $(SCAN_GUIDE), --scan_guide_weight $(SCAN_GUIDE))$(if $(TRANSFER), --transfer $(TRANSFER))$(if $(ISOLATION_DATA), --isolation_data_dir $(ISOLATION_DATA))$(if $(MULTI_HEAD), --multi_head)" >> runs/$(NAME)/info.txt
 	@echo "Archived to runs/$(NAME)/"
 
 .PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive \

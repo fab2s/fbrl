@@ -28,6 +28,22 @@ The BigramVisionModel reuses the single-letter encoder (GlimpseSensor + Attentio
 
 **Hit rate stable at ~40%**: the transferred attention immediately engaged (epoch 1: 40% hit rate), confirming the encoder brought useful spatial priors from single-letter training.
 
+## Training commands
+
+```bash
+# Generate data (1 font for bigrams)
+make generate-bigrams FONTS=default VARIANTS=20
+make generate-bigrams-test FONTS=default
+
+# Train with transfer from v3 single-letter model
+make train-bigrams EPOCHS=300 DEVICE=cuda BATCH=52 GUIDE=8.0 \
+    SCAFFOLD_RATIO=0.67 SCAN_VY=0.3 READ_VY=1.5 MASK=0.5 \
+    TRANSFER=runs/v3-multi-font-cosine/model_final.pth.gz
+
+# Full CLI equivalent
+python vision_training.py train_bigrams --data_dir data/bigrams --epochs 300 --save_dir data/bigram_models --checkpoint_interval 10 --n_scan_glimpses 5 --n_read_glimpses 6 --scan_patch_size 12,18 --read_patch_size 12 --n_scales 1 --device cuda --batch_size 52 --guide_weight 8.0 --scaffold_ratio 0.67 --scaffold_floor 0.0 --mask_weight 0.5 --scan_vy 0.3 --read_vy 1.5 --edge_weight 0.0 --blur_sigma_ratio 0.16 --diversity_weight 1.0 --diversity_sigma 0.1 --transfer runs/v3-multi-font-cosine/model_final.pth.gz
+```
+
 ## Final epoch losses
 ```
 Epoch 300/300: Recon 0.0017  Pos1 0.0008  Pos2 0.0005  Attn -0.1869  Div 0.1687  Hit 40%  lr_enc 0.000000  lr_read 0.000000  scaff 0.0000

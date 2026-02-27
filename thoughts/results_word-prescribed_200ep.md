@@ -28,6 +28,25 @@ This reflects how human reading proceeds roughly left-to-right — the model doe
 
 **Isolation mask loss**: Random 1-of-4 letter position exposed per batch, other 3 zeroed out. Second forward pass, CE on exposed position only. Weight=0.5.
 
+## Training commands
+
+```bash
+# Generate data (1 font for words)
+make generate-words FONTS=default VARIANTS=20
+make generate-words-test FONTS=default
+
+# Train with transfer from single-letter model
+make train-words EPOCHS=200 DEVICE=cuda BATCH=52 GUIDE=8.0 \
+    SCAFFOLD_RATIO=0.67 CONTENT=0.5 ISOLATION=0.5 \
+    SCAN_VY=0.3 READ_VY=1.5 \
+    TRANSFER=data/models/model_final.pth
+
+# Full CLI equivalent
+python vision_training.py train_words --data_dir data/words --epochs 200 --save_dir data/word_models --checkpoint_interval 10 --n_scan_glimpses 8 --n_read_glimpses 12 --scan_patch_size 12,18 --read_patch_size 12 --n_scales 1 --n_positions 4 --device cuda --batch_size 52 --guide_weight 8.0 --scaffold_ratio 0.67 --scaffold_floor 0.0 --content_weight 0.5 --isolation_weight 0.5 --scan_vy 0.3 --read_vy 1.5 --edge_weight 0.0 --blur_sigma_ratio 0.16 --diversity_weight 1.0 --diversity_sigma 0.1 --transfer data/models/model_final.pth
+```
+
+Note: This run used the old mask-based isolation (zeroing 3 of 4 stripes). Later runs use `--isolation_data_dir data/letters` for 128x128 single-letter isolation.
+
 ## Training dynamics
 
 ### Convergence timeline

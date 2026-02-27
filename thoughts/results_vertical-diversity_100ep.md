@@ -34,6 +34,20 @@ def fixation_diversity_loss(locations, sigma=0.1, vy=1.0):
 
 With `vy=1.5`, two fixations at the same horizontal position but separated vertically by distance `d` experience repulsion as if they were `1.5d` apart. This makes vertical clustering 1.5x more expensive than horizontal clustering, directly counteracting the horizontal scan bias.
 
+## Training commands
+
+```bash
+# Generate data (11 fonts, same as v3)
+make generate FONTS=all LETTERS=Aa-Zz VARIANTS=20 NOISE=0.1
+make generate-test FONTS=all LETTERS=Aa-Zz
+
+# Train (VY=1.5 was the key change from v3)
+make train EPOCHS=100 DEVICE=cuda BATCH=52 GUIDE=8.0 VY=1.5 FONTS=all
+
+# Full CLI equivalent
+python vision_training.py train --data_dir data/letters --epochs 100 --save_dir data/models --checkpoint_interval 10 --n_glimpses 10 --patch_size 12 --n_scales 1 --device cuda --batch_size 52 --guide_weight 8.0 --diversity_weight 1.0 --diversity_sigma 0.1 --recode_weight 1.0 --blur_sigma_ratio 0.16 --diversity_vy 1.5
+```
+
 ## Key findings
 
 ### 1. Better attention with no accuracy cost

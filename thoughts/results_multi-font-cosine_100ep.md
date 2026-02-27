@@ -18,6 +18,20 @@ A previous 100-epoch run with constant lr=0.001 hit catastrophic divergence at e
 
 **Fix**: CosineAnnealingLR decays lr smoothly from 0.001 → 0 over the run. By epoch 43, lr was 0.000624 — gentle enough to keep the equilibrium stable. A minor perturbation at epoch 62 (Ltr jumped 0.0001 → 0.043) self-corrected within 2 epochs at lr=0.00033.
 
+## Training commands
+
+```bash
+# Generate data (11 fonts, same as v2)
+make generate FONTS=all LETTERS=Aa-Zz VARIANTS=20 NOISE=0.1
+make generate-test FONTS=all LETTERS=Aa-Zz
+
+# Train (CosineAnnealingLR was the key change from v2)
+make train EPOCHS=100 DEVICE=cuda BATCH=52 GUIDE=8.0 FONTS=all
+
+# Full CLI equivalent
+python vision_training.py train --data_dir data/letters --epochs 100 --save_dir data/models --checkpoint_interval 10 --n_glimpses 10 --patch_size 12 --n_scales 1 --device cuda --batch_size 52 --guide_weight 8.0 --diversity_weight 1.0 --diversity_sigma 0.1 --recode_weight 1.0 --blur_sigma_ratio 0.16 --diversity_vy 1.0
+```
+
 ## Final epoch losses
 ```
 Epoch 100/100: Recon 0.0039  Ltr 0.0000  Case 0.0000  Attn -0.1582  Div 0.1053  Hit 46%  Recode 0.0004  lr 0.000000
