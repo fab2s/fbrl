@@ -62,6 +62,14 @@ Stable at 33-34% throughout training. This is lower than bigram (~40%) but expec
 - **Read phase**: fixations cluster on individual letter positions, roughly 3 glimpses per letter
 - **Some words show potential shortcuts**: e.g., "gulf" — the fixation trajectory appears to skip the top of 'f', suggesting the model reads enough of the stroke to classify without full coverage. This isn't necessarily wrong (humans do this too) but worth watching in multi-font scenarios.
 
+### Diagonal scan trajectory
+
+The scan phase follows a slight **diagonal path from upper-left to lower-right**, rather than a flat horizontal sweep. This visually resembles natural reading saccade patterns (slight downward drift across a line), which could look like emergent behavior.
+
+However, the explanation is likely simpler: we only tested lowercase letters, and the model starts scanning from y=0 (vertical center of the canvas). Lowercase letter bodies sit slightly below center on the 128px canvas — the descenders and baseline pull the "center of mass" of letter strokes downward. The learned y naturally drifts down to track where the actual ink is, producing the diagonal appearance.
+
+**Implication for multi-font / mixed-case**: when scaling to uppercase letters or mixed-case words, the vertical center of letter strokes will shift upward (uppercase letters use more vertical extent, ascenders reach higher). It may be worth initializing the scan y slightly above center (e.g., y=-0.1) to better match the typical stroke center for mixed-case text, rather than starting at y=0 and relying on learning to correct the offset.
+
 ## Comparison across runs
 
 | Metric | v5 (1-letter, 11 fonts) | v4 (bigrams, 300ep) | v1-word (4-letter, 200ep) |

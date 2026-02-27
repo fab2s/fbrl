@@ -565,16 +565,21 @@ class WordVisionModel(nn.Module):
             scan_content_logits: list of (B, 1) content predictions per scan step
         """
         B = img.shape[0]
+        W = img.shape[3]
         h = self.controller.h0.expand(B, -1).contiguous()
         location = torch.zeros(B, 2, device=img.device)  # center start
         all_locations = [location]
         scan_content_logits = []
 
+        # Dynamic scan count: scales with image width (power-1.5 "log dimming")
+        # 64px→1, 128px→3, 192px→5, 256px→8
+        n_scan = max(1, round(self.n_scan_glimpses * (W / 256) ** 1.5))
+
         # Prescribed x positions: linear sweep left-to-right
-        scan_xs = torch.linspace(-0.75, 0.75, self.n_scan_glimpses, device=img.device)
+        scan_xs = torch.linspace(-0.75, 0.75, n_scan, device=img.device)
 
         # --- Phase 1: SCAN (wide patches, prescribed x, learned y) ---
-        for t in range(self.n_scan_glimpses):
+        for t in range(n_scan):
             glimpse = self.scan_sensor(img, location)
             h = self.controller.gru(glimpse, h)
             raw_loc = torch.tanh(self.controller.location_head(h))

@@ -28,6 +28,9 @@ CONTENT  ?= 0.5
 ISOLATION ?= 0.5
 WORD_SCAN_GLIMPSES ?= 8
 WORD_READ_GLIMPSES ?= 12
+ISOLATION_DATA ?=
+MULTI_HEAD ?=
+ISO_RANDOM ?= 0.0
 
 # Lifecycle
 build:
@@ -160,10 +163,10 @@ generate-words-test:
 
 train-words:
 	@$(CLEAN_WORD_MODELS)
-	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER))
+	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER)) $(if $(ISOLATION_DATA),--isolation_data_dir $(ISOLATION_DATA)) --isolation_random_prob $(ISO_RANDOM) $(if $(MULTI_HEAD),--multi_head)
 
 resume-words:
-	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --resume data/word_models/model_final.pth
+	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --resume data/word_models/model_final.pth $(if $(ISOLATION_DATA),--isolation_data_dir $(ISOLATION_DATA)) --isolation_random_prob $(ISO_RANDOM) $(if $(MULTI_HEAD),--multi_head)
 
 test-words:
 	@$(CLEAN_WORD_RESULTS)

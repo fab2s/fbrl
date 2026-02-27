@@ -8,8 +8,11 @@ import matplotlib.pyplot as plt
 import os
 import time
 
+import random
+from torch.nn.utils import clip_grad_norm_
+
 from fbrl import _resolve_device
-from fbrl.data import WordDataset
+from fbrl.data import WordDataset, IsolationLetterDataset
 from fbrl.model import WordVisionModel
 from fbrl.losses import (word_attention_loss, fixation_diversity_loss,
                           fixation_hit_rate)
@@ -29,7 +32,10 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                       transfer_from=None,
                       content_weight=0.5,
                       isolation_weight=0.5,
-                      edge_weight=0.0):
+                      edge_weight=0.0,
+                      isolation_data_dir=None,
+                      isolation_random_prob=0.0,
+                      multi_head=False):
     """Train a WordVisionModel with prescribed x-scan + free read on 256x128 word images.
 
     Phase 1 — SCAN: prescribed x sweep, learned y, content detection.
@@ -48,12 +54,13 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
     print(f"Word training on: {device}")
     print(f"Two-phase: scan={n_scan_glimpses} (prescribed x, {scan_patch_size}) + "
           f"read={n_read_glimpses} ({read_patch_size}) = {n_glimpses} glimpses")
+    iso_mode = f"128px ({isolation_data_dir})" if isolation_data_dir else "mask"
     print(f"Attention: guide_weight={guide_weight}  scan_guide={scan_guide_weight}  "
           f"blur_sigma_ratio={blur_sigma_ratio}  "
           f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}  "
           f"scan_vy={scan_vy}  read_vy={read_vy}  "
-          f"content_weight={content_weight}  isolation_weight={isolation_weight}  "
-          f"batch_size={batch_size}")
+          f"content_weight={content_weight}  isolation_weight={isolation_weight} ({iso_mode})  "
+          f"batch_size={batch_size}  multi_head={multi_head}")
     floor_str = f", floor={scaffold_floor}" if scaffold_floor > 0 else ""
     print(f"Temporal scaffold (read phase): {scaffold_epochs} epochs "
           f"({'disabled' if scaffold_epochs == 0 else f'{n_positions}-stripe L->R'}){floor_str}")
@@ -62,6 +69,11 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
     dataset = WordDataset(data_dir)
     use_cuda = device.type == 'cuda'
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=use_cuda)
+
+    # Isolation dataset: 128x128 single-letter images
+    iso_dataset = None
+    if isolation_data_dir and isolation_weight > 0:
+        iso_dataset = IsolationLetterDataset(isolation_data_dir)
 
     model = WordVisionModel(
         n_scan_glimpses=n_scan_glimpses, n_read_glimpses=n_read_glimpses,
@@ -145,31 +157,88 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
             hist_hit_intensity = h.get('hit_intensity', [])
         print(f"Resumed from epoch {start_epoch} ({len(losses_recon)} prior epochs of history)")
 
-    # Optimizer param groups
-    if transfer_scaffold:
-        optimizer = optim.Adam([
-            {'params': list(model.scan_sensor.parameters()), 'lr': 0.001},
-            {'params': list(model.controller.parameters()), 'lr': 0.0001},
-            {'params': list(model.content_head.parameters()), 'lr': 0.001},
-            {'params': list(model.readout.parameters()) + list(model.decoder.parameters()), 'lr': 0.001},
-        ])
-        print(f"Param groups (scaffold): scan_sensor lr=0.001, controller lr=0.0001, content+readout+decoder lr=0.001")
-    else:
-        sensor_ctrl_params = set(
-            list(model.scan_sensor.parameters()) +
-            list(model.read_sensor.parameters()) +
-            list(model.controller.parameters()) +
-            list(model.content_head.parameters())
-        )
-        readout_params = [p for p in model.parameters() if p not in sensor_ctrl_params]
-        optimizer = optim.Adam([
-            {'params': list(sensor_ctrl_params), 'lr': 0.0001},
-            {'params': readout_params, 'lr': 0.001},
-        ])
-        print(f"Param groups: sensors+controller+content lr=0.0001, readout lr=0.001")
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    # --- Optimizer setup ---
     criterion = torch.nn.MSELoss()
     bce = torch.nn.BCEWithLogitsLoss()
+
+    def _make_multi_head_optimizers(scaffold_phase, remaining_epochs):
+        """Create 3 separate optimizers for attention/classification/reconstruction."""
+        if scaffold_phase:
+            attn_opt = optim.Adam([
+                {'params': list(model.scan_sensor.parameters()), 'lr': 0.001},
+                {'params': list(model.controller.parameters()), 'lr': 0.0001},
+                {'params': list(model.content_head.parameters()), 'lr': 0.001},
+            ])
+            cls_opt = optim.Adam([
+                {'params': list(model.readout.parameters()), 'lr': 0.001},
+            ])
+            recon_opt = optim.Adam([
+                {'params': list(model.decoder.parameters()), 'lr': 0.001},
+            ])
+            print(f"Multi-head (scaffold): attn[scan=0.001,ctrl=0.0001,content=0.001] "
+                  f"cls[readout=0.001] recon[decoder=0.001]")
+        else:
+            attn_opt = optim.Adam([
+                {'params': list(model.scan_sensor.parameters()), 'lr': 0.0001},
+                {'params': list(model.read_sensor.parameters()), 'lr': 0.00001},
+                {'params': list(model.controller.parameters()), 'lr': 0.0001},
+                {'params': list(model.content_head.parameters()), 'lr': 0.0001},
+            ])
+            cls_opt = optim.Adam([
+                {'params': list(model.readout.parameters()), 'lr': 0.001},
+                {'params': [p for clf in model.classifiers for p in clf.parameters()], 'lr': 0.0001},
+            ])
+            recon_opt = optim.Adam([
+                {'params': list(model.decoder.parameters()), 'lr': 0.001},
+            ])
+            print(f"Multi-head (full): attn[scan=0.0001,read=0.00001,ctrl=0.0001,content=0.0001] "
+                  f"cls[readout=0.001,classifiers=0.0001] recon[decoder=0.001]")
+        attn_sched = optim.lr_scheduler.CosineAnnealingLR(attn_opt, T_max=remaining_epochs)
+        cls_sched = optim.lr_scheduler.CosineAnnealingLR(cls_opt, T_max=remaining_epochs)
+        recon_sched = optim.lr_scheduler.CosineAnnealingLR(recon_opt, T_max=remaining_epochs)
+        return attn_opt, cls_opt, recon_opt, attn_sched, cls_sched, recon_sched
+
+    def _make_single_optimizer(scaffold_phase, remaining_epochs):
+        """Create single combined optimizer (original behavior)."""
+        if scaffold_phase:
+            opt = optim.Adam([
+                {'params': list(model.scan_sensor.parameters()), 'lr': 0.001},
+                {'params': list(model.controller.parameters()), 'lr': 0.0001},
+                {'params': list(model.content_head.parameters()), 'lr': 0.001},
+                {'params': list(model.readout.parameters()) + list(model.decoder.parameters()), 'lr': 0.001},
+            ])
+            print(f"Single opt (scaffold): scan=0.001, ctrl=0.0001, content+readout+decoder=0.001")
+        else:
+            sensor_ctrl_params = set(
+                list(model.scan_sensor.parameters()) +
+                list(model.read_sensor.parameters()) +
+                list(model.controller.parameters()) +
+                list(model.content_head.parameters())
+            )
+            readout_params = [p for p in model.parameters() if p not in sensor_ctrl_params]
+            opt = optim.Adam([
+                {'params': list(sensor_ctrl_params), 'lr': 0.0001},
+                {'params': readout_params, 'lr': 0.001},
+            ])
+            print(f"Single opt: sensors+ctrl+content=0.0001, readout=0.001")
+        sched = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=remaining_epochs)
+        return opt, sched
+
+    # Collect param lists for multi-head backward(inputs=...)
+    attn_params = (list(model.scan_sensor.parameters()) +
+                   list(model.read_sensor.parameters()) +
+                   list(model.controller.parameters()) +
+                   list(model.content_head.parameters()))
+    cls_params = (list(model.readout.parameters()) +
+                  [p for clf in model.classifiers for p in clf.parameters()])
+    recon_params = list(model.decoder.parameters())
+
+    # Initial optimizer creation
+    if multi_head:
+        attn_opt, cls_opt, recon_opt, attn_sched, cls_sched, recon_sched = \
+            _make_multi_head_optimizers(transfer_scaffold, epochs)
+    else:
+        optimizer, scheduler = _make_single_optimizer(transfer_scaffold, epochs)
 
     end_epoch = start_epoch + epochs
     train_start = time.time()
@@ -183,8 +252,11 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
     log_file = open(log_path, 'a')
     if start_epoch == 0:
         pos_hdrs = '  '.join(f'{"pos"+str(p+1):>6s}' for p in range(n_positions))
-        log_file.write(f"epoch   recon  {pos_hdrs}   s_attn   r_attn      div  content   isolat      hit    lr_enc   lr_read    scaff  time\n")
-        log_file.write("-" * 155 + "\n")
+        if multi_head:
+            log_file.write(f"epoch   recon  {pos_hdrs}   s_attn   r_attn      div  content   isolat      hit   lr_attn    lr_cls  lr_rcon    scaff  time\n")
+        else:
+            log_file.write(f"epoch   recon  {pos_hdrs}   s_attn   r_attn      div  content   isolat      hit    lr_enc   lr_read    scaff  time\n")
+        log_file.write("-" * 160 + "\n")
     log_file.flush()
 
     for epoch in range(start_epoch, end_epoch):
@@ -196,17 +268,13 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
             for clf in model.classifiers:
                 for p in clf.parameters():
                     p.requires_grad = True
-            optimizer = optim.Adam([
-                {'params': list(model.scan_sensor.parameters()), 'lr': 0.0001},
-                {'params': list(model.read_sensor.parameters()), 'lr': 0.00001},
-                {'params': list(model.controller.parameters()), 'lr': 0.0001},
-                {'params': list(model.content_head.parameters()), 'lr': 0.0001},
-                {'params': [p for clf in model.classifiers for p in clf.parameters()], 'lr': 0.0001},
-                {'params': list(model.readout.parameters()) + list(model.decoder.parameters()), 'lr': 0.001},
-            ])
             remaining = end_epoch - epoch
-            scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=remaining)
-            print(f"Transfer: unfroze read_sensor + classifiers, 6 param groups for {remaining} epochs")
+            if multi_head:
+                attn_opt, cls_opt, recon_opt, attn_sched, cls_sched, recon_sched = \
+                    _make_multi_head_optimizers(False, remaining)
+            else:
+                optimizer, scheduler = _make_single_optimizer(False, remaining)
+            print(f"Transfer: unfroze read_sensor + classifiers for {remaining} epochs")
 
         epoch_start = time.time()
         total_loss_recon = 0
@@ -227,9 +295,10 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
         else:
             scaffold_weight = scaffold_floor
 
-        for img, clean, l1s, l2s, l3s, l4s, _words, _fonts in dataloader:
+        for img, clean, l1s, l2s, l3s, l4s, _words, fonts_batch in dataloader:
             img = img.to(device)
             clean = clean.to(device)
+            B = img.shape[0]
 
             # Labels: a=0 .. z=25
             letter_lists = [l1s, l2s, l3s, l4s]
@@ -241,6 +310,9 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
             # Forward
             recon, logits_list, locations, _readout_states, scan_content_logits = model(img)
 
+            # Actual scan count (may differ from n_scan_glimpses for non-256 images)
+            actual_n_scan = len(scan_content_logits)
+
             # Losses
             recon_loss = criterion(recon, img)
             cls_losses = []
@@ -249,15 +321,15 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
 
             # Word attention loss: scan gets full-image guide, read gets stripe scaffold
             scan_attn, read_attn = word_attention_loss(
-                clean, locations, n_scan_glimpses,
+                clean, locations, actual_n_scan,
                 n_positions=n_positions,
                 blur_sigma_ratio=blur_sigma_ratio,
                 scaffold_weight=scaffold_weight,
             )
 
             # Split diversity by phase
-            scan_locations = locations[:n_scan_glimpses + 1]
-            read_locations = locations[n_scan_glimpses:]
+            scan_locations = locations[:actual_n_scan + 1]
+            read_locations = locations[actual_n_scan:]
             scan_div = fixation_diversity_loss(scan_locations, sigma=diversity_sigma,
                                                vy=scan_vy)
             read_div = fixation_diversity_loss(read_locations, sigma=diversity_sigma,
@@ -267,21 +339,36 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
             # Content detection loss: sample clean image at scan locations
             content_loss = torch.tensor(0.0, device=device)
             if content_weight > 0 and len(scan_content_logits) > 0:
-                scan_locs = locations[1:n_scan_glimpses + 1]
+                scan_locs = locations[1:actual_n_scan + 1]
                 for t, (loc, logit) in enumerate(zip(scan_locs, scan_content_logits)):
-                    grid = loc.view(img.shape[0], 1, 1, 2)
+                    grid = loc.view(B, 1, 1, 2)
                     sampled = F.grid_sample(clean, grid, align_corners=True,
                                             padding_mode='zeros')
-                    # Label: 1 if intensity > 0.1, else 0
                     label = (sampled.view(-1, 1) > 0.1).float()
                     content_loss = content_loss + bce(logit, label)
                 content_loss = content_loss / len(scan_content_logits)
 
-            # Isolation mask: expose 1 random position, zero the rest
+            # Isolation: 128x128 single-letter images or legacy mask
             isolation_loss = torch.tensor(0.0, device=device)
-            if isolation_weight > 0:
+            if isolation_weight > 0 and iso_dataset is not None:
+                # 128x128 isolation: feed single-letter images to word model
                 k = torch.randint(0, n_positions, (1,)).item()
-                W = img.shape[3]  # 256
+                iso_imgs = []
+                iso_targets = []
+                for b in range(B):
+                    letter_idx = idx_list[k][b].item()
+                    if random.random() < isolation_random_prob:
+                        letter_idx = random.randint(0, 25)
+                    iso_imgs.append(iso_dataset.get_image(letter_idx, fonts_batch[b]))
+                    iso_targets.append(letter_idx)
+                iso_batch = torch.stack(iso_imgs).to(device)  # (B, 1, 128, 128)
+                iso_targets_t = torch.tensor(iso_targets, device=device)
+                _, iso_logits, _, _, _ = model(iso_batch)
+                isolation_loss = F.cross_entropy(iso_logits[k], iso_targets_t)
+            elif isolation_weight > 0:
+                # Legacy mask-based isolation (fallback)
+                k = torch.randint(0, n_positions, (1,)).item()
+                W = img.shape[3]
                 stripe_w = W // n_positions
                 mask = torch.zeros_like(img)
                 mask[:, :, :, k * stripe_w:(k + 1) * stripe_w] = 1.0
@@ -289,17 +376,56 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                 _, iso_logits, _, _, _ = model(masked_img)
                 isolation_loss = F.cross_entropy(iso_logits[k], idx_list[k])
 
-            total_loss = (recon_loss + sum(cls_losses)
-                          + scan_guide_weight * scan_attn
-                          + guide_weight * read_attn
-                          + diversity_weight * div_loss
-                          + content_weight * content_loss
-                          + isolation_weight * isolation_loss)
+            # --- Backward pass ---
+            if multi_head:
+                # Multi-head: 3 targeted backward passes
+                # Filter to trainable params only (scaffold freezes some)
+                active_attn = [p for p in attn_params if p.requires_grad]
+                active_cls = [p for p in cls_params if p.requires_grad]
 
-            optimizer.zero_grad()
-            total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            optimizer.step()
+                attn_opt.zero_grad()
+                cls_opt.zero_grad()
+                recon_opt.zero_grad()
+
+                # 1. Attention losses -> controller, sensors, content_head
+                attn_total = (scan_guide_weight * scan_attn
+                              + guide_weight * read_attn
+                              + diversity_weight * div_loss
+                              + content_weight * content_loss)
+                if active_attn:
+                    attn_total.backward(retain_graph=True, inputs=active_attn)
+
+                # 2. Classification losses -> readout, classifiers
+                cls_total = sum(cls_losses)
+                if active_cls:
+                    cls_total.backward(retain_graph=True, inputs=active_cls)
+
+                # 3. Reconstruction loss -> decoder (last pass, frees main graph)
+                recon_loss.backward(inputs=recon_params)
+
+                # Isolation: separate forward -> separate computation graph
+                if isolation_weight > 0 and isolation_loss.requires_grad:
+                    if active_cls:
+                        (isolation_weight * isolation_loss).backward(inputs=active_cls)
+
+                # Per-group clipping and step
+                for params, opt in [(active_attn, attn_opt), (active_cls, cls_opt),
+                                     (recon_params, recon_opt)]:
+                    if params:
+                        clip_grad_norm_(params, 5.0)
+                    opt.step()
+            else:
+                # Single optimizer: sum all losses
+                total_loss = (recon_loss + sum(cls_losses)
+                              + scan_guide_weight * scan_attn
+                              + guide_weight * read_attn
+                              + diversity_weight * div_loss
+                              + content_weight * content_loss
+                              + isolation_weight * isolation_loss)
+                optimizer.zero_grad()
+                total_loss.backward()
+                clip_grad_norm_(model.parameters(), 5.0)
+                optimizer.step()
 
             total_loss_recon += recon_loss.item()
             for p in range(n_positions):
@@ -349,9 +475,18 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
         eta_sec = remaining_ep * (elapsed / done)
         eta_min, eta_s = divmod(int(eta_sec), 60)
 
-        lrs = scheduler.get_last_lr()
-        lr_enc = lrs[0]
-        lr_read = lrs[-1]
+        if multi_head:
+            lr_attn = attn_sched.get_last_lr()[0]
+            lr_cls = cls_sched.get_last_lr()[0]
+            lr_recon = recon_sched.get_last_lr()[0]
+            lr_str = f"lr {lr_attn:.6f}/{lr_cls:.6f}/{lr_recon:.6f}"
+        else:
+            lrs = scheduler.get_last_lr()
+            lr_attn = lrs[0]
+            lr_cls = lrs[-1]
+            lr_recon = lr_cls
+            lr_str = f"lr {lr_attn:.6f}/{lr_cls:.6f}"
+
         pos_str = '  '.join(f'P{p+1} {avg_pos[p]:.4f} ({accs[p]:.0%})' for p in range(n_positions))
         scaff_str = f"  scaff {scaffold_weight:.2f}" if scaffold_epochs > 0 else ""
         iso_str = f"  Iso {avg_isolation:.4f}" if isolation_weight > 0 else ""
@@ -359,36 +494,63 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
               f"Recon {avg_recon:.4f}  {pos_str}  "
               f"SAttn {avg_scan_attn:.4f}  RAttn {avg_read_attn:.4f}  "
               f"Div {avg_div:.4f}  Cont {avg_content:.4f}{iso_str}  Hit {avg_hr:.0%}  "
-              f"lr {lr_enc:.6f}/{lr_read:.6f}{scaff_str}  "
+              f"{lr_str}{scaff_str}  "
               f"[{epoch_time:.1f}s  ETA {eta_min}m{eta_s:02d}s]")
 
         pos_log = '  '.join(f'{avg_pos[p]:.4f}' for p in range(n_positions))
         log_file.write(f"{epoch+1:>5d}  {avg_recon:.4f}  {pos_log}  "
                        f"{avg_scan_attn:.4f}  {avg_read_attn:.4f}  "
                        f"{avg_div:.4f}  {avg_content:.4f}  {avg_isolation:.4f}  "
-                       f"{avg_hr:.4f}  {lr_enc:.6f}  {lr_read:.6f}  "
-                       f"{scaffold_weight:.4f}  {epoch_time:.1f}s\n")
+                       f"{avg_hr:.4f}  {lr_attn:.6f}  {lr_cls:.6f}  "
+                       f"{lr_recon:.6f}  {scaffold_weight:.4f}  {epoch_time:.1f}s\n")
         log_file.flush()
 
-        scheduler.step()
+        if multi_head:
+            attn_sched.step()
+            cls_sched.step()
+            recon_sched.step()
+        else:
+            scheduler.step()
 
         if (epoch + 1 - start_epoch) % checkpoint_interval == 0:
+            opt_states = None
+            if multi_head:
+                opt_states = {
+                    'attn_optimizer': attn_opt.state_dict(),
+                    'cls_optimizer': cls_opt.state_dict(),
+                    'recon_optimizer': recon_opt.state_dict(),
+                    'attn_scheduler': attn_sched.state_dict(),
+                    'cls_scheduler': cls_sched.state_dict(),
+                    'recon_scheduler': recon_sched.state_dict(),
+                }
             _save_word_checkpoint(model, epoch, n_scan_glimpses, n_read_glimpses,
                                   scan_patch_size, read_patch_size, n_scales, n_positions,
                                   losses_recon, losses_pos_cls, losses_attn, losses_div,
                                   losses_content, losses_isolation, hist_hit_rate,
                                   hist_hit_intensity,
-                                  os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth'))
+                                  os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth'),
+                                  multi_head=multi_head, opt_states=opt_states)
 
     log_file.close()
     print(f"Training log saved to {log_path}")
 
+    opt_states = None
+    if multi_head:
+        opt_states = {
+            'attn_optimizer': attn_opt.state_dict(),
+            'cls_optimizer': cls_opt.state_dict(),
+            'recon_optimizer': recon_opt.state_dict(),
+            'attn_scheduler': attn_sched.state_dict(),
+            'cls_scheduler': cls_sched.state_dict(),
+            'recon_scheduler': recon_sched.state_dict(),
+        }
     _save_word_checkpoint(model, end_epoch - 1, n_scan_glimpses, n_read_glimpses,
                            scan_patch_size, read_patch_size, n_scales, n_positions,
                            losses_recon, losses_pos_cls, losses_attn, losses_div,
                            losses_content, losses_isolation, hist_hit_rate,
                            hist_hit_intensity,
-                           os.path.join(save_dir, 'model_final.pth'))
+                           os.path.join(save_dir, 'model_final.pth'),
+                           multi_head=multi_head, opt_states=opt_states)
 
     # Training metrics graph
     epochs_x = range(end_epoch - len(losses_recon) + 1, end_epoch + 1)
@@ -459,7 +621,8 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
 def _save_word_checkpoint(model, epoch, n_scan_glimpses, n_read_glimpses,
                            scan_patch_size, read_patch_size, n_scales, n_positions,
                            losses_recon, losses_pos_cls, losses_attn, losses_div,
-                           losses_content, losses_isolation, hist_hr, hist_hi, path):
+                           losses_content, losses_isolation, hist_hr, hist_hi, path,
+                           multi_head=False, opt_states=None):
     """Save a word model checkpoint with two-phase metadata."""
     losses = {
         'recon': losses_recon, 'attn': losses_attn,
@@ -470,7 +633,7 @@ def _save_word_checkpoint(model, epoch, n_scan_glimpses, n_read_glimpses,
     for p in range(n_positions):
         losses[f'pos{p+1}_cls'] = losses_pos_cls[p]
 
-    torch.save({
+    ckpt = {
         'epoch': epoch,
         'model': {k: v.cpu() for k, v in model.state_dict().items()},
         'model_type': 'word',
@@ -483,4 +646,8 @@ def _save_word_checkpoint(model, epoch, n_scan_glimpses, n_read_glimpses,
         'n_positions': n_positions,
         'image_size': (128, 256),
         'losses': losses,
-    }, path)
+        'multi_head': multi_head,
+    }
+    if multi_head and opt_states:
+        ckpt.update(opt_states)
+    torch.save(ckpt, path)

@@ -256,6 +256,7 @@ Epoch 5/200: Recon 0.0312  P1 3.1000 (5%)  P2 3.0800 (5%)  P3 3.1200 (4%)  P4 3.
 - [128x128, Aa-Zz, 11 fonts, 50 epochs](thoughts/results_multi-font_50ep.md) — 99.5% letter, 99.7% case across all fonts (guide_weight=8.0)
 - [128x128, Aa-Zz, 11 fonts, 100 epochs, CosineAnnealingLR](thoughts/results_multi-font-cosine_100ep.md) — 100% letter, 100% case, all 11 fonts perfect
 - [192x128, 200 bigrams, transfer learning, 300 epochs](thoughts/results_bigram-transfer_300ep.md) — 97% both-correct, first successful bigram run
+- [256x128, 200 words, prescribed x-scan, 200 epochs](thoughts/results_word-prescribed_200ep.md) — 100% all 4 positions, genuine sequential reading
 
 ## Requirements
 

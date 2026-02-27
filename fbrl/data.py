@@ -419,6 +419,74 @@ class BigramDataset(Dataset):
                 self.bigrams[idx], self.fonts[idx])
 
 
+# --- Isolation Letter Dataset (128x128 single letters for word isolation testing) ---
+
+class IsolationLetterDataset:
+    """Loads 128x128 single-letter clean images for isolation testing.
+
+    Lightweight lookup by (letter_index, font) -> random variant tensor.
+    Uses existing letter data directory (from `make generate-letters`).
+    Only loads lowercase letters (a-z) since word training uses lowercase.
+    """
+    def __init__(self, data_dir):
+        with open(os.path.join(data_dir, 'metadata.json'), 'r') as f:
+            metadata = json.load(f)
+
+        # by_letter_font[(letter_idx, font)] -> list of (1, 128, 128) tensors
+        self.by_letter_font = {}
+        self.fonts = set()
+        n_loaded = 0
+
+        for key, entry in metadata.items():
+            letter = entry.get('letter', '')
+            case = entry.get('case', 'upper')
+            font = entry.get('font', 'default')
+            if case != 'lower':
+                continue
+            letter_idx = ord(letter.lower()) - ord('a')
+            if letter_idx < 0 or letter_idx >= 26:
+                continue
+
+            # Prefer clean image if available
+            img_path = entry.get('clean', entry['image'])
+            img = Image.open(img_path).convert('L')
+            tensor = torch.tensor(
+                np.array(img) / 255.0, dtype=torch.float32,
+            ).unsqueeze(0)  # (1, 128, 128)
+
+            lf_key = (letter_idx, font)
+            if lf_key not in self.by_letter_font:
+                self.by_letter_font[lf_key] = []
+            self.by_letter_font[lf_key].append(tensor)
+            self.fonts.add(font)
+            n_loaded += 1
+
+        print(f"IsolationLetterDataset: {n_loaded} images, "
+              f"{len(self.fonts)} font(s), {len(self.by_letter_font)} (letter, font) combos")
+
+    def get_image(self, letter_idx, font='default'):
+        """Return a clean image tensor for the given letter index and font.
+
+        Args:
+            letter_idx: 0-25 (a-z)
+            font: font name string
+        Returns:
+            (1, 128, 128) tensor
+        """
+        variants = self.by_letter_font.get((letter_idx, font))
+        if variants is None:
+            # Fallback: try any font for this letter
+            for f in self.fonts:
+                variants = self.by_letter_font.get((letter_idx, f))
+                if variants:
+                    break
+        if variants is None:
+            # Last resort: return zeros
+            return torch.zeros(1, 128, 128)
+        idx = torch.randint(0, len(variants), (1,)).item()
+        return variants[idx]
+
+
 # --- Word Data Generation (4-letter words, 256x128 canvas) ---
 
 def generate_word_dataset(output_dir, noise_level=0.01, num_variants=1,

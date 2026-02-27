@@ -255,6 +255,13 @@ if __name__ == '__main__':
                                 help='Read diversity VY (>1 = vertical exploration)')
     train_w_parser.add_argument('--edge_weight', type=float, default=0.0,
                                 help='Edge exploration weight (0=off, prescribed x makes this unnecessary)')
+    train_w_parser.add_argument('--isolation_data_dir', default=None,
+                                help='Path to 128x128 single-letter data for isolation testing '
+                                     '(e.g. data/letters). When set, replaces mask-based isolation.')
+    train_w_parser.add_argument('--isolation_random_prob', type=float, default=0.0,
+                                help='Probability of substituting a random letter in isolation (0-1)')
+    train_w_parser.add_argument('--multi_head', action='store_true', default=False,
+                                help='Use 3 separate optimizers for attention/classification/reconstruction')
 
     test_w_parser = subparsers.add_parser('test_words')
     test_w_parser.add_argument('--model_dir', required=True)
@@ -420,7 +427,10 @@ if __name__ == '__main__':
                           transfer_from=args.transfer,
                           content_weight=args.content_weight,
                           isolation_weight=args.isolation_weight,
-                          edge_weight=args.edge_weight)
+                          edge_weight=args.edge_weight,
+                          isolation_data_dir=args.isolation_data_dir,
+                          isolation_random_prob=args.isolation_random_prob,
+                          multi_head=args.multi_head)
 
     elif args.command == 'test_words':
         test_word_model(args.model_dir, args.test_data_dir, args.output_dir,
