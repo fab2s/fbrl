@@ -38,6 +38,7 @@ def test_word_model(model_dir, test_data_dir, output_dir='word_results', device=
     font_stats = {}
     errors = []
     correct_list = []
+    all_results = []  # (word, font, pred_chars, oks, mse) for detailed log
 
     for i in range(len(dataset)):
         img, clean, l1, l2, l3, l4, word, font = dataset[i]
@@ -76,6 +77,8 @@ def test_word_model(model_dir, test_data_dir, output_dir='word_results', device=
         font_tag = f'  [{font}]' if len(font_stats) > 1 or font != 'default' else ''
         marks_str = '  '.join(f'P{p+1}={marks[p]}' for p in range(n_positions))
         print(f"  {word}{font_tag}: {marks_str}  MSE={mse:.4f}")
+
+        all_results.append((word, font, pred_chars, oks, mse))
 
         if ok_all:
             correct_list.append((word, font))
@@ -131,6 +134,16 @@ def test_word_model(model_dir, test_data_dir, output_dir='word_results', device=
                 pred_word = ''.join(pchars)
                 font_tag = f"  [{font}]" if font != 'default' else ''
                 f.write(f"  {word} -> {pred_word}{font_tag}  ({', '.join(parts)})\n")
+
+        # Detailed per-word log
+        f.write(f"\nPer-word detail ({total} samples):\n")
+        for word, font, pchars, oks, mse_val in sorted(all_results):
+            font_tag = f"  [{font}]" if font != 'default' else ''
+            marks = '  '.join(
+                f'P{p+1}=OK' if oks[p] else f'P{p+1}=WRONG({pchars[p]})'
+                for p in range(n_positions)
+            )
+            f.write(f"  {word}{font_tag}: {marks}  MSE={mse_val:.4f}\n")
 
         if len(font_stats) > 1:
             f.write(f"\nPer-font:\n")

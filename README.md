@@ -714,3 +714,7 @@ The research goal is to scale foveal attention from character recognition toward
 5. **Variable-length words** — Mixed word lengths with a language model prior. Tests whether the model skips predictable letters, fixates word centers, and spends more glimpses on rare words (all human reading behaviors).
 6. **Meta-attention** — A coarse controller that finds word boundaries (whitespace, line breaks) and deploys the fine letter-reader within each region. Hierarchical saccade planning.
 7. **Multimodal** — Integrate audio to provide top-down priors (syllable boundaries, word predictions) that guide visual attention during reading.
+
+## Reference
+
+- [Glossary](docs/glossary.md) — Deep learning terms, acronyms, and concepts as they appear in this project

@@ -182,9 +182,9 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
         os.rename(log_path, os.path.join(save_dir, f'training_{ts}.log'))
     log_file = open(log_path, 'a')
     if start_epoch == 0:
-        pos_hdrs = '  '.join(f'pos{p+1}    ' for p in range(n_positions))
-        log_file.write(f"epoch  recon    {pos_hdrs}s_attn   r_attn   div      content  isolat   hit      lr_enc   lr_read  scaff  time\n")
-        log_file.write("-" * 150 + "\n")
+        pos_hdrs = '  '.join(f'{"pos"+str(p+1):>6s}' for p in range(n_positions))
+        log_file.write(f"epoch   recon  {pos_hdrs}   s_attn   r_attn      div  content   isolat      hit    lr_enc   lr_read    scaff  time\n")
+        log_file.write("-" * 155 + "\n")
     log_file.flush()
 
     for epoch in range(start_epoch, end_epoch):
