@@ -449,3 +449,166 @@ class BigramVisionModel(nn.Module):
         recon = self.decoder(concat)
 
         return recon, logits_list, all_locations, readout_states
+
+
+# --- Word (4-Letter) Reading ---
+
+class WordDecoder(nn.Module):
+    """Generates 256x128 images from concatenated readout states.
+
+    Input: concatenated readout states (4 * latent_dim = 1024 by default).
+    FC projects to 128 channels x 32x64, then two stride-2 deconvs:
+      32x64 -> 64x128 -> 128x256
+    Output: (B, 1, 128, 256).
+    """
+    def __init__(self, latent_dim=256, n_positions=4):
+        super().__init__()
+        input_dim = latent_dim * n_positions  # 1024 by default
+        # FC expands to spatial feature map: 128 channels x 32x64
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, 128 * 32 * 64),
+            nn.ReLU(),
+        )
+        # Transposed convolutions: 32x64 -> 64x128 -> 128x256
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # 32x64->64x128
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, 5, stride=2, padding=2, output_padding=1),  # 64x128->128x256
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, 1, 3, padding=1),  # final 1-channel output
+            nn.Sigmoid(),
+        )
+
+    def forward(self, readout_states):
+        """Decode concatenated readout states into a 128x256 image.
+
+        Args:
+            readout_states: (B, n_positions * latent_dim)
+        Returns:
+            (B, 1, 128, 256) reconstructed word image
+        """
+        x = self.fc(readout_states)
+        x = x.view(-1, 128, 32, 64)  # (B, 128, 32, 64)
+        return self.deconv(x)
+
+
+class WordVisionModel(nn.Module):
+    """Full word model with prescribed x-scan + free read attention.
+
+    Phase 1 — SCAN (wide patches, prescribed x sweep):
+      x is PRESCRIBED: linear sweep [-0.75, +0.75] across 8 positions.
+      y is LEARNED: GRU -> location_head -> tanh -> y component only.
+      Content head: nn.Linear(hidden, 1) on each scan h -> content detection.
+      Purpose: force L->R scanning, learn vertical positioning, detect content.
+
+    Phase 2 — READ (focused patches, fully free):
+      Both x and y fully learned. h carries forward from scan.
+      Loss: temporal scaffold with 4 horizontal stripes (one per letter).
+
+    CrossAttentionReadout with 4 position tokens -> 4 classifiers + reconstruct.
+    """
+    def __init__(self, n_classes=26, latent_dim=256,
+                 n_scan_glimpses=8, n_read_glimpses=12,
+                 scan_patch_size=(12, 18), read_patch_size=12,
+                 n_scales=1, n_positions=4):
+        super().__init__()
+        self.n_positions = n_positions
+        self.latent_dim = latent_dim
+        self.n_scan_glimpses = n_scan_glimpses
+        self.n_read_glimpses = n_read_glimpses
+
+        # Two sensors: wide scan, focused read
+        self.scan_sensor = GlimpseSensor(
+            patch_size=scan_patch_size, n_scales=n_scales, latent_dim=latent_dim,
+        )
+        self.read_sensor = GlimpseSensor(
+            patch_size=read_patch_size, n_scales=n_scales, latent_dim=latent_dim,
+        )
+
+        # Shared GRU controller for both phases
+        self.controller = AttentionController(
+            glimpse_dim=latent_dim, hidden_dim=latent_dim, latent_dim=latent_dim,
+        )
+
+        # Content detection head: predicts whether scan location has letter content
+        self.content_head = nn.Linear(latent_dim, 1)
+
+        self.decoder = WordDecoder(latent_dim=latent_dim, n_positions=n_positions)
+
+        # Cross-attention readout — position tokens query READ states only
+        self.readout = CrossAttentionReadout(
+            latent_dim=latent_dim, n_positions=n_positions,
+        )
+        # Override query token initialization for 4-position reading
+        with torch.no_grad():
+            positions = torch.linspace(-0.75, 0.75, n_positions)
+            for i in range(n_positions):
+                self.readout.query_tokens.data[i, 0] = positions[i]
+
+        # Per-position letter classifiers (26-class each: a-z)
+        self.classifiers = nn.ModuleList([
+            nn.Linear(latent_dim, n_classes) for _ in range(n_positions)
+        ])
+
+    def forward(self, img):
+        """Forward pass with prescribed x-scan + free read.
+
+        Args:
+            img: (B, 1, 128, 256) word input image
+        Returns:
+            recon: (B, 1, 128, 256) reconstructed image
+            logits_list: [logits_pos1..pos4] each (B, 26)
+            locations: list of (B, 2) fixation coords (all phases)
+            readout_states: (B, n_positions, latent_dim)
+            scan_content_logits: list of (B, 1) content predictions per scan step
+        """
+        B = img.shape[0]
+        h = self.controller.h0.expand(B, -1).contiguous()
+        location = torch.zeros(B, 2, device=img.device)  # center start
+        all_locations = [location]
+        scan_content_logits = []
+
+        # Prescribed x positions: linear sweep left-to-right
+        scan_xs = torch.linspace(-0.75, 0.75, self.n_scan_glimpses, device=img.device)
+
+        # --- Phase 1: SCAN (wide patches, prescribed x, learned y) ---
+        for t in range(self.n_scan_glimpses):
+            glimpse = self.scan_sensor(img, location)
+            h = self.controller.gru(glimpse, h)
+            raw_loc = torch.tanh(self.controller.location_head(h))
+            # Prescribed x, learned y
+            location = torch.stack([
+                scan_xs[t].expand(B),
+                raw_loc[:, 1],
+            ], dim=1)
+            all_locations.append(location)
+            scan_content_logits.append(self.content_head(h))  # (B, 1)
+
+        # --- Phase 2: READ (focused patches, fully free) ---
+        # h carries forward from scan — spatial knowledge persists
+        read_states = []
+        for t in range(self.n_read_glimpses):
+            glimpse = self.read_sensor(img, location)
+            h = self.controller.gru(glimpse, h)
+            location = torch.tanh(self.controller.location_head(h))
+            all_locations.append(location)
+            read_states.append(h)
+
+        # Stack READ states for cross-attention (B, n_read, latent_dim)
+        read_states = torch.stack(read_states, dim=1)
+
+        # --- Cross-attention readout (READ states only) ---
+        readout_states = self.readout(read_states)  # (B, n_positions, latent_dim)
+
+        # --- Classify each position ---
+        logits_list = []
+        for i in range(self.n_positions):
+            logits_list.append(self.classifiers[i](readout_states[:, i]))
+
+        # --- Reconstruct from concatenated readout states ---
+        concat = readout_states.view(B, -1)  # (B, n_positions * latent_dim)
+        recon = self.decoder(concat)
+
+        return recon, logits_list, all_locations, readout_states, scan_content_logits

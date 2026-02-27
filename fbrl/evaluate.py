@@ -9,8 +9,8 @@ import io
 from PIL import Image
 
 from fbrl import _resolve_device
-from fbrl.data import LetterDataset, BigramDataset
-from fbrl.model import VisionModel, BigramVisionModel
+from fbrl.data import LetterDataset, BigramDataset, WordDataset
+from fbrl.model import VisionModel, BigramVisionModel, WordVisionModel
 from fbrl.losses import fixation_hit_rate
 
 
@@ -38,7 +38,18 @@ def _load_model(model_dir, device):
         model_type = 'single'
         state_dict = ckpt
 
-    if model_type == 'bigram':
+    if model_type == 'word':
+        n_scan = ckpt['n_scan_glimpses']
+        n_read = ckpt['n_read_glimpses']
+        scan_ps = ckpt.get('scan_patch_size', (12, 18))
+        read_ps = ckpt.get('read_patch_size', 12)
+        n_positions = ckpt.get('n_positions', 4)
+        model = WordVisionModel(
+            n_scan_glimpses=n_scan, n_read_glimpses=n_read,
+            scan_patch_size=scan_ps, read_patch_size=read_ps,
+            n_scales=n_scales, n_positions=n_positions,
+        ).to(device)
+    elif model_type == 'bigram':
         # Two-phase checkpoint (has n_scan_glimpses)
         if 'n_scan_glimpses' in ckpt:
             n_scan = ckpt['n_scan_glimpses']
@@ -1358,3 +1369,7 @@ def generate_bigram_atlas(model_dir, test_data_dir, output_path='data/bigram_atl
     print(f"\nAtlas: {len(bigrams_list)} bigrams x {len(font_names)} fonts = {total} samples")
     print(f"Both-correct: {both_ok}/{total} ({both_ok/total*100:.1f}%)")
     print(f"Written to {output_path} ({size_kb:.0f} KB)")
+
+
+# --- Word evaluation (imported from separate module to keep file manageable) ---
+from fbrl._word_eval import test_word_model, generate_word_atlas  # noqa: E402, F401

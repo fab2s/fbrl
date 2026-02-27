@@ -14,6 +14,7 @@ from fbrl.losses import (attention_content_loss, temporal_attention_content_loss
                           two_phase_attention_loss,
                           fixation_diversity_loss, fixation_edge_loss,
                           fixation_hit_rate)
+from fbrl._word_train import train_word_model  # noqa: F401
 
 
 # --- Training ---
@@ -407,7 +408,8 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
                        n_scan_glimpses=5, n_read_glimpses=6,
                        scan_patch_size=(12, 18), read_patch_size=12,
                        n_scales=1, device='auto',
-                       diversity_weight=1.0, diversity_sigma=0.1, diversity_vy=1.0,
+                       diversity_weight=1.0, diversity_sigma=0.1,
+                       scan_vy=0.3, read_vy=1.5,
                        guide_weight=8.0, scan_guide_weight=None,
                        blur_sigma_ratio=0.16,
                        batch_size=32, scaffold_epochs=200,
@@ -417,7 +419,9 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
     """Train a BigramVisionModel with two-phase scan/read attention on 128x128 bigram images.
 
     Phase 1 — SCAN: wide patches build spatial map. Loss: full-image guide + edge.
+      scan_vy < 1.0 makes horizontal proximity expensive (forces horizontal spread).
     Phase 2 — READ: focused patches read letters. Loss: temporal scaffold.
+      read_vy > 1.0 makes vertical proximity expensive (forces vertical exploration).
 
     scaffold_epochs controls temporal scaffold annealing for the READ phase.
     Set scaffold_epochs=0 to disable scaffolding entirely.
@@ -428,13 +432,13 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
     device = _resolve_device(device)
     n_glimpses = n_scan_glimpses + n_read_glimpses
     print(f"Bigram training on: {device}")
-    vy_str = f"  diversity_vy={diversity_vy}" if diversity_vy != 1.0 else ""
     edge_str = f"  edge_weight={edge_weight}" if edge_weight > 0 else ""
     print(f"Two-phase: scan={n_scan_glimpses} ({scan_patch_size}) + "
           f"read={n_read_glimpses} ({read_patch_size}) = {n_glimpses} glimpses")
     print(f"Attention: guide_weight={guide_weight}  scan_guide={scan_guide_weight}  "
           f"blur_sigma_ratio={blur_sigma_ratio}  "
-          f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}{vy_str}  "
+          f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}  "
+          f"scan_vy={scan_vy}  read_vy={read_vy}  "
           f"batch_size={batch_size}{edge_str}")
     floor_str = f", floor={scaffold_floor}" if scaffold_floor > 0 else ""
     print(f"Temporal scaffold (read phase): {scaffold_epochs} epochs "
@@ -640,11 +644,17 @@ def train_bigram_model(data_dir, epochs=100, resume=None, save_dir='bigram_model
                 scaffold_weight=scaffold_weight,
             )
 
-            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma,
-                                               vy=diversity_vy)
+            # Split diversity by phase: scan spreads horizontally, read explores vertically
+            scan_locations = locations[:n_scan_glimpses + 1]
+            read_locations = locations[n_scan_glimpses:]  # includes last scan loc as read start
+            scan_div = fixation_diversity_loss(scan_locations, sigma=diversity_sigma,
+                                               vy=scan_vy)
+            read_div = fixation_diversity_loss(read_locations, sigma=diversity_sigma,
+                                               vy=read_vy)
+            div_loss = scan_div + read_div
+
             # Edge loss on scan locations only (encourage horizontal spread during scan)
             if edge_weight > 0:
-                scan_locations = locations[:n_scan_glimpses + 1]
                 edge_loss = fixation_edge_loss(scan_locations)
             else:
                 edge_loss = torch.tensor(0.0)

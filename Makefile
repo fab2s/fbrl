@@ -21,7 +21,13 @@ READ_PATCH    ?= 12
 SCAN_GUIDE    ?=
 MASK     ?= 0.5
 VY       ?= 1.0
+SCAN_VY  ?= 0.3
+READ_VY  ?= 1.5
 EDGE     ?= 0.0
+CONTENT  ?= 0.5
+ISOLATION ?= 0.5
+WORD_SCAN_GLIMPSES ?= 8
+WORD_READ_GLIMPSES ?= 12
 
 # Lifecycle
 build:
@@ -46,6 +52,8 @@ CLEAN_MODELS = find data/models -type f ! -name .gitignore ! -name 'training_*.l
 CLEAN_RESULTS = find data/results -type f ! -name .gitignore -delete 2>/dev/null; true
 CLEAN_BIGRAM_MODELS = find data/bigram_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
 CLEAN_BIGRAM_RESULTS = find data/bigram_results -type f ! -name .gitignore -delete 2>/dev/null; true
+CLEAN_WORD_MODELS = find data/word_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_WORD_RESULTS = find data/word_results -type f ! -name .gitignore -delete 2>/dev/null; true
 
 # Pipeline
 generate:
@@ -104,10 +112,10 @@ generate-bigrams-test:
 
 train-bigrams:
 	@$(CLEAN_BIGRAM_MODELS)
-	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(SCAN_GLIMPSES) --n_read_glimpses $(READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --diversity_vy $(VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER))
+	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(SCAN_GLIMPSES) --n_read_glimpses $(READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER))
 
 resume-bigrams:
-	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(SCAN_GLIMPSES) --n_read_glimpses $(READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --diversity_vy $(VY) --edge_weight $(EDGE) --resume data/bigram_models/model_final.pth
+	$(RUN) train_bigrams --data_dir data/bigrams --epochs $(EPOCHS) --save_dir data/bigram_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(SCAN_GLIMPSES) --n_read_glimpses $(READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --mask_weight $(MASK) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --resume data/bigram_models/model_final.pth
 
 test-bigrams:
 	@$(CLEAN_BIGRAM_RESULTS)
@@ -143,6 +151,53 @@ endif
 	@echo "scaffold_ratio: $(SCAFFOLD_RATIO)" >> runs/$(NAME)/info.txt
 	@echo "Archived to runs/$(NAME)/"
 
+# Word pipeline (4-letter words, 256x128 canvas, prescribed x-scan)
+generate-words:
+	$(RUN) generate_words --num_variants $(VARIANTS) --noise_level $(NOISE) --output_dir data/words --fonts $(FONTS)
+
+generate-words-test:
+	$(RUN) generate_words_test --output_dir data/word_test --fonts $(FONTS)
+
+train-words:
+	@$(CLEAN_WORD_MODELS)
+	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER))
+
+resume-words:
+	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --resume data/word_models/model_final.pth
+
+test-words:
+	@$(CLEAN_WORD_RESULTS)
+	$(RUN) test_words --model_dir data/word_models --test_data_dir data/word_test --output_dir data/word_results --device $(DEVICE)
+
+word-atlas:
+	@rm -f data/word_atlas.html
+	$(RUN) word_atlas --model_dir data/word_models --test_data_dir data/word_test --output data/word_atlas.html --device $(DEVICE)
+
+# Archive a trained word model: make archive-words NAME=v1-word-prescribed
+archive-words:
+ifndef NAME
+	$(error Usage: make archive-words NAME=v1-word-prescribed)
+endif
+	@mkdir -p runs/$(NAME)
+	$(RUN) compress_model --input data/word_models/model_final.pth --output data/word_models/_archive.pth.gz
+	mv data/word_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
+	cp data/word_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
+	cp data/word_models/training.log runs/$(NAME)/ 2>/dev/null || true
+	cp data/word_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
+	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
+	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
+	@echo "model: word (prescribed x-scan)" >> runs/$(NAME)/info.txt
+	@echo "fonts: $(FONTS)" >> runs/$(NAME)/info.txt
+	@echo "epochs: $(EPOCHS)" >> runs/$(NAME)/info.txt
+	@echo "batch: $(BATCH)" >> runs/$(NAME)/info.txt
+	@echo "guide: $(GUIDE)" >> runs/$(NAME)/info.txt
+	@echo "scan: $(WORD_SCAN_GLIMPSES) glimpses (prescribed x), patch $(SCAN_PATCH)" >> runs/$(NAME)/info.txt
+	@echo "read: $(WORD_READ_GLIMPSES) glimpses (free), patch $(READ_PATCH)" >> runs/$(NAME)/info.txt
+	@echo "scaffold_ratio: $(SCAFFOLD_RATIO)" >> runs/$(NAME)/info.txt
+	@echo "content_weight: $(CONTENT)" >> runs/$(NAME)/info.txt
+	@echo "Archived to runs/$(NAME)/"
+
 .PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive \
        generate-bigrams generate-bigrams-test train-bigrams resume-bigrams test-bigrams check-bigram-attention \
-       bigram-atlas archive-bigrams
+       bigram-atlas archive-bigrams \
+       generate-words generate-words-test train-words resume-words test-words word-atlas archive-words
