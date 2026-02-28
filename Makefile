@@ -176,7 +176,47 @@ endif
 	@echo "config: $(WORD_CONFIG)" >> runs/$(NAME)/info.txt
 	@echo "Archived to runs/$(NAME)/"
 
+# Motor pipeline
+MOTOR_CONFIG ?= configs/letter_motor.yaml
+CLEAN_MOTOR_MODELS = find data/motor_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_MOTOR_RESULTS = find data/motor_results -type f ! -name .gitignore -delete 2>/dev/null; true
+
+generate-trajectories:
+	$(RUN) generate_trajectories --output_dir data/trajectories --font dejavu-sans --letters $(LETTERS) --n_points 32
+
+train-motor:
+	@$(CLEAN_MOTOR_MODELS)
+	$(RUN) train_motor --config $(MOTOR_CONFIG) --device $(DEVICE) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH)) $(if $(CKPT),--checkpoint_interval $(CKPT))
+
+resume-motor:
+	$(RUN) train_motor --config $(MOTOR_CONFIG) --device $(DEVICE) --resume data/motor_models/$(RESUME_FROM) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH))
+
+test-motor:
+	@$(CLEAN_MOTOR_RESULTS)
+	$(RUN) test_motor --model_dir data/motor_models --test_data_dir data/test --output_dir data/motor_results --device $(DEVICE)
+
+motor-atlas:
+	@rm -f data/motor_atlas.html
+	$(RUN) motor_atlas --model_dir data/motor_models --test_data_dir data/test --output data/motor_atlas.html --device $(DEVICE)
+
+archive-motor:
+ifndef NAME
+	$(error Usage: make archive-motor NAME=v1-motor-baseline)
+endif
+	@mkdir -p runs/$(NAME)
+	$(RUN) compress_model --input data/motor_models/model_final.pth --output data/motor_models/_archive.pth.gz
+	mv data/motor_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
+	cp data/motor_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
+	cp data/motor_models/training.log runs/$(NAME)/ 2>/dev/null || true
+	cp data/motor_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
+	cp $(MOTOR_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
+	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
+	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
+	@echo "config: $(MOTOR_CONFIG)" >> runs/$(NAME)/info.txt
+	@echo "Archived to runs/$(NAME)/"
+
 .PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive \
        generate-bigrams generate-bigrams-test train-bigrams resume-bigrams test-bigrams check-bigram-attention \
        bigram-atlas archive-bigrams \
-       generate-words generate-words-test train-words resume-words test-words test-word-isolation word-atlas archive-words
+       generate-words generate-words-test train-words resume-words test-words test-word-isolation word-atlas archive-words \
+       generate-trajectories train-motor resume-motor test-motor motor-atlas archive-motor

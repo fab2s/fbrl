@@ -15,6 +15,7 @@ from fbrl.losses import (attention_content_loss, two_phase_attention_loss,
 from fbrl.training_utils import (LossTracker, TrainingLogger, save_checkpoint,
                                   apply_transfer, plot_training_metrics, format_eta)
 from fbrl._word_train import train_word_model  # noqa: F401
+from fbrl._motor_train import train_motor_model  # noqa: F401
 
 
 # --- Training ---
@@ -97,8 +98,9 @@ def train_model(cfg):
     train_start = time.time()
 
     # Log file
-    content_hdr = "  content" if n_scan_glimpses > 0 else ""
-    header = f"epoch  recon    ltr      case     attn     div      hit    recode{content_hdr}   lr         time"
+    content_hdr = f"  {'content':>7s}" if n_scan_glimpses > 0 else ""
+    header = (f"{'epoch':>5s}  {'recon':>6s}  {'ltr':>6s}  {'case':>6s}  {'attn':>7s}  {'div':>6s}  "
+              f"{'hit':>6s}  {'recode':>6s}{content_hdr}  {'lr':>8s}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
 
     for epoch in range(start_epoch, end_epoch):
@@ -194,10 +196,10 @@ def train_model(cfg):
               f"lr {current_lr:.6f}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
-        content_log = f"  {avgs['content']:.4f}" if n_scan_glimpses > 0 else ""
-        logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:.4f}  {avgs['letter_cls']:.4f}  "
-                          f"{avgs['case_cls']:.4f}  {avgs['attn']:.4f}  {avgs['div']:.4f}  "
-                          f"{avgs['hit_rate']:.4f}  {avgs['recode']:.4f}{content_log}  {current_lr:.6f}  "
+        content_log = f"  {avgs['content']:>7.4f}" if n_scan_glimpses > 0 else ""
+        logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {avgs['letter_cls']:>6.4f}  "
+                          f"{avgs['case_cls']:>6.4f}  {avgs['attn']:>7.4f}  {avgs['div']:>6.4f}  "
+                          f"{avgs['hit_rate']:>6.4f}  {avgs['recode']:>6.4f}{content_log}  {current_lr:>8.6f}  "
                           f"{epoch_time:.1f}s")
         scheduler.step()
 
@@ -461,7 +463,8 @@ def train_bigram_model(cfg):
     end_epoch = start_epoch + epochs
     train_start = time.time()
 
-    header = "epoch  recon    pos1     pos2     s_attn   r_attn   div      hit      lr_enc   lr_read  scaff  time"
+    header = (f"{'epoch':>5s}  {'recon':>6s}  {'pos1':>6s}  {'pos2':>6s}  {'s_attn':>7s}  {'r_attn':>7s}  "
+              f"{'div':>6s}  {'hit':>6s}  {'lr_enc':>8s}  {'lr_read':>8s}  {'scaff':>6s}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
 
     for epoch in range(start_epoch, end_epoch):
@@ -586,11 +589,11 @@ def train_bigram_model(cfg):
               f"lr {lr_enc:.6f}/{lr_read:.6f}{scaff_str}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
-        logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:.4f}  {avgs['pos1_cls']:.4f}  "
-                          f"{avgs['pos2_cls']:.4f}  {avg_scan_attn:.4f}  {avg_read_attn:.4f}  "
-                          f"{avgs['div']:.4f}  "
-                          f"{avgs['hit_rate']:.4f}  {lr_enc:.6f}  {lr_read:.6f}  "
-                          f"{scaffold_weight:.4f}  {epoch_time:.1f}s")
+        logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {avgs['pos1_cls']:>6.4f}  "
+                          f"{avgs['pos2_cls']:>6.4f}  {avg_scan_attn:>7.4f}  {avg_read_attn:>7.4f}  "
+                          f"{avgs['div']:>6.4f}  "
+                          f"{avgs['hit_rate']:>6.4f}  {lr_enc:>8.6f}  {lr_read:>8.6f}  "
+                          f"{scaffold_weight:>6.4f}  {epoch_time:.1f}s")
         scheduler.step()
 
         if (epoch + 1 - start_epoch) % checkpoint_interval == 0:

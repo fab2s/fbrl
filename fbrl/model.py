@@ -379,6 +379,90 @@ class VisionModel(nn.Module):
         return recon, enc.locations
 
 
+# --- Motor Vision Model ---
+
+class MotorVisionModel(nn.Module):
+    """VisionModel + motor trace decoder for Read->Write->Render->Re-Read.
+
+    Identical vision components to VisionModel (encoder, decoder, classifiers,
+    optional scan phase). Adds MotorTraceDecoder for the motor pathway.
+    Trained from scratch -- no transfer.
+
+    The motor pathway is called separately via motor_forward() so the main
+    graph can be freed before allocating the motor+re-read graph (VRAM-safe).
+    """
+    def __init__(self, n_classes=26, latent_dim=256, n_glimpses=10,
+                 patch_size=12, n_scales=1,
+                 n_scan_glimpses=0, scan_patch_size=(12, 18),
+                 n_trajectory_points=32, render_sigma=1.5):
+        super().__init__()
+        self.n_scan_glimpses = n_scan_glimpses
+        self.encoder = VisualAttentionEncoder(
+            n_glimpses=n_glimpses, patch_size=patch_size,
+            n_scales=n_scales, latent_dim=latent_dim,
+        )
+        self.decoder = VisualDecoder(input_dim=latent_dim + 1, output_shape=(128, 128))
+        self.letter_classifier = nn.Linear(latent_dim, n_classes)
+        self.case_classifier = nn.Linear(latent_dim, 2)
+
+        if n_scan_glimpses > 0:
+            self.scan_sensor = GlimpseSensor(
+                patch_size=scan_patch_size, n_scales=n_scales, latent_dim=latent_dim,
+            )
+            self.content_head = nn.Linear(latent_dim, 1)
+
+        # Motor pathway
+        from fbrl.motor import MotorTraceDecoder, soft_render
+        self.motor_decoder = MotorTraceDecoder(latent_dim, latent_dim, n_trajectory_points)
+        self._render_sigma = render_sigma
+        self._soft_render = soft_render
+
+    def _encode(self, img):
+        """Run encode loop -- shared scan/read or legacy encoder."""
+        if self.n_scan_glimpses > 0:
+            return encode_scan_read(
+                img, self.encoder.attention_controller,
+                self.scan_sensor, self.encoder.glimpse_sensor,
+                n_scan=self.n_scan_glimpses,
+                n_read=self.encoder.n_glimpses,
+                content_head=self.content_head,
+                prescribed_x=True,
+            )
+        else:
+            return encode_scan_read(
+                img, self.encoder.attention_controller,
+                self.encoder.glimpse_sensor, self.encoder.glimpse_sensor,
+                n_scan=0,
+                n_read=self.encoder.n_glimpses,
+            )
+
+    def forward(self, img, case_label):
+        """Standard forward (same signature as VisionModel).
+
+        Motor path is called separately via motor_forward() for VRAM management.
+        """
+        enc = self._encode(img)
+        recon = self.decoder(enc.latent, case_label)
+        letter_logits = self.letter_classifier(enc.latent)
+        case_logits = self.case_classifier(enc.latent)
+        return recon, letter_logits, case_logits, enc.locations, enc.latent, enc.scan_content_logits
+
+    def motor_forward(self, latent):
+        """Deferred motor path: latent -> trajectory -> rendered image.
+
+        Call this AFTER freeing the main forward graph.
+        """
+        trajectory = self.motor_decoder(latent)
+        rendered = self._soft_render(trajectory, sigma=self._render_sigma)
+        return trajectory, rendered
+
+    def recode(self, img, target_case):
+        """Encode image, decode with target case -> capitalize/uncapitalize."""
+        enc = self._encode(img)
+        recon = self.decoder(enc.latent, target_case)
+        return recon, enc.locations
+
+
 # --- Bigram (Letter-Pair) Reading ---
 
 BigramDecoder = VisualDecoder  # backward compat alias

@@ -232,7 +232,9 @@ def train_word_model(cfg):
         print("AMP enabled: FP16 forward passes, GradScaler for backward")
 
     pos_hdrs = '  '.join(f'{"pos"+str(p+1):>6s}' for p in range(n_positions))
-    header = f"epoch   recon  {pos_hdrs}   s_attn   r_attn      div  content   isolat      hit   lr_attn    lr_cls  lr_rcon    scaff  time"
+    header = (f"{'epoch':>5s}  {'recon':>6s}  {pos_hdrs}  {'s_attn':>7s}  {'r_attn':>7s}  "
+              f"{'div':>6s}  {'content':>7s}  {'isolat':>6s}  {'hit':>6s}  "
+              f"{'lr_attn':>8s}  {'lr_cls':>8s}  {'lr_rcon':>8s}  {'scaff':>6s}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
 
     for epoch in range(start_epoch, end_epoch):
@@ -437,12 +439,12 @@ def train_word_model(cfg):
               f"{lr_str}{scaff_str}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
-        pos_log = '  '.join(f'{avgs[f"pos{p+1}_cls"]:.4f}' for p in range(n_positions))
-        logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:.4f}  {pos_log}  "
-                          f"{scan_attn.item():.4f}  {read_attn.item():.4f}  "
-                          f"{avgs['div']:.4f}  {avgs['content']:.4f}  {avgs['isolation']:.4f}  "
-                          f"{avgs['hit_rate']:.4f}  {lr_attn:.6f}  {lr_cls:.6f}  "
-                          f"{lr_recon:.6f}  {scaffold_weight:.4f}  {epoch_time:.1f}s")
+        pos_log = '  '.join(f'{avgs[f"pos{p+1}_cls"]:>6.4f}' for p in range(n_positions))
+        logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {pos_log}  "
+                          f"{scan_attn.item():>7.4f}  {read_attn.item():>7.4f}  "
+                          f"{avgs['div']:>6.4f}  {avgs['content']:>7.4f}  {avgs['isolation']:>6.4f}  "
+                          f"{avgs['hit_rate']:>6.4f}  {lr_attn:>8.6f}  {lr_cls:>8.6f}  "
+                          f"{lr_recon:>8.6f}  {scaffold_weight:>6.4f}  {epoch_time:.1f}s")
 
         if multi_head:
             attn_sched.step()

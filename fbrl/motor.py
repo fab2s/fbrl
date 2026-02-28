@@ -1,0 +1,427 @@
+"""Motor trace decoder: trajectory extraction, GRU decoder, differentiable renderer."""
+import torch
+import torch.nn as nn
+import os
+import math
+
+
+# --- Trajectory Extraction (fonttools) ---
+
+def _flatten_cubic(p0, p1, p2, p3, n_segments=4):
+    """Flatten a cubic bezier curve to line segments.
+
+    Args:
+        p0..p3: control points as (x, y) tuples
+        n_segments: number of line segments to approximate the curve
+    Returns:
+        list of (x, y) tuples (n_segments points, excluding p0)
+    """
+    points = []
+    for i in range(1, n_segments + 1):
+        t = i / n_segments
+        t2 = t * t
+        t3 = t2 * t
+        mt = 1 - t
+        mt2 = mt * mt
+        mt3 = mt2 * mt
+        x = mt3 * p0[0] + 3 * mt2 * t * p1[0] + 3 * mt * t2 * p2[0] + t3 * p3[0]
+        y = mt3 * p0[1] + 3 * mt2 * t * p1[1] + 3 * mt * t2 * p2[1] + t3 * p3[1]
+        points.append((x, y))
+    return points
+
+
+def _resample_trajectory(points, pen_states, n_points):
+    """Resample a trajectory to exactly n_points via arc-length parameterization.
+
+    Args:
+        points: list of (x, y) tuples
+        pen_states: list of float (0.0=move, 1.0=stroke), same length as points
+        n_points: target number of points
+    Returns:
+        (resampled_points, resampled_pen_states)
+    """
+    if len(points) <= 1:
+        pt = points[0] if points else (0.0, 0.0)
+        return [pt] * n_points, [1.0] * n_points
+
+    # Compute cumulative arc lengths
+    cum_len = [0.0]
+    for i in range(1, len(points)):
+        dx = points[i][0] - points[i - 1][0]
+        dy = points[i][1] - points[i - 1][1]
+        cum_len.append(cum_len[-1] + math.sqrt(dx * dx + dy * dy))
+
+    total_len = cum_len[-1]
+    if total_len < 1e-8:
+        return [points[0]] * n_points, [pen_states[0]] * n_points
+
+    resampled = []
+    resampled_pen = []
+    j = 0
+    for i in range(n_points):
+        target = i * total_len / max(n_points - 1, 1)
+        while j < len(cum_len) - 1 and cum_len[j + 1] < target:
+            j += 1
+        if j >= len(cum_len) - 1:
+            resampled.append(points[-1])
+            resampled_pen.append(pen_states[-1])
+        else:
+            seg_len = cum_len[j + 1] - cum_len[j]
+            if seg_len < 1e-8:
+                t = 0.0
+            else:
+                t = (target - cum_len[j]) / seg_len
+            x = points[j][0] + t * (points[j + 1][0] - points[j][0])
+            y = points[j][1] + t * (points[j + 1][1] - points[j][1])
+            resampled.append((x, y))
+            # Pen state: use the state of the segment we're interpolating within
+            resampled_pen.append(pen_states[j + 1])
+
+    return resampled, resampled_pen
+
+
+def _fallback_trajectory(n_points):
+    """Fallback trajectory for missing glyphs: centered dot."""
+    return torch.zeros(n_points, 3)
+
+
+def extract_glyph_trajectory(font_path, char, n_points=32):
+    """TTF glyph -> (n_points, 3) tensor of (x, y, pen_down).
+
+    Uses fonttools RecordingPen to get moveTo/lineTo/curveTo operations.
+    Flattens bezier curves to line segments.
+    Resamples to exactly n_points via arc-length parameterization.
+    Normalizes to [-1, 1] coordinate system (matching grid_sample).
+    pen_down: 0.0 for moves between contours, 1.0 for strokes.
+    """
+    from fontTools.ttLib import TTFont
+    from fontTools.pens.recordingPen import RecordingPen
+
+    font = TTFont(font_path)
+    glyph_set = font.getGlyphSet()
+
+    # Map character to glyph name
+    cmap = font.getBestCmap()
+    glyph_name = cmap.get(ord(char))
+    if glyph_name is None or glyph_name not in glyph_set:
+        return _fallback_trajectory(n_points)
+
+    pen = RecordingPen()
+    glyph_set[glyph_name].draw(pen)
+
+    if not pen.value:
+        return _fallback_trajectory(n_points)
+
+    # Convert pen operations to point sequences
+    points = []
+    pen_states = []
+    current = (0.0, 0.0)
+
+    for op, args in pen.value:
+        if op == 'moveTo':
+            current = args[0]
+            points.append(current)
+            pen_states.append(0.0)  # move = pen up
+        elif op == 'lineTo':
+            pt = args[0]
+            points.append(pt)
+            pen_states.append(1.0)  # stroke
+            current = pt
+        elif op == 'curveTo':
+            # Cubic bezier: current, cp1, cp2, endpoint
+            if len(args) == 3:
+                segs = _flatten_cubic(current, args[0], args[1], args[2])
+                for s in segs:
+                    points.append(s)
+                    pen_states.append(1.0)
+                current = args[2]
+            elif len(args) == 2:
+                # Quadratic bezier approximated as cubic
+                cp = args[0]
+                end = args[1]
+                # Convert quadratic to cubic control points
+                cp1 = (current[0] + 2/3 * (cp[0] - current[0]),
+                        current[1] + 2/3 * (cp[1] - current[1]))
+                cp2 = (end[0] + 2/3 * (cp[0] - end[0]),
+                        end[1] + 2/3 * (cp[1] - end[1]))
+                segs = _flatten_cubic(current, cp1, cp2, end)
+                for s in segs:
+                    points.append(s)
+                    pen_states.append(1.0)
+                current = end
+        elif op == 'qCurveTo':
+            # TrueType quadratic splines — may have implied on-curve points
+            for k in range(len(args)):
+                if k == len(args) - 1:
+                    end = args[k]
+                else:
+                    # Implied on-curve point between consecutive off-curve
+                    end = ((args[k][0] + args[k + 1][0]) / 2,
+                           (args[k][1] + args[k + 1][1]) / 2) if k < len(args) - 2 else args[k + 1]
+                cp = args[k] if k < len(args) - 1 else current
+                # Quadratic to cubic
+                cp1 = (current[0] + 2/3 * (cp[0] - current[0]),
+                        current[1] + 2/3 * (cp[1] - current[1]))
+                cp2 = (end[0] + 2/3 * (cp[0] - end[0]),
+                        end[1] + 2/3 * (cp[1] - end[1]))
+                segs = _flatten_cubic(current, cp1, cp2, end)
+                for s in segs:
+                    points.append(s)
+                    pen_states.append(1.0)
+                current = end
+                if k == len(args) - 1:
+                    break
+        elif op == 'closePath' or op == 'endPath':
+            if points and len(points) >= 2:
+                # Close by drawing back to the start of this contour
+                # Find the last moveTo
+                for idx in range(len(pen_states) - 1, -1, -1):
+                    if pen_states[idx] == 0.0:
+                        points.append(points[idx])
+                        pen_states.append(1.0)
+                        break
+
+    if not points:
+        return _fallback_trajectory(n_points)
+
+    # Normalize to [-1, 1]
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    range_x = max_x - min_x if max_x > min_x else 1.0
+    range_y = max_y - min_y if max_y > min_y else 1.0
+    # Use uniform scaling to preserve aspect ratio
+    scale = max(range_x, range_y)
+    cx = (min_x + max_x) / 2
+    cy = (min_y + max_y) / 2
+
+    norm_points = [((p[0] - cx) / scale * 2, (p[1] - cy) / scale * 2)
+                   for p in points]
+    # Flip y: font coordinates have y-up, our grid has y-down
+    norm_points = [(p[0], -p[1]) for p in norm_points]
+
+    # Resample
+    resampled, resampled_pen = _resample_trajectory(norm_points, pen_states, n_points)
+
+    # Build tensor
+    trajectory = torch.zeros(n_points, 3)
+    for i, ((x, y), pen) in enumerate(zip(resampled, resampled_pen)):
+        trajectory[i, 0] = x
+        trajectory[i, 1] = y
+        trajectory[i, 2] = pen
+
+    return trajectory
+
+
+# --- Font Path Resolution ---
+
+FONT_PATHS = {
+    'dejavu-sans': '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+}
+
+
+def resolve_font_path(font_name):
+    """Resolve a font name to a file path."""
+    if font_name in FONT_PATHS:
+        return FONT_PATHS[font_name]
+    if os.path.exists(font_name):
+        return font_name
+    raise ValueError(f"Unknown font: {font_name}. Available: {list(FONT_PATHS.keys())}")
+
+
+# --- Pre-generation ---
+
+def generate_trajectory_dataset(output_dir, font_name='dejavu-sans', n_points=32,
+                                 letters=None):
+    """Pre-generate all letter trajectories for canonical font.
+
+    Saves: output_dir/trajectories.pt  (dict: char -> (N, 3) tensor)
+    Saves: output_dir/trajectory_atlas.png  (visualization grid)
+    """
+    import matplotlib.pyplot as plt
+
+    if letters is None:
+        letters = ([chr(i) for i in range(65, 91)] +
+                   [chr(i) for i in range(97, 123)])
+
+    font_path = resolve_font_path(font_name)
+    os.makedirs(output_dir, exist_ok=True)
+
+    traj_dict = {}
+    for char in letters:
+        traj = extract_glyph_trajectory(font_path, char, n_points=n_points)
+        traj_dict[char] = traj
+        pen_up = (traj[:, 2] < 0.5).sum().item()
+        pen_down = (traj[:, 2] >= 0.5).sum().item()
+        print(f"  {char}: {n_points} points, {pen_down} stroke / {pen_up} move")
+
+    # Save
+    save_path = os.path.join(output_dir, 'trajectories.pt')
+    torch.save(traj_dict, save_path)
+    print(f"Saved {len(traj_dict)} trajectories to {save_path}")
+
+    # Visualization atlas
+    n_chars = len(letters)
+    n_cols = 13
+    n_rows = (n_chars + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(n_cols * 1.5, n_rows * 1.5))
+    if n_rows == 1:
+        axes = axes.reshape(1, -1)
+
+    for i, char in enumerate(letters):
+        row, col = divmod(i, n_cols)
+        ax = axes[row, col]
+        traj = traj_dict[char]
+        xs = traj[:, 0].numpy()
+        ys = traj[:, 1].numpy()
+        pen = traj[:, 2].numpy()
+
+        # Draw stroke segments
+        for j in range(1, len(xs)):
+            if pen[j] > 0.5:
+                ax.plot([xs[j - 1], xs[j]], [ys[j - 1], ys[j]],
+                        'b-', linewidth=1.0)
+            else:
+                ax.plot([xs[j - 1], xs[j]], [ys[j - 1], ys[j]],
+                        'r:', linewidth=0.3, alpha=0.3)
+
+        ax.set_xlim(-1.1, 1.1)
+        ax.set_ylim(-1.1, 1.1)
+        ax.set_aspect('equal')
+        ax.set_title(char, fontsize=10)
+        ax.axis('off')
+
+    # Hide unused axes
+    for i in range(n_chars, n_rows * n_cols):
+        row, col = divmod(i, n_cols)
+        axes[row, col].axis('off')
+
+    plt.tight_layout()
+    atlas_path = os.path.join(output_dir, 'trajectory_atlas.png')
+    plt.savefig(atlas_path, dpi=150)
+    plt.close()
+    print(f"Atlas saved to {atlas_path}")
+
+
+# --- Runtime lookup ---
+
+def load_trajectory_data(trajectory_dir):
+    """Load pre-generated trajectory data from disk.
+
+    Returns dict: char -> (N, 3) tensor.
+    """
+    path = os.path.join(trajectory_dir, 'trajectories.pt')
+    return torch.load(path, map_location='cpu', weights_only=True)
+
+
+def batch_gt_trajectories(letters, cases, traj_data, device):
+    """Build (B, N, 3) ground truth from per-character trajectory dict.
+
+    Args:
+        letters: list of B uppercase letter chars ('A'..'Z')
+        cases: list of B case strings ('upper' or 'lower')
+        traj_data: dict from load_trajectory_data()
+        device: torch device
+    Returns:
+        (B, N, 3) tensor
+    """
+    batch = []
+    for letter, case in zip(letters, cases):
+        if case == 'lower':
+            char = letter.lower()
+        else:
+            char = letter.upper()
+        if char in traj_data:
+            batch.append(traj_data[char])
+        else:
+            # Fallback
+            n_points = next(iter(traj_data.values())).shape[0]
+            batch.append(torch.zeros(n_points, 3))
+    return torch.stack(batch).to(device)
+
+
+# --- Motor Trace Decoder ---
+
+class MotorTraceDecoder(nn.Module):
+    """latent (B, 256) -> trajectory (B, N, 3) = (x, y, pen_down_logit)
+
+    GRU-based autoregressive decoder. Stroke points are naturally sequential.
+    Architecture: latent -> Linear -> GRU h0, then unroll N steps.
+    Each step: GRU(prev_point, h) -> point_head -> (x, y), pen_head -> logit
+    """
+    def __init__(self, latent_dim=256, hidden_dim=256, n_points=32):
+        super().__init__()
+        self.n_points = n_points
+        self.latent_to_h = nn.Linear(latent_dim, hidden_dim)
+        self.gru = nn.GRUCell(3, hidden_dim)
+        self.point_head = nn.Linear(hidden_dim, 2)    # tanh -> [-1, 1]
+        self.pen_head = nn.Linear(hidden_dim, 1)       # logit
+        self.start_token = nn.Parameter(torch.zeros(1, 3))
+
+    def forward(self, latent):
+        """Decode latent to trajectory.
+
+        Args:
+            latent: (B, latent_dim)
+        Returns:
+            trajectory: (B, N, 3) where [:,:,:2] = tanh(xy), [:,:,2] = pen logit
+        """
+        B = latent.shape[0]
+        h = torch.tanh(self.latent_to_h(latent))  # (B, hidden_dim)
+        inp = self.start_token.expand(B, -1)  # (B, 3)
+
+        points = []
+        for _ in range(self.n_points):
+            h = self.gru(inp, h)
+            xy = torch.tanh(self.point_head(h))       # (B, 2)
+            pen = self.pen_head(h)                     # (B, 1)
+            point = torch.cat([xy, pen], dim=1)        # (B, 3)
+            points.append(point)
+            inp = point.detach()  # autoregressive: feed predicted point back
+            # Detach to prevent backprop through all previous steps
+            # (teacher forcing equivalent for stability)
+
+        return torch.stack(points, dim=1)  # (B, N, 3)
+
+
+# --- Differentiable Soft Renderer ---
+
+def soft_render(trajectory, height=128, width=128, sigma=1.5):
+    """Differentiable rendering: Gaussian blobs along trajectory.
+
+    VRAM-efficient: loops over N points, never materializes (B, N, H, W).
+    Per iteration: (B, 1, H, W) blob, weighted by sigmoid(pen_down).
+    Accumulates into canvas. ~3MB per iteration at B=52.
+
+    Args:
+        trajectory: (B, N, 3) where [:,:,:2] are xy in [-1,1], [:,:,2] are pen logits
+        height, width: output image size
+        sigma: Gaussian blob width in pixels
+    Returns:
+        canvas: (B, 1, H, W) rendered image, values in [0, 1]
+    """
+    B, N, _ = trajectory.shape
+    device = trajectory.device
+
+    # Pre-compute coordinate grids
+    gy = torch.linspace(-1, 1, height, device=device).view(1, 1, height, 1)
+    gx = torch.linspace(-1, 1, width, device=device).view(1, 1, 1, width)
+
+    # Sigma in normalized coordinates
+    sigma_norm_h = sigma * 2.0 / height
+    sigma_norm_w = sigma * 2.0 / width
+
+    canvas = torch.zeros(B, 1, height, width, device=device)
+
+    for t in range(N):
+        x = trajectory[:, t, 0].view(B, 1, 1, 1)  # (B, 1, 1, 1)
+        y = trajectory[:, t, 1].view(B, 1, 1, 1)
+        pen_logit = trajectory[:, t, 2].view(B, 1, 1, 1)
+
+        dx = (gx - x) / sigma_norm_w
+        dy = (gy - y) / sigma_norm_h
+        blob = torch.exp(-0.5 * (dx * dx + dy * dy))  # (B, 1, H, W)
+        canvas = canvas + torch.sigmoid(pen_logit) * blob
+
+    return canvas.clamp(0, 1)

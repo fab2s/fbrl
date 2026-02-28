@@ -10,7 +10,7 @@ from PIL import Image
 
 from fbrl import _resolve_device
 from fbrl.data import LetterDataset, BigramDataset, WordDataset
-from fbrl.model import VisionModel, BigramVisionModel, WordVisionModel
+from fbrl.model import VisionModel, BigramVisionModel, WordVisionModel, MotorVisionModel
 from fbrl.losses import fixation_hit_rate
 
 
@@ -38,7 +38,18 @@ def _load_model(model_dir, device):
         model_type = 'single'
         state_dict = ckpt
 
-    if model_type == 'word':
+    if model_type == 'letter_motor':
+        n_scan = ckpt.get('n_scan_glimpses', 0)
+        scan_ps = ckpt.get('scan_patch_size', (12, 18))
+        patch_size = ckpt.get('patch_size', 12)
+        n_traj = ckpt.get('n_trajectory_points', 32)
+        render_sigma = ckpt.get('render_sigma', 1.5)
+        model = MotorVisionModel(
+            n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
+            n_scan_glimpses=n_scan, scan_patch_size=scan_ps,
+            n_trajectory_points=n_traj, render_sigma=render_sigma,
+        ).to(device)
+    elif model_type == 'word':
         n_scan = ckpt['n_scan_glimpses']
         n_read = ckpt['n_read_glimpses']
         scan_ps = ckpt.get('scan_patch_size', (12, 18))

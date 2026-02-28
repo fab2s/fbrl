@@ -55,6 +55,17 @@ class ExperimentConfig:
     isolation_data_dir: Optional[str] = None
     isolation_random_prob: float = 0.0
 
+    # Motor trace
+    motor_enabled: bool = False
+    n_trajectory_points: int = 32
+    render_sigma: float = 1.5
+    traj_weight: float = 1.0
+    traj_scaffold_ratio: float = 0.67
+    traj_scaffold_floor: float = 0.1
+    rr_cls_weight: float = 1.0
+    trajectory_data_dir: Optional[str] = None
+    canonical_font: str = 'dejavu-sans'
+
     # Paths
     data_dir: str = ''
     save_dir: str = ''

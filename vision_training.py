@@ -3,10 +3,11 @@ import argparse
 from fbrl.data import (generate_dataset, generate_test, generate_bigram_dataset,
                        generate_bigram_test, generate_word_dataset, generate_word_test)
 from fbrl.train import (train_model, check_attention, train_bigram_model,
-                         check_bigram_attention, train_word_model)
+                         check_bigram_attention, train_word_model, train_motor_model)
 from fbrl.evaluate import (test_model, visualize_model, generate_atlas, test_bigram_model,
                            generate_bigram_atlas, test_word_model, generate_word_atlas,
                            test_word_isolation)
+from fbrl._motor_eval import test_motor_model, generate_motor_atlas
 from fbrl.config import load_config
 
 
@@ -229,6 +230,32 @@ if __name__ == '__main__':
     w_atlas_parser.add_argument('--device', default='auto',
                                 choices=['auto', 'cpu', 'cuda'])
 
+    # --- Motor subcommands ---
+    gen_traj_parser = subparsers.add_parser('generate_trajectories')
+    gen_traj_parser.add_argument('--output_dir', default='data/trajectories')
+    gen_traj_parser.add_argument('--font', default='dejavu-sans')
+    gen_traj_parser.add_argument('--n_points', type=int, default=32)
+    gen_traj_parser.add_argument('--letters', default='Aa-Zz')
+
+    train_motor_parser = subparsers.add_parser('train_motor')
+    _add_train_overrides(train_motor_parser)
+
+    test_motor_parser = subparsers.add_parser('test_motor')
+    test_motor_parser.add_argument('--model_dir', required=True)
+    test_motor_parser.add_argument('--test_data_dir', required=True)
+    test_motor_parser.add_argument('--output_dir', default='motor_results')
+    test_motor_parser.add_argument('--trajectory_data_dir', default='data/trajectories')
+    test_motor_parser.add_argument('--device', default='auto',
+                                    choices=['auto', 'cpu', 'cuda'])
+
+    motor_atlas_parser = subparsers.add_parser('motor_atlas')
+    motor_atlas_parser.add_argument('--model_dir', required=True)
+    motor_atlas_parser.add_argument('--test_data_dir', required=True)
+    motor_atlas_parser.add_argument('--output', default='data/motor_atlas.html')
+    motor_atlas_parser.add_argument('--trajectory_data_dir', default='data/trajectories')
+    motor_atlas_parser.add_argument('--device', default='auto',
+                                     choices=['auto', 'cpu', 'cuda'])
+
     args = parser.parse_args()
 
     if args.command == 'generate':
@@ -336,3 +363,24 @@ if __name__ == '__main__':
     elif args.command == 'word_atlas':
         generate_word_atlas(args.model_dir, args.test_data_dir, args.output,
                              device=args.device)
+
+    # --- Motor commands ---
+    elif args.command == 'generate_trajectories':
+        from fbrl.motor import generate_trajectory_dataset
+        letters = _parse_letters(args.letters)
+        generate_trajectory_dataset(args.output_dir, font_name=args.font,
+                                     n_points=args.n_points, letters=letters)
+
+    elif args.command == 'train_motor':
+        cfg = load_config(args.config, _build_overrides(args))
+        train_motor_model(cfg)
+
+    elif args.command == 'test_motor':
+        test_motor_model(args.model_dir, args.test_data_dir, args.output_dir,
+                          trajectory_data_dir=args.trajectory_data_dir,
+                          device=args.device)
+
+    elif args.command == 'motor_atlas':
+        generate_motor_atlas(args.model_dir, args.test_data_dir, args.output,
+                              trajectory_data_dir=args.trajectory_data_dir,
+                              device=args.device)
