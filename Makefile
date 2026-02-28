@@ -215,8 +215,12 @@ endif
 	@echo "config: $(MOTOR_CONFIG)" >> runs/$(NAME)/info.txt
 	@echo "Archived to runs/$(NAME)/"
 
+test-unit:
+	docker compose exec $(SERVICE) pytest tests/ -v
+
 .PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive \
        generate-bigrams generate-bigrams-test train-bigrams resume-bigrams test-bigrams check-bigram-attention \
        bigram-atlas archive-bigrams \
        generate-words generate-words-test train-words resume-words test-words test-word-isolation word-atlas archive-words \
-       generate-trajectories train-motor resume-motor test-motor motor-atlas archive-motor
+       generate-trajectories train-motor resume-motor test-motor motor-atlas archive-motor \
+       test-unit
