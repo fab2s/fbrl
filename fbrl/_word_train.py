@@ -110,6 +110,16 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                 if new_key in dst:
                     dst[new_key] = src[key].float()
                     n_transferred += 1
+            # scan_sensor.* -> scan_sensor.* (direct, if source has scan phase)
+            elif key.startswith('scan_sensor.'):
+                if key in dst:
+                    dst[key] = src[key].float()
+                    n_transferred += 1
+            # content_head.* -> content_head.* (direct)
+            elif key.startswith('content_head.'):
+                if key in dst:
+                    dst[key] = src[key].float()
+                    n_transferred += 1
         # Single-letter letter_classifier -> all position classifiers
         for suffix in ('weight', 'bias'):
             sk = f'letter_classifier.{suffix}'

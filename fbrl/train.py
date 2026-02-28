@@ -24,13 +24,21 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
                 n_scales=1, device='auto',
                 diversity_weight=1.0, diversity_sigma=0.1, diversity_vy=1.0,
                 recode_weight=1.0, guide_weight=8.0, blur_sigma_ratio=0.16,
-                batch_size=52):
+                batch_size=52,
+                n_scan_glimpses=0, scan_patch_size=(12, 18),
+                scan_vy=0.3, scan_guide_weight=None, content_weight=0.5):
+    if scan_guide_weight is None:
+        scan_guide_weight = guide_weight
+
     device = _resolve_device(device)
     print(f"Training on: {device}")
     vy_str = f"  diversity_vy={diversity_vy}" if diversity_vy != 1.0 else ""
+    scan_str = (f"\nTwo-phase: scan={n_scan_glimpses} (prescribed x, {scan_patch_size}) + "
+                f"read={n_glimpses} ({patch_size}) = {n_scan_glimpses + n_glimpses} glimpses  "
+                f"scan_vy={scan_vy}  content_weight={content_weight}") if n_scan_glimpses > 0 else ""
     print(f"Attention: guide_weight={guide_weight}  blur_sigma_ratio={blur_sigma_ratio}  "
           f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}{vy_str}  "
-          f"recode_weight={recode_weight}  batch_size={batch_size}")
+          f"recode_weight={recode_weight}  batch_size={batch_size}{scan_str}")
 
     os.makedirs(save_dir, exist_ok=True)
     dataset = LetterDataset(data_dir)
@@ -44,6 +52,7 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
 
     model = VisionModel(
         n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
+        n_scan_glimpses=n_scan_glimpses, scan_patch_size=scan_patch_size,
     ).to(device)
 
     start_epoch = 0
@@ -53,6 +62,7 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
     losses_attn = []
     losses_div = []
     losses_recode = []
+    losses_content = []
     hist_hit_rate = []
     hist_hit_intensity = []
 
@@ -68,6 +78,7 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
             losses_attn = h.get('attn', [])
             losses_div = h.get('div', [])
             losses_recode = h.get('recode', [])
+            losses_content = h.get('content', [])
             hist_hit_rate = h.get('hit_rate', [])
             hist_hit_intensity = h.get('hit_intensity', [])
         print(f"Resumed from epoch {start_epoch} ({len(losses_letter_cls)} prior epochs of history)")
@@ -89,8 +100,9 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
         os.rename(log_path, os.path.join(save_dir, f'training_{ts}.log'))
     log_file = open(log_path, 'a')
     if start_epoch == 0:
-        log_file.write("epoch  recon    ltr      case     attn     div      hit    recode   lr         time\n")
-        log_file.write("-" * 90 + "\n")
+        content_hdr = "  content" if n_scan_glimpses > 0 else ""
+        log_file.write(f"epoch  recon    ltr      case     attn     div      hit    recode{content_hdr}   lr         time\n")
+        log_file.write("-" * (90 + len(content_hdr)) + "\n")
     log_file.flush()
 
     for epoch in range(start_epoch, end_epoch):
@@ -101,6 +113,7 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
         total_loss_attn = 0
         total_loss_div = 0
         total_loss_recode = 0
+        total_loss_content = 0
         total_hit_rate = 0
         total_hit_intensity = 0
 
@@ -122,9 +135,10 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
             case_float = case_idx.float().unsqueeze(1)  # (B, 1) for decoder conditioning
 
             # --- Forward pass ---
-            # The model: looks at noisy image through 10 tiny windows,
+            # The model: looks at noisy image through tiny windows,
             # builds a latent, then decodes/classifies from that latent
-            recon, letter_logits, case_logits, locations, latent = model(img, case_float)
+            recon, letter_logits, case_logits, locations, latent, scan_content_logits = model(img, case_float)
+            actual_n_scan = len(scan_content_logits)
 
             # --- Compute all loss terms ---
             # 1. Reconstruction: can the decoder rebuild the image from the latent?
@@ -135,16 +149,44 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
             case_cls_loss = F.cross_entropy(case_logits, case_idx)
             # 4. Attention guide: are fixations landing near letter strokes?
             #    (evaluated on clean image — noisy pixels would give false signal)
-            attn_loss = attention_content_loss(clean, locations, blur_sigma_ratio=blur_sigma_ratio)
+            if actual_n_scan > 0:
+                scan_attn = attention_content_loss(clean, locations[:actual_n_scan + 1],
+                                                   blur_sigma_ratio=blur_sigma_ratio)
+                read_attn = attention_content_loss(clean, locations[actual_n_scan:],
+                                                   blur_sigma_ratio=blur_sigma_ratio)
+                attn_loss = scan_guide_weight * scan_attn + guide_weight * read_attn
+            else:
+                attn_loss = guide_weight * attention_content_loss(clean, locations,
+                                                                  blur_sigma_ratio=blur_sigma_ratio)
             # 5. Diversity: are fixations spread out, not clustered?
-            div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma,
-                                               vy=diversity_vy)
+            if actual_n_scan > 0:
+                scan_div = fixation_diversity_loss(locations[:actual_n_scan + 1],
+                                                   sigma=diversity_sigma, vy=scan_vy)
+                read_div = fixation_diversity_loss(locations[actual_n_scan:],
+                                                   sigma=diversity_sigma, vy=diversity_vy)
+                div_loss = scan_div + read_div
+            else:
+                div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma,
+                                                   vy=diversity_vy)
+            # 6. Content detection: does scan correctly identify letter presence?
+            content_loss = torch.tensor(0.0, device=device)
+            if content_weight > 0 and actual_n_scan > 0:
+                bce = torch.nn.BCEWithLogitsLoss()
+                scan_locs = locations[1:actual_n_scan + 1]
+                for loc, logit in zip(scan_locs, scan_content_logits):
+                    grid = loc.view(img.shape[0], 1, 1, 2)
+                    sampled = F.grid_sample(clean, grid, align_corners=True,
+                                            padding_mode='zeros')
+                    label = (sampled.view(-1, 1) > 0.1).float()
+                    content_loss = content_loss + bce(logit, label)
+                content_loss = content_loss / actual_n_scan
 
             # Weighted sum — guide_weight is the critical knob. Too low and the
             # decoder learns to ignore attention; too high and it dominates training.
             total_loss = (recon_loss + letter_cls_loss + case_cls_loss
-                          + guide_weight * attn_loss
-                          + diversity_weight * div_loss)
+                          + attn_loss
+                          + diversity_weight * div_loss
+                          + content_weight * content_loss)
 
             # 6. Recode loss: flip the case label, decode the SAME latent, compare
             #    to the partner image (e.g., encode 'a' -> decode as 'A').
@@ -168,6 +210,7 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
             total_loss_case_cls += case_cls_loss.item()
             total_loss_attn += attn_loss.item()
             total_loss_div += div_loss.item()
+            total_loss_content += content_loss.item()
 
             # Hit rate diagnostic (no grad needed, on clean image)
             with torch.no_grad():
@@ -182,6 +225,7 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
         avg_attn = total_loss_attn / n
         avg_div = total_loss_div / n
         avg_recode = total_loss_recode / n
+        avg_content = total_loss_content / n
         avg_hr = total_hit_rate / n
         avg_hi = total_hit_intensity / n
         losses_recon.append(avg_recon)
@@ -190,6 +234,7 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
         losses_attn.append(avg_attn)
         losses_div.append(avg_div)
         losses_recode.append(avg_recode)
+        losses_content.append(avg_content)
         hist_hit_rate.append(avg_hr)
         hist_hit_intensity.append(avg_hi)
 
@@ -201,18 +246,20 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
         eta_min, eta_s = divmod(int(eta_sec), 60)
 
         current_lr = scheduler.get_last_lr()[0]
+        content_str = f"  Cont {avg_content:.4f}" if n_scan_glimpses > 0 else ""
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avg_recon:.4f}  Ltr {avg_letter_cls:.4f}  "
               f"Case {avg_case_cls:.4f}  Attn {avg_attn:.4f}  "
-              f"Div {avg_div:.4f}  Hit {avg_hr:.0%}  "
+              f"Div {avg_div:.4f}{content_str}  Hit {avg_hr:.0%}  "
               f"Recode {avg_recode:.4f}  "
               f"lr {current_lr:.6f}  "
               f"[{epoch_time:.1f}s  ETA {eta_min}m{eta_s:02d}s]")
 
         # Write to log file (machine-readable, tab-separated)
+        content_log = f"  {avg_content:.4f}" if n_scan_glimpses > 0 else ""
         log_file.write(f"{epoch+1:>5d}  {avg_recon:.4f}  {avg_letter_cls:.4f}  "
                        f"{avg_case_cls:.4f}  {avg_attn:.4f}  {avg_div:.4f}  "
-                       f"{avg_hr:.4f}  {avg_recode:.4f}  {current_lr:.6f}  "
+                       f"{avg_hr:.4f}  {avg_recode:.4f}{content_log}  {current_lr:.6f}  "
                        f"{epoch_time:.1f}s\n")
         log_file.flush()
 
@@ -225,11 +272,14 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
                 'model': {k: v.cpu() for k, v in model.state_dict().items()},
                 'n_glimpses': n_glimpses, 'patch_size': patch_size,
                 'n_scales': n_scales,
+                'n_scan_glimpses': n_scan_glimpses,
+                'scan_patch_size': scan_patch_size,
                 'image_size': 128, 'has_case': True,
                 'losses': {
                     'recon': losses_recon, 'letter_cls': losses_letter_cls,
                     'case_cls': losses_case_cls, 'attn': losses_attn,
                     'div': losses_div, 'recode': losses_recode,
+                    'content': losses_content,
                     'hit_rate': hist_hit_rate, 'hit_intensity': hist_hit_intensity,
                 },
             }
@@ -243,18 +293,23 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
         'epoch': end_epoch - 1,
         'model': {k: v.cpu() for k, v in model.state_dict().items()},
         'n_glimpses': n_glimpses, 'patch_size': patch_size, 'n_scales': n_scales,
+        'n_scan_glimpses': n_scan_glimpses,
+        'scan_patch_size': scan_patch_size,
         'image_size': 128, 'has_case': True,
         'losses': {
             'recon': losses_recon, 'letter_cls': losses_letter_cls,
             'case_cls': losses_case_cls, 'attn': losses_attn,
             'div': losses_div, 'recode': losses_recode,
+            'content': losses_content,
             'hit_rate': hist_hit_rate, 'hit_intensity': hist_hit_intensity,
         },
     }, os.path.join(save_dir, 'model_final.pth'))
 
-    # Training metrics graph (6 subplots)
+    # Training metrics graph
     epochs_x = range(end_epoch - len(losses_letter_cls) + 1, end_epoch + 1)
-    fig, axes = plt.subplots(6, 1, figsize=(8, 14), sharex=True)
+    has_content = n_scan_glimpses > 0 and any(v > 0 for v in losses_content)
+    n_plots = 7 if has_content else 6
+    fig, axes = plt.subplots(n_plots, 1, figsize=(8, 2.3 * n_plots), sharex=True)
 
     axes[0].plot(epochs_x, losses_recon, label='Recon', color='tab:blue')
     if any(v > 0 for v in losses_recode):
@@ -288,14 +343,22 @@ def train_model(data_dir, epochs=200, resume=None, save_dir='models',
     axes[4].legend(loc='upper right')
     axes[4].set_title('Fixation diversity (lower = more spread)')
 
-    axes[5].plot(epochs_x, hist_hit_rate, label='Hit rate', color='tab:purple')
-    axes[5].plot(epochs_x, hist_hit_intensity, label='Intensity',
+    next_ax = 5
+    if has_content:
+        axes[next_ax].plot(epochs_x, losses_content, label='Content BCE', color='tab:cyan')
+        axes[next_ax].set_ylabel('Loss')
+        axes[next_ax].legend(loc='upper right')
+        axes[next_ax].set_title('Content detection (scan phase)')
+        next_ax += 1
+
+    axes[next_ax].plot(epochs_x, hist_hit_rate, label='Hit rate', color='tab:purple')
+    axes[next_ax].plot(epochs_x, hist_hit_intensity, label='Intensity',
                  color='tab:purple', linestyle='--', alpha=0.6)
-    axes[5].set_xlabel('Epoch')
-    axes[5].set_ylabel('Rate / Intensity')
-    axes[5].set_ylim(0, 1)
-    axes[5].legend(loc='upper right')
-    axes[5].set_title('Fixation hit rate (on sharp letter pixels)')
+    axes[next_ax].set_xlabel('Epoch')
+    axes[next_ax].set_ylabel('Rate / Intensity')
+    axes[next_ax].set_ylim(0, 1)
+    axes[next_ax].legend(loc='upper right')
+    axes[next_ax].set_title('Fixation hit rate (on sharp letter pixels)')
 
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'training_metrics.png'), dpi=150)
@@ -353,7 +416,7 @@ def check_attention(data_dir, n_epochs=10, n_glimpses=10, patch_size=12,
             )
             case_float = case_idx.float().unsqueeze(1)
 
-            _, _, _, locations, _ = model(img, case_float)
+            _, _, _, locations, _, _ = model(img, case_float)
 
             attn_loss = attention_content_loss(
                 clean, locations, blur_sigma_ratio=blur_sigma_ratio,

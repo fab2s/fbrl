@@ -219,10 +219,17 @@ class VisionModel(nn.Module):
       - Letter classifier reads letter identity from it (A-Z, 26 classes)
       - Case classifier reads upper/lower from it (2 classes)
       - Recode: same latent decoded with flipped case -> tests factorization
+
+    Optional scan phase (n_scan_glimpses > 0):
+      Prescribed x sweep with wide patches before the free read phase.
+      Mirrors the word model's two-phase architecture on cheap 128x128 data.
+      scan_sensor and content_head can later transfer directly to WordVisionModel.
     """
     def __init__(self, n_classes=26, latent_dim=256, n_glimpses=10,
-                 patch_size=12, n_scales=1):
+                 patch_size=12, n_scales=1,
+                 n_scan_glimpses=0, scan_patch_size=(12, 18)):
         super().__init__()
+        self.n_scan_glimpses = n_scan_glimpses
         self.encoder = VisualAttentionEncoder(
             n_glimpses=n_glimpses, patch_size=patch_size,
             n_scales=n_scales, latent_dim=latent_dim,
@@ -233,6 +240,48 @@ class VisionModel(nn.Module):
         self.letter_classifier = nn.Linear(latent_dim, n_classes)  # 26: A-Z identity
         self.case_classifier = nn.Linear(latent_dim, 2)            # upper/lower
 
+        # Optional scan phase: wide patches + content detection head
+        if n_scan_glimpses > 0:
+            self.scan_sensor = GlimpseSensor(
+                patch_size=scan_patch_size, n_scales=n_scales, latent_dim=latent_dim,
+            )
+            self.content_head = nn.Linear(latent_dim, 1)
+
+    def _forward_scan_read(self, img):
+        """Two-phase scan→read loop using encoder internals.
+
+        Phase 1 — SCAN: prescribed x at linspace(-0.75, 0.75, n_scan), learned y.
+        Phase 2 — READ: free x,y with existing encoder sensor.
+        Returns: latent, locations, scan_content_logits
+        """
+        B = img.shape[0]
+        ctrl = self.encoder.attention_controller
+        sensor = self.encoder.glimpse_sensor
+        h = ctrl.h0.expand(B, -1).contiguous()
+        location = torch.zeros(B, 2, device=img.device)
+        locations = [location]
+        scan_content_logits = []
+
+        # Phase 1: SCAN (prescribed x, learned y)
+        scan_xs = torch.linspace(-0.75, 0.75, self.n_scan_glimpses, device=img.device)
+        for t in range(self.n_scan_glimpses):
+            glimpse = self.scan_sensor(img, location)
+            h = ctrl.gru(glimpse, h)
+            raw_loc = torch.tanh(ctrl.location_head(h))
+            location = torch.stack([scan_xs[t].expand(B), raw_loc[:, 1]], dim=1)
+            locations.append(location)
+            scan_content_logits.append(self.content_head(h))
+
+        # Phase 2: READ (free x,y with existing sensor)
+        for t in range(self.encoder.n_glimpses):
+            glimpse = sensor(img, location)
+            h = ctrl.gru(glimpse, h)
+            location = torch.tanh(ctrl.location_head(h))
+            locations.append(location)
+
+        latent = ctrl.latent_head(h)
+        return latent, locations, scan_content_logits
+
     def forward(self, img, case_label):
         """Forward pass with case-conditioned decoding.
 
@@ -240,17 +289,25 @@ class VisionModel(nn.Module):
             img: (B, 1, 128, 128) input image
             case_label: (B, 1) float — 0.0=upper, 1.0=lower
         Returns:
-            recon, letter_logits, case_logits, locations, latent
+            recon, letter_logits, case_logits, locations, latent, scan_content_logits
         """
-        latent, locations = self.encoder(img)
+        if self.n_scan_glimpses > 0:
+            latent, locations, scan_content_logits = self._forward_scan_read(img)
+        else:
+            latent, locations = self.encoder(img)
+            scan_content_logits = []
+
         recon = self.decoder(latent, case_label)
         letter_logits = self.letter_classifier(latent)
         case_logits = self.case_classifier(latent)
-        return recon, letter_logits, case_logits, locations, latent
+        return recon, letter_logits, case_logits, locations, latent, scan_content_logits
 
     def recode(self, img, target_case):
         """Encode image, decode with target case -> capitalize/uncapitalize."""
-        latent, locations = self.encoder(img)
+        if self.n_scan_glimpses > 0:
+            latent, locations, _scan_logits = self._forward_scan_read(img)
+        else:
+            latent, locations = self.encoder(img)
         recon = self.decoder(latent, target_case)
         return recon, locations
 

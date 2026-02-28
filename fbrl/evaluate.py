@@ -69,8 +69,11 @@ def _load_model(model_dir, device):
             )
     else:
         patch_size = ckpt.get('patch_size', 12)
+        n_scan = ckpt.get('n_scan_glimpses', 0)
+        scan_ps = ckpt.get('scan_patch_size', (12, 18))
         model = VisionModel(
             n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
+            n_scan_glimpses=n_scan, scan_patch_size=scan_ps,
         ).to(device)
 
     model.load_state_dict(state_dict, strict=False)
@@ -157,7 +160,7 @@ def test_model(model_dir, test_data_dir, output_dir='results', device='auto'):
         case_float = torch.tensor([[float(case_idx)]], device=device)
 
         with torch.no_grad():
-            recon, letter_logits, case_logits, locations, latent = model(img, case_float)
+            recon, letter_logits, case_logits, locations, latent, _scan_logits = model(img, case_float)
 
         # Letter accuracy
         letter_pred = letter_logits.argmax(dim=1).item()
@@ -316,7 +319,7 @@ def visualize_model(model_dir, data_dir, output_dir='visualizations', device='au
         case_float = torch.tensor([[float(case_idx)]], device=device)
 
         with torch.no_grad():
-            _, _, _, locations, _ = model(img, case_float)
+            _, _, _, locations, _, _ = model(img, case_float)
 
         original_char = letter.lower() if case == 'lower' else letter
         suffix = f'_{font}' if multi_font else ''
@@ -716,7 +719,7 @@ def generate_atlas(model_dir, test_data_dir, output_path='data/atlas.html', devi
         case_float = torch.tensor([[float(case_idx)]], device=device)
 
         with torch.no_grad():
-            _, letter_logits, case_logits, locations, _ = model(img_dev, case_float)
+            _, letter_logits, case_logits, locations, _, _ = model(img_dev, case_float)
 
         # Collect fixation coordinates as [[x, y], ...] in normalized [-1, 1]
         fixations = []

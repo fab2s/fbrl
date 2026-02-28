@@ -70,6 +70,16 @@ if __name__ == '__main__':
                               help='Training batch size (default 52)')
     train_parser.add_argument('--diversity_vy', type=float, default=1.0,
                               help='Vertical diversity multiplier (1.5 = 50%% stronger vertical repulsion)')
+    train_parser.add_argument('--n_scan_glimpses', type=int, default=0,
+                              help='Scan-phase glimpses (0=no scan, 3=recommended)')
+    train_parser.add_argument('--scan_patch_size', default='12,18',
+                              help='Scan patch size as H,W (default: 12,18)')
+    train_parser.add_argument('--scan_vy', type=float, default=0.3,
+                              help='Scan diversity VY (<1 = horizontal spread)')
+    train_parser.add_argument('--scan_guide_weight', type=float, default=None,
+                              help='Scan guide weight (defaults to --guide_weight)')
+    train_parser.add_argument('--content_weight', type=float, default=0.5,
+                              help='Content detection BCE weight (0=off)')
 
     test_parser = subparsers.add_parser('test')
     test_parser.add_argument('--model_dir', required=True)
@@ -299,6 +309,7 @@ if __name__ == '__main__':
         generate_test(letters, args.output_dir, font_spec=args.fonts)
 
     elif args.command == 'train':
+        scan_ps = _parse_patch_size(args.scan_patch_size)
         train_model(args.data_dir, args.epochs, args.resume, args.save_dir,
                     args.checkpoint_interval, n_glimpses=args.n_glimpses,
                     patch_size=args.patch_size, n_scales=args.n_scales,
@@ -309,7 +320,12 @@ if __name__ == '__main__':
                     recode_weight=args.recode_weight,
                     guide_weight=args.guide_weight,
                     blur_sigma_ratio=args.blur_sigma_ratio,
-                    batch_size=args.batch_size)
+                    batch_size=args.batch_size,
+                    n_scan_glimpses=args.n_scan_glimpses,
+                    scan_patch_size=scan_ps,
+                    scan_vy=args.scan_vy,
+                    scan_guide_weight=args.scan_guide_weight,
+                    content_weight=args.content_weight)
 
     elif args.command == 'test':
         test_model(args.model_dir, args.test_data_dir, args.output_dir,

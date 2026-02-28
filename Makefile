@@ -68,12 +68,15 @@ generate:
 generate-test:
 	$(RUN) generate_test --letters $(LETTERS) --output_dir data/test --fonts $(FONTS)
 
+LETTER_SCAN_GLIMPSES ?= 0
+LETTER_CONTENT ?= 0.5
+
 train:
 	@$(CLEAN_MODELS)
-	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --diversity_vy $(VY)
+	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --diversity_vy $(VY) --n_scan_glimpses $(LETTER_SCAN_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --scan_vy $(SCAN_VY) --content_weight $(LETTER_CONTENT) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE))
 
 resume:
-	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --diversity_vy $(VY) --resume data/models/$(RESUME_FROM)
+	$(RUN) train --data_dir data/letters --epochs $(EPOCHS) --save_dir data/models --checkpoint_interval $(CKPT) --n_glimpses 10 --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) --diversity_vy $(VY) --n_scan_glimpses $(LETTER_SCAN_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --scan_vy $(SCAN_VY) --content_weight $(LETTER_CONTENT) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --resume data/models/$(RESUME_FROM)
 
 test:
 	@$(CLEAN_RESULTS)
