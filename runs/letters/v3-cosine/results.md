@@ -1,7 +1,5 @@
 # Results: Multi-Font + CosineAnnealingLR, 128x128, Aa-Zz, 100 epochs
 
-**Archived model**: [`runs/v3-multi-font-cosine/`](../runs/v3-multi-font-cosine/)
-
 ## Summary
 - **Letter accuracy**: 572/572 (100.0%)
 - **Case accuracy**: 572/572 (100.0%)

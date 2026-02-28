@@ -1,7 +1,5 @@
 # Results: Multi-Font, 128x128, Aa-Zz, 50 epochs
 
-**Archived model**: [`runs/v2-multi-font/`](../runs/v2-multi-font/)
-
 ## Summary
 - **Letter accuracy**: 569/572 (99.5%)
 - **Case accuracy**: 570/572 (99.7%)

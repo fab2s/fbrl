@@ -236,7 +236,7 @@ def fixation_hit_rate(image, locations, threshold=0.3):
     total_intensity = 0
     n = 0
     for loc in locations[1:]:
-        grid = loc.view(B, 1, 1, 2)
+        grid = loc.float().view(B, 1, 1, 2)
         sampled = F.grid_sample(image, grid, align_corners=True, padding_mode='zeros')
         intensity = sampled.mean(dim=0).squeeze()  # average over batch
         total_intensity += intensity.item()

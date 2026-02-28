@@ -248,11 +248,19 @@ Each design decision was driven by something that didn't work in the previous st
 
 Detailed analysis for each training run:
 
-- [128x128, Aa-Zz, single font, 200 epochs](thoughts/results_128x128_Aa-Zz.md) — 100% letter, 100% case, pixel-perfect recode
-- [128x128, Aa-Zz, 11 fonts, 50 epochs](thoughts/results_multi-font_50ep.md) — 99.5% letter, 99.7% case across all fonts (guide_weight=8.0)
-- [128x128, Aa-Zz, 11 fonts, 100 epochs, CosineAnnealingLR](thoughts/results_multi-font-cosine_100ep.md) — 100% letter, 100% case, all 11 fonts perfect
-- [192x128, 200 bigrams, transfer learning, 300 epochs](thoughts/results_bigram-transfer_300ep.md) — 97% both-correct, first successful bigram run
-- [256x128, 200 words, prescribed x-scan, 200 epochs](thoughts/results_word-prescribed_200ep.md) — 100% all 4 positions, genuine sequential reading
+**Letters** (`runs/letters/`):
+- [v1: single font, 200 epochs](runs/letters/v1-single-font/results.md) — 100% letter, 100% case, pixel-perfect recode
+- [v2: 11 fonts, 50 epochs](runs/letters/v2-multi-font/results.md) — 99.5% letter, 99.7% case (guide_weight=8.0)
+- [v3: 11 fonts, CosineAnnealingLR, 100 epochs](runs/letters/v3-cosine/results.md) — 100% letter, 100% case, all 11 fonts
+- [v4: vertical diversity (VY=1.5), 100 epochs](runs/letters/v4-vertical-diversity/results.md) — 100% with better attention spread
+- [v5: scan phase, 100 epochs](runs/letters/v5-scan/results.md) — 100%, pretrained scan_sensor + content_head
+
+**Bigrams** (`runs/bigrams/`):
+- [v1: transfer learning, 300 epochs](runs/bigrams/v1-transfer/results.md) — 97% both-correct
+
+**Words** (`runs/words/`):
+- [v1: prescribed x-scan, 200 epochs](runs/words/v1-prescribed/results.md) — 100% all 4 positions
+- [v2: multi-head + isolation, 200 epochs](runs/words/v2-multihead/results.md) — 99.5%, 128px isolation
 
 ## Quick Start
 
@@ -305,8 +313,11 @@ fbrl/
 +-- Dockerfile              # python:3.10-slim + torch 2.5.1 + fonts
 +-- docker-compose.yml      # GPU-enabled container with data volume
 +-- Makefile                # Pipeline shortcuts (all targets accept variable overrides)
-+-- thoughts/               # Research notes and per-run results
-+-- runs/                   # Archived models (Git LFS-tracked .pth.gz files)
++-- thoughts/               # Research notes (non-run-specific)
++-- runs/                   # Archived models + results, organized by type
+|   +-- letters/            #   Single-letter experiments (v1-v5)
+|   +-- bigrams/            #   Bigram experiments (v1)
+|   +-- words/              #   Word experiments (v1-v2)
 +-- data/                   # Generated data (Docker volume mount, not in git)
 +-- docs/
     +-- glossary.md         # Deep learning terms and concepts
@@ -327,6 +338,6 @@ The research goal is to scale foveal attention from character recognition toward
 
 ## Reference
 
-- [Research Hypotheses](docs/hypotheses.md) — Core intuitions, testable predictions, and the multimodal roadmap
+- [Research Hypotheses](thoughts/hypotheses.md) — Core intuitions, testable predictions, and the multimodal roadmap
 - [Glossary](docs/glossary.md) — Deep learning terms, acronyms, and concepts as they appear in this project
 - [Usage Reference](docs/usage.md) — Full CLI reference, training output format, Makefile documentation

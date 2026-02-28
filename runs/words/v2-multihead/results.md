@@ -1,7 +1,5 @@
 # Results: Word Multi-Head Optimizer, 128px Isolation, 200 epochs
 
-**Archived model**: [`runs/v2-word-multihead/`](../runs/v2-word-multihead/) (no weights — recipe only)
-
 ## Summary
 - **Word accuracy**: 199/200 (99.5%) — 1 error: `game` → `gamd` (P4: e→d)
 - **Isolation accuracy**: 144/286 (50.3% any-position) across 11 fonts

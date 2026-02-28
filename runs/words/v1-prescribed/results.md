@@ -1,7 +1,5 @@
 # Results: Word Prescribed X-Scan, 256x128, 200 words, 200 epochs
 
-**Archived model**: [`runs/v1-word-prescribed/`](../runs/v1-word-prescribed/)
-
 ## Summary
 - **All-correct accuracy**: 200/200 (100.0%)
 - **Pos 1 accuracy**: 200/200 (100.0%)

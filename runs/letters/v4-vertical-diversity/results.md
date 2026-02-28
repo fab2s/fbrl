@@ -1,7 +1,5 @@
 # Results: Vertical Diversity (VY=1.5), 128x128, Aa-Zz, 100 epochs
 
-**Archived model**: [`runs/v5-vertical-diversity/`](../runs/v5-vertical-diversity/)
-
 ## Summary
 - **Letter accuracy**: 572/572 (100.0%)
 - **Case accuracy**: 572/572 (100.0%)

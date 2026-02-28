@@ -88,4 +88,4 @@ word training transfer is planned — you get identical letter accuracy plus pre
 scan mechanics for free.
 
 ## Archive
-- `runs/v6-scan-letter/` — model, training log, metrics graph, atlas
+- `runs/letters/v5-scan/` — model, training log, metrics graph, atlas
