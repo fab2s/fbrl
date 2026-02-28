@@ -461,6 +461,7 @@ class IsolationLetterDataset:
             self.fonts.add(font)
             n_loaded += 1
 
+        self.font_list = sorted(self.fonts)
         print(f"IsolationLetterDataset: {n_loaded} images, "
               f"{len(self.fonts)} font(s), {len(self.by_letter_font)} (letter, font) combos")
 

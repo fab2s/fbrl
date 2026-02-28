@@ -402,7 +402,8 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                     letter_idx = idx_list[iso_k][b].item()
                     if random.random() < isolation_random_prob:
                         letter_idx = random.randint(0, 25)
-                    iso_imgs.append(iso_dataset.get_image(letter_idx, fonts_batch[b]))
+                    iso_font = random.choice(iso_dataset.font_list)
+                    iso_imgs.append(iso_dataset.get_image(letter_idx, iso_font))
                     iso_targets.append(letter_idx)
                 iso_batch = torch.stack(iso_imgs).to(device)  # (B, 1, 128, 128)
                 iso_targets_t = torch.tensor(iso_targets, device=device)
@@ -711,3 +712,22 @@ def _save_word_checkpoint(model, epoch, n_scan_glimpses, n_read_glimpses,
     if multi_head and opt_states:
         ckpt.update(opt_states)
     torch.save(ckpt, path)
+
+    # Save lightweight weights-only file alongside the final checkpoint
+    if path.endswith('model_final.pth'):
+        weights_path = os.path.join(os.path.dirname(path), 'model_weights.pth')
+        torch.save({
+            'model_state_dict': {k: v.cpu() for k, v in model.state_dict().items()},
+            'model_type': 'word',
+            'epoch': epoch + 1,
+            'n_scan_glimpses': n_scan_glimpses,
+            'n_read_glimpses': n_read_glimpses,
+            'scan_patch_size': scan_patch_size,
+            'read_patch_size': read_patch_size,
+            'n_scales': n_scales,
+            'n_positions': n_positions,
+        }, weights_path)
+        import pathlib
+        full_sz = pathlib.Path(path).stat().st_size / (1024 * 1024)
+        wt_sz = pathlib.Path(weights_path).stat().st_size / (1024 * 1024)
+        print(f"Weights-only saved: {weights_path} ({wt_sz:.0f}MB vs {full_sz:.0f}MB full)")
