@@ -574,6 +574,8 @@ class WordVisionModel(nn.Module):
         # Dynamic scan count: scales with image width (power-1.5 "log dimming")
         # 64px→1, 128px→3, 192px→5, 256px→8
         n_scan = max(1, round(self.n_scan_glimpses * (W / 256) ** 1.5))
+        # Read count stays fixed — CrossAttentionReadout trained on fixed sequence length
+        n_read = self.n_read_glimpses
 
         # Prescribed x positions: linear sweep left-to-right
         scan_xs = torch.linspace(-0.75, 0.75, n_scan, device=img.device)

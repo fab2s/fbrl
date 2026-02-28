@@ -1,0 +1,229 @@
+All-correct: 199/200 (99.5%)
+Pos 1:       200/200 (100.0%)
+Pos 2:       200/200 (100.0%)
+Pos 3:       200/200 (100.0%)
+Pos 4:       199/200 (99.5%)
+Avg MSE:     0.0014
+
+Errors (1):
+  game -> gamd  (pos4: e->d)
+
+Per-word detail (200 samples):
+  able: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  also: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  area: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  away: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  back: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  been: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  best: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  body: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  book: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  both: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  call: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  came: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  case: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  city: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0016
+  come: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  dark: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  data: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0017
+  date: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  days: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  deal: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  deep: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  does: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  done: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  door: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  down: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  draw: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  drop: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  drug: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  duty: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  each: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  east: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  edge: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  else: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0016
+  even: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  eyes: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  face: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  fact: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  fail: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  fair: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  fall: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  farm: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  fast: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  fear: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  feel: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  feet: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  fill: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  film: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  find: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  fire: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  firm: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  fish: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  five: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  flat: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  flow: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  food: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  foot: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  form: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  four: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  free: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  from: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  full: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  fund: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  gain: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  game: P1=OK  P2=OK  P3=OK  P4=WRONG(d)  MSE=0.0019
+  girl: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  give: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  gold: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  gone: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  good: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  grew: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  grow: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  gulf: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  hair: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  half: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  hall: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0017
+  hand: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  hard: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  hate: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  have: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  head: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0016
+  hear: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  heat: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  held: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  help: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  here: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  hide: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  high: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  hill: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0020
+  hold: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  hole: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  home: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0016
+  hope: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  hour: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  huge: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  idea: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  into: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  iron: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  item: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  jack: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  join: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  jump: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  jury: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  just: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  keen: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  keep: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  kind: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  king: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  know: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  lack: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0017
+  laid: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  lake: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  land: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  last: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  late: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  lead: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  left: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  less: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  life: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  like: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  line: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  link: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  list: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  live: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  loan: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  lock: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  long: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  look: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  lord: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  lose: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  love: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  luck: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  made: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0016
+  make: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0016
+  many: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  mark: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  mass: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  meal: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  mile: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  mind: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  miss: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  mode: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  more: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  most: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  move: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  much: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  must: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  name: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  near: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  need: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  news: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  next: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  nine: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  nose: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  note: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  once: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  only: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  open: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  over: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  part: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  plan: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  play: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  quiz: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  read: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  rest: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  said: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  same: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0018
+  side: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  sign: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0016
+  size: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  some: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  step: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  stop: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  such: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  sure: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  take: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  tell: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  than: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  that: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  them: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  then: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  they: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  this: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  time: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  true: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  turn: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  upon: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0015
+  used: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0016
+  very: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  want: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  were: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  what: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  when: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  will: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  with: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+  word: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  work: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0013
+  year: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  your: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  zero: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0014
+  zone: P1=OK  P2=OK  P3=OK  P4=OK  MSE=0.0012
+
+Correct (199):
+  able, also, area, away, back, been, best, body, book, both, call, came, case, 
+  city, come, dark, data, date, days, deal, deep, does, done, door, down, draw, 
+  drop, drug, duty, each, east, edge, else, even, eyes, face, fact, fail, fair, 
+  fall, farm, fast, fear, feel, feet, fill, film, find, fire, firm, fish, five, 
+  flat, flow, food, foot, form, four, free, from, full, fund, gain, girl, give, 
+  gold, gone, good, grew, grow, gulf, hair, half, hall, hand, hard, hate, have, 
+  head, hear, heat, held, help, here, hide, high, hill, hold, hole, home, hope, 
+  hour, huge, idea, into, iron, item, jack, join, jump, jury, just, keen, keep, 
+  kind, king, know, lack, laid, lake, land, last, late, lead, left, less, life, 
+  like, line, link, list, live, loan, lock, long, look, lord, lose, love, luck, 
+  made, make, many, mark, mass, meal, mile, mind, miss, mode, more, most, move, 
+  much, must, name, near, need, news, next, nine, nose, note, once, only, open, 
+  over, part, plan, play, quiz, read, rest, said, same, side, sign, size, some, 
+  step, stop, such, sure, take, tell, than, that, them, then, they, this, time, 
+  true, turn, upon, used, very, want, were, what, when, will, with, word, work, 
+  year, your, zero, zone

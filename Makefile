@@ -32,6 +32,7 @@ WORD_READ_GLIMPSES ?= 12
 ISOLATION_DATA ?=
 MULTI_HEAD ?=
 ISO_RANDOM ?= 0.0
+AMP ?=
 RESUME_FROM ?= model_final.pth
 
 # Lifecycle
@@ -169,14 +170,17 @@ generate-words-test:
 
 train-words:
 	@$(CLEAN_WORD_MODELS)
-	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) $(if $(SCAFFOLD_EPOCHS),--scaffold_epochs $(SCAFFOLD_EPOCHS)) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER)) $(if $(ISOLATION_DATA),--isolation_data_dir $(ISOLATION_DATA)) --isolation_random_prob $(ISO_RANDOM) $(if $(MULTI_HEAD),--multi_head)
+	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) $(if $(SCAFFOLD_EPOCHS),--scaffold_epochs $(SCAFFOLD_EPOCHS)) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) $(if $(TRANSFER),--transfer $(TRANSFER)) $(if $(ISOLATION_DATA),--isolation_data_dir $(ISOLATION_DATA)) --isolation_random_prob $(ISO_RANDOM) $(if $(MULTI_HEAD),--multi_head) $(if $(AMP),--amp)
 
 resume-words:
-	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) $(if $(SCAFFOLD_EPOCHS),--scaffold_epochs $(SCAFFOLD_EPOCHS)) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --resume data/word_models/$(RESUME_FROM) $(if $(ISOLATION_DATA),--isolation_data_dir $(ISOLATION_DATA)) --isolation_random_prob $(ISO_RANDOM) $(if $(MULTI_HEAD),--multi_head)
+	$(RUN) train_words --data_dir data/words --epochs $(EPOCHS) --save_dir data/word_models --checkpoint_interval $(CKPT) --n_scan_glimpses $(WORD_SCAN_GLIMPSES) --n_read_glimpses $(WORD_READ_GLIMPSES) --scan_patch_size $(SCAN_PATCH) --read_patch_size $(READ_PATCH) --device $(DEVICE) --batch_size $(BATCH) --guide_weight $(GUIDE) $(if $(SCAN_GUIDE),--scan_guide_weight $(SCAN_GUIDE)) --scaffold_ratio $(SCAFFOLD_RATIO) --scaffold_floor $(SCAFFOLD_FLOOR) $(if $(SCAFFOLD_EPOCHS),--scaffold_epochs $(SCAFFOLD_EPOCHS)) --content_weight $(CONTENT) --isolation_weight $(ISOLATION) --scan_vy $(SCAN_VY) --read_vy $(READ_VY) --edge_weight $(EDGE) --resume data/word_models/$(RESUME_FROM) $(if $(ISOLATION_DATA),--isolation_data_dir $(ISOLATION_DATA)) --isolation_random_prob $(ISO_RANDOM) $(if $(MULTI_HEAD),--multi_head) $(if $(AMP),--amp)
 
 test-words:
 	@$(CLEAN_WORD_RESULTS)
 	$(RUN) test_words --model_dir data/word_models --test_data_dir data/word_test --output_dir data/word_results --device $(DEVICE)
+
+test-word-isolation:
+	$(RUN) test_word_isolation --model_dir data/word_models --test_data_dir data/test --output_dir data/word_results --device $(DEVICE)
 
 word-atlas:
 	@rm -f data/word_atlas.html
@@ -211,4 +215,4 @@ endif
 .PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive \
        generate-bigrams generate-bigrams-test train-bigrams resume-bigrams test-bigrams check-bigram-attention \
        bigram-atlas archive-bigrams \
-       generate-words generate-words-test train-words resume-words test-words word-atlas archive-words
+       generate-words generate-words-test train-words resume-words test-words test-word-isolation word-atlas archive-words

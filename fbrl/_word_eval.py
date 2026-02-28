@@ -604,3 +604,142 @@ def generate_word_atlas(model_dir, test_data_dir, output_path='data/word_atlas.h
     print(f"\nAtlas: {len(words_list)} words x {len(font_names)} fonts = {total} samples")
     print(f"All-correct: {all_ok}/{total} ({all_ok/total*100:.1f}%)")
     print(f"Written to {output_path} ({size_kb:.0f} KB)")
+
+
+def test_word_isolation(model_dir, test_data_dir, output_dir='word_results', device='auto'):
+    """Test a trained WordVisionModel on single-letter 128x128 images.
+
+    Validates that the model can read individual letters (isolation capability).
+    Each letter is tested against all 4 position classifiers — reports which
+    positions recognise it correctly. Only uses lowercase test images.
+    """
+    device = _resolve_device(device)
+    print(f"Word isolation test on: {device}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    model, _, model_type = _load_model(model_dir, device)
+    if model_type != 'word':
+        print(f"Warning: checkpoint model_type is '{model_type}', expected 'word'")
+
+    n_positions = model.n_positions
+
+    # Discover lowercase test images: img_<letter>_<font>.png
+    test_files = []
+    for fname in sorted(os.listdir(test_data_dir)):
+        if not fname.startswith('img_') or not fname.endswith('.png'):
+            continue
+        parts = fname[4:-4].split('_', 1)  # letter, font
+        if len(parts) != 2:
+            continue
+        letter, font = parts
+        if len(letter) != 1 or not letter.islower():
+            continue
+        test_files.append((letter, font, os.path.join(test_data_dir, fname)))
+
+    if not test_files:
+        print(f"No lowercase test images found in {test_data_dir}")
+        return
+
+    print(f"Found {len(test_files)} lowercase test images")
+
+    # Per-position stats
+    pos_correct = [0] * n_positions
+    total = 0
+    any_correct = 0
+
+    # Per-font tracking
+    font_stats = {}
+    errors = []
+
+    for letter, font, img_path in test_files:
+        img = Image.open(img_path).convert('L')
+        tensor = torch.tensor(np.array(img) / 255.0, dtype=torch.float32)
+        tensor = tensor.unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, 128, 128)
+
+        letter_idx = ord(letter) - ord('a')
+
+        with torch.no_grad():
+            _, logits_list, locations, _, _ = model(tensor)
+
+        preds = [logits_list[p].argmax(dim=1).item() for p in range(n_positions)]
+        oks = [preds[p] == letter_idx for p in range(n_positions)]
+
+        for p in range(n_positions):
+            pos_correct[p] += int(oks[p])
+        any_ok = any(oks)
+        any_correct += int(any_ok)
+        total += 1
+
+        # Per-font
+        if font not in font_stats:
+            font_stats[font] = {f'pos{p+1}_ok': 0 for p in range(n_positions)}
+            font_stats[font].update({'any_ok': 0, 'total': 0})
+        for p in range(n_positions):
+            font_stats[font][f'pos{p+1}_ok'] += int(oks[p])
+        font_stats[font]['any_ok'] += int(any_ok)
+        font_stats[font]['total'] += 1
+
+        pred_chars = [chr(preds[p] + ord('a')) for p in range(n_positions)]
+        marks = ['OK' if oks[p] else pred_chars[p] for p in range(n_positions)]
+        status = 'OK' if any_ok else 'MISS'
+        font_tag = f'  [{font}]' if len(font_stats) > 1 or font != 'default' else ''
+        marks_str = '  '.join(f'P{p+1}={marks[p]}' for p in range(n_positions))
+        print(f"  {letter}{font_tag}: {marks_str}  {status}")
+
+        if not any_ok:
+            errors.append((letter, font, pred_chars))
+
+        # Save attention overlay
+        visualize_attention(
+            tensor.squeeze(0), locations,
+            os.path.join(output_dir, f'iso_attention_{letter}_{font}.png'),
+        )
+
+    # Summary
+    accs = [pos_correct[p] / total * 100 if total > 0 else 0 for p in range(n_positions)]
+    any_acc = any_correct / total * 100 if total > 0 else 0
+
+    print(f"\nIsolation results ({total} single-letter images):")
+    for p in range(n_positions):
+        print(f"  P{p+1} accuracy: {pos_correct[p]}/{total} ({accs[p]:.1f}%)")
+    print(f"  Any-pos correct: {any_correct}/{total} ({any_acc:.1f}%)")
+
+    if len(font_stats) > 1:
+        print(f"\nPer-font breakdown:")
+        for fname in sorted(font_stats.keys()):
+            s = font_stats[fname]
+            pos_str = '  '.join(
+                f'P{p+1} {s[f"pos{p+1}_ok"]/s["total"]*100:5.1f}%'
+                for p in range(n_positions)
+            )
+            any_pct = s['any_ok'] / s['total'] * 100
+            print(f"  {fname:<24s}: {pos_str}  Any {any_pct:5.1f}%  ({s['total']})")
+
+    # Write summary
+    summary_path = os.path.join(output_dir, 'summary_isolation.txt')
+    with open(summary_path, 'w') as f:
+        f.write(f"Word model isolation test ({total} single-letter images)\n")
+        f.write("=" * 60 + "\n\n")
+        for p in range(n_positions):
+            f.write(f"P{p+1} accuracy: {pos_correct[p]}/{total} ({accs[p]:.1f}%)\n")
+        f.write(f"Any-pos correct: {any_correct}/{total} ({any_acc:.1f}%)\n")
+
+        if len(font_stats) > 1:
+            f.write(f"\nPer-font:\n")
+            for fname in sorted(font_stats.keys()):
+                s = font_stats[fname]
+                pos_str = '  '.join(
+                    f'P{p+1} {s[f"pos{p+1}_ok"]/s["total"]*100:5.1f}%'
+                    for p in range(n_positions)
+                )
+                any_pct = s['any_ok'] / s['total'] * 100
+                f.write(f"  {fname:<24s}: {pos_str}  Any {any_pct:5.1f}%  ({s['total']})\n")
+
+        if errors:
+            f.write(f"\nMisses ({len(errors)}):\n")
+            for letter, font, pchars in sorted(errors):
+                preds_str = '/'.join(pchars)
+                f.write(f"  {letter} [{font}]: predicted {preds_str}\n")
+
+    print(f"\nSummary written to {summary_path}")

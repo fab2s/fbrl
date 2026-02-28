@@ -1,0 +1,13 @@
+git: 1d86b75
+date: 2026-02-28T11:45:47+01:00
+model: word (prescribed x-scan)
+fonts: all
+epochs: 200
+batch: 52
+guide: 8.0
+scan: 8 glimpses (prescribed x), patch 12,18
+read: 12 glimpses (free), patch 12
+scaffold_ratio: 0.67
+content_weight: 0.5
+make: make train-words EPOCHS=200 DEVICE=cuda BATCH=52 GUIDE=8.0 SCAFFOLD_RATIO=0.67 SCAFFOLD_FLOOR=0.0 CONTENT=0.5 ISOLATION=0.5 SCAN_VY=0.3 READ_VY=1.5 EDGE=0.0 FONTS=all ISO_RANDOM=0.0 ISOLATION_DATA=data/letters MULTI_HEAD=1
+cli: python vision_training.py train_words --data_dir data/words --epochs 200 --save_dir data/word_models --checkpoint_interval 50 --n_scan_glimpses 8 --n_read_glimpses 12 --scan_patch_size 12,18 --read_patch_size 12 --n_scales 1 --n_positions 4 --device cuda --batch_size 52 --guide_weight 8.0 --scaffold_ratio 0.67 --scaffold_floor 0.0 --content_weight 0.5 --isolation_weight 0.5 --scan_vy 0.3 --read_vy 1.5 --edge_weight 0.0 --blur_sigma_ratio 0.16 --diversity_weight 1.0 --diversity_sigma 0.1 --isolation_random_prob 0.0 --isolation_data_dir data/letters --multi_head

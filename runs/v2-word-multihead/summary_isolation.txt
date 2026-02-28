@@ -1,0 +1,165 @@
+Word model isolation test (286 single-letter images)
+============================================================
+
+P1 accuracy: 102/286 (35.7%)
+P2 accuracy: 85/286 (29.7%)
+P3 accuracy: 110/286 (38.5%)
+P4 accuracy: 91/286 (31.8%)
+Any-pos correct: 144/286 (50.3%)
+
+Per-font:
+  default                 : P1  92.3%  P2  73.1%  P3  88.5%  P4  73.1%  Any 100.0%  (26)
+  dejavu-sans             : P1  53.8%  P2  38.5%  P3  50.0%  P4  42.3%  Any  61.5%  (26)
+  dejavu-sans-bold        : P1  15.4%  P2  23.1%  P3  19.2%  P4  19.2%  Any  26.9%  (26)
+  dejavu-serif            : P1  42.3%  P2  26.9%  P3  46.2%  P4  34.6%  Any  57.7%  (26)
+  dejavu-serif-bold       : P1  11.5%  P2  15.4%  P3  15.4%  P4  15.4%  Any  30.8%  (26)
+  liberation-mono         : P1  34.6%  P2  38.5%  P3  38.5%  P4  26.9%  Any  57.7%  (26)
+  liberation-mono-bold    : P1  15.4%  P2   7.7%  P3  11.5%  P4  23.1%  Any  23.1%  (26)
+  liberation-narrow       : P1  23.1%  P2  19.2%  P3  38.5%  P4  30.8%  Any  46.2%  (26)
+  liberation-sans         : P1  57.7%  P2  50.0%  P3  50.0%  P4  42.3%  Any  73.1%  (26)
+  liberation-sans-bold    : P1  19.2%  P2  15.4%  P3  30.8%  P4  26.9%  Any  38.5%  (26)
+  liberation-serif        : P1  26.9%  P2  19.2%  P3  34.6%  P4  15.4%  Any  38.5%  (26)
+
+Misses (142):
+  a [dejavu-sans]: predicted e/e/e/e
+  b [dejavu-sans-bold]: predicted n/o/o/y
+  b [dejavu-serif-bold]: predicted n/n/n/n
+  b [liberation-mono]: predicted h/h/h/h
+  b [liberation-mono-bold]: predicted n/n/n/h
+  b [liberation-narrow]: predicted n/u/y/y
+  b [liberation-sans-bold]: predicted n/u/c/y
+  b [liberation-serif]: predicted m/i/m/y
+  c [dejavu-sans-bold]: predicted n/n/k/k
+  c [dejavu-serif-bold]: predicted n/n/k/k
+  d [dejavu-sans-bold]: predicted n/n/n/y
+  d [dejavu-serif-bold]: predicted n/n/n/y
+  d [liberation-mono-bold]: predicted n/n/n/y
+  d [liberation-narrow]: predicted i/i/i/y
+  d [liberation-sans-bold]: predicted m/u/m/m
+  d [liberation-serif]: predicted c/u/c/y
+  e [dejavu-sans-bold]: predicted n/n/k/a
+  e [dejavu-serif-bold]: predicted n/a/a/a
+  e [liberation-mono-bold]: predicted n/n/a/a
+  e [liberation-sans-bold]: predicted n/n/a/a
+  e [liberation-serif]: predicted a/a/a/l
+  f [dejavu-sans]: predicted z/r/z/z
+  f [dejavu-sans-bold]: predicted r/w/x/x
+  f [dejavu-serif-bold]: predicted r/r/r/h
+  f [liberation-mono]: predicted l/l/z/l
+  f [liberation-mono-bold]: predicted z/w/z/z
+  f [liberation-sans]: predicted x/i/x/s
+  g [dejavu-sans-bold]: predicted n/a/k/n
+  g [dejavu-serif-bold]: predicted n/k/k/n
+  g [liberation-mono]: predicted u/d/w/u
+  g [liberation-mono-bold]: predicted n/k/k/n
+  g [liberation-narrow]: predicted i/u/k/y
+  g [liberation-sans]: predicted u/o/o/n
+  g [liberation-sans-bold]: predicted s/d/a/u
+  g [liberation-serif]: predicted c/r/e/l
+  h [dejavu-sans-bold]: predicted n/w/y/y
+  h [dejavu-serif]: predicted n/u/m/y
+  h [dejavu-serif-bold]: predicted n/n/n/k
+  h [liberation-serif]: predicted n/n/n/n
+  i [liberation-mono-bold]: predicted f/t/t/t
+  i [liberation-sans-bold]: predicted o/t/t/f
+  j [dejavu-sans]: predicted d/i/f/f
+  j [dejavu-sans-bold]: predicted f/r/f/f
+  j [dejavu-serif]: predicted m/l/i/l
+  j [dejavu-serif-bold]: predicted w/i/x/x
+  j [liberation-mono]: predicted l/l/l/l
+  j [liberation-mono-bold]: predicted f/f/f/m
+  j [liberation-narrow]: predicted t/i/r/r
+  j [liberation-sans]: predicted o/i/f/f
+  j [liberation-sans-bold]: predicted o/t/t/f
+  j [liberation-serif]: predicted o/i/t/f
+  k [liberation-serif]: predicted f/l/y/y
+  l [dejavu-sans]: predicted i/i/i/t
+  l [dejavu-sans-bold]: predicted f/i/f/f
+  l [dejavu-serif]: predicted i/i/r/m
+  l [dejavu-serif-bold]: predicted f/i/f/f
+  l [liberation-mono]: predicted t/i/r/d
+  l [liberation-mono-bold]: predicted t/t/t/f
+  l [liberation-narrow]: predicted r/i/i/t
+  l [liberation-sans]: predicted i/i/r/m
+  l [liberation-sans-bold]: predicted o/t/t/f
+  l [liberation-serif]: predicted i/i/r/t
+  m [dejavu-serif]: predicted d/u/u/y
+  m [dejavu-serif-bold]: predicted z/x/d/y
+  n [dejavu-sans-bold]: predicted m/h/d/m
+  n [dejavu-serif]: predicted m/m/m/m
+  n [dejavu-serif-bold]: predicted h/h/k/h
+  n [liberation-mono]: predicted m/m/m/m
+  n [liberation-mono-bold]: predicted m/i/r/m
+  n [liberation-narrow]: predicted f/i/k/h
+  n [liberation-sans-bold]: predicted m/h/m/m
+  n [liberation-serif]: predicted i/i/r/y
+  o [dejavu-sans-bold]: predicted k/w/w/y
+  o [dejavu-serif]: predicted n/e/e/k
+  o [dejavu-serif-bold]: predicted d/i/y/w
+  o [liberation-mono-bold]: predicted u/u/u/y
+  o [liberation-narrow]: predicted i/i/w/k
+  o [liberation-sans-bold]: predicted n/u/y/y
+  o [liberation-serif]: predicted i/u/y/y
+  p [dejavu-sans-bold]: predicted n/n/k/n
+  p [dejavu-serif-bold]: predicted k/h/k/y
+  p [liberation-mono]: predicted n/n/o/n
+  p [liberation-mono-bold]: predicted k/k/k/k
+  p [liberation-narrow]: predicted i/i/y/y
+  p [liberation-sans]: predicted n/n/o/n
+  p [liberation-sans-bold]: predicted k/a/k/y
+  p [liberation-serif]: predicted y/y/k/f
+  q [dejavu-sans]: predicted g/d/g/g
+  q [dejavu-sans-bold]: predicted n/e/k/n
+  q [dejavu-serif]: predicted g/d/g/g
+  q [dejavu-serif-bold]: predicted n/k/k/n
+  q [liberation-mono]: predicted h/d/v/u
+  q [liberation-mono-bold]: predicted n/k/k/k
+  q [liberation-narrow]: predicted f/i/y/y
+  q [liberation-sans]: predicted u/o/o/n
+  q [liberation-sans-bold]: predicted n/i/k/u
+  q [liberation-serif]: predicted s/i/k/v
+  r [dejavu-sans]: predicted l/l/t/l
+  r [dejavu-serif]: predicted l/l/l/l
+  r [liberation-mono]: predicted n/i/y/k
+  r [liberation-mono-bold]: predicted f/f/f/f
+  r [liberation-narrow]: predicted f/i/t/f
+  r [liberation-sans]: predicted l/l/t/l
+  r [liberation-serif]: predicted f/i/f/f
+  t [dejavu-sans]: predicted f/i/z/f
+  t [dejavu-sans-bold]: predicted f/n/c/k
+  t [dejavu-serif]: predicted d/i/i/f
+  t [dejavu-serif-bold]: predicted f/i/c/k
+  t [liberation-mono]: predicted z/i/z/z
+  t [liberation-mono-bold]: predicted r/r/r/k
+  t [liberation-narrow]: predicted o/i/z/r
+  t [liberation-sans-bold]: predicted l/i/y/l
+  t [liberation-serif]: predicted o/i/r/g
+  u [dejavu-sans]: predicted d/d/d/n
+  u [dejavu-sans-bold]: predicted d/i/t/y
+  u [dejavu-serif-bold]: predicted n/n/d/y
+  u [liberation-mono-bold]: predicted h/h/y/h
+  u [liberation-narrow]: predicted y/i/y/y
+  u [liberation-serif]: predicted i/i/y/y
+  v [dejavu-sans-bold]: predicted n/n/k/y
+  v [liberation-mono-bold]: predicted k/w/k/k
+  v [liberation-narrow]: predicted l/i/k/k
+  v [liberation-sans-bold]: predicted k/o/k/k
+  w [liberation-mono]: predicted j/i/m/m
+  w [liberation-mono-bold]: predicted u/u/d/y
+  w [liberation-narrow]: predicted y/y/y/y
+  x [dejavu-sans-bold]: predicted n/n/w/w
+  x [liberation-mono-bold]: predicted w/w/w/w
+  x [liberation-sans-bold]: predicted w/w/w/w
+  y [dejavu-sans]: predicted m/i/k/k
+  y [dejavu-sans-bold]: predicted w/n/x/w
+  y [dejavu-serif]: predicted j/r/i/h
+  y [dejavu-serif-bold]: predicted f/r/k/h
+  y [liberation-mono-bold]: predicted x/n/x/k
+  y [liberation-sans-bold]: predicted f/w/x/w
+  y [liberation-serif]: predicted z/r/x/k
+  z [dejavu-sans]: predicted x/a/k/m
+  z [dejavu-sans-bold]: predicted t/a/a/s
+  z [dejavu-serif]: predicted s/a/k/a
+  z [dejavu-serif-bold]: predicted a/a/w/l
+  z [liberation-mono-bold]: predicted a/a/a/l
+  z [liberation-sans-bold]: predicted a/a/k/s

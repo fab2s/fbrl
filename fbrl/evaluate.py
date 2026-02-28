@@ -1372,4 +1372,4 @@ def generate_bigram_atlas(model_dir, test_data_dir, output_path='data/bigram_atl
 
 
 # --- Word evaluation (imported from separate module to keep file manageable) ---
-from fbrl._word_eval import test_word_model, generate_word_atlas  # noqa: E402, F401
+from fbrl._word_eval import test_word_model, generate_word_atlas, test_word_isolation  # noqa: E402, F401

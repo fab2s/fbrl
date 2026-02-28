@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.amp import autocast, GradScaler
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -35,7 +36,8 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                       edge_weight=0.0,
                       isolation_data_dir=None,
                       isolation_random_prob=0.0,
-                      multi_head=False):
+                      multi_head=False,
+                      amp=False):
     """Train a WordVisionModel with prescribed x-scan + free read on 256x128 word images.
 
     Phase 1 — SCAN: prescribed x sweep, learned y, content detection.
@@ -274,6 +276,12 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
     end_epoch = start_epoch + epochs
     train_start = time.time()
 
+    # AMP (Automatic Mixed Precision) — FP16 activations, halves memory
+    use_amp = amp and device.type == 'cuda'
+    scaler = GradScaler('cuda', enabled=use_amp)
+    if use_amp:
+        print("AMP enabled: FP16 forward passes, GradScaler for backward")
+
     # Training log file
     log_path = os.path.join(save_dir, 'training.log')
     if start_epoch == 0 and os.path.exists(log_path):
@@ -338,46 +346,47 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                 for letters in letter_lists[:n_positions]
             ]
 
-            # Forward
-            recon, logits_list, locations, _readout_states, scan_content_logits = model(img)
+            # Forward + losses under AMP autocast
+            with autocast('cuda', enabled=use_amp):
+                recon, logits_list, locations, _readout_states, scan_content_logits = model(img)
 
-            # Actual scan count (may differ from n_scan_glimpses for non-256 images)
-            actual_n_scan = len(scan_content_logits)
+                # Actual scan count (may differ from n_scan_glimpses for non-256 images)
+                actual_n_scan = len(scan_content_logits)
 
-            # Losses
-            recon_loss = criterion(recon, img)
-            cls_losses = []
-            for p in range(n_positions):
-                cls_losses.append(F.cross_entropy(logits_list[p], idx_list[p]))
+                # Losses
+                recon_loss = criterion(recon, img)
+                cls_losses = []
+                for p in range(n_positions):
+                    cls_losses.append(F.cross_entropy(logits_list[p], idx_list[p]))
 
-            # Word attention loss: scan gets full-image guide, read gets stripe scaffold
-            scan_attn, read_attn = word_attention_loss(
-                clean, locations, actual_n_scan,
-                n_positions=n_positions,
-                blur_sigma_ratio=blur_sigma_ratio,
-                scaffold_weight=scaffold_weight,
-            )
+                # Word attention loss: scan gets full-image guide, read gets stripe scaffold
+                scan_attn, read_attn = word_attention_loss(
+                    clean, locations, actual_n_scan,
+                    n_positions=n_positions,
+                    blur_sigma_ratio=blur_sigma_ratio,
+                    scaffold_weight=scaffold_weight,
+                )
 
-            # Split diversity by phase
-            scan_locations = locations[:actual_n_scan + 1]
-            read_locations = locations[actual_n_scan:]
-            scan_div = fixation_diversity_loss(scan_locations, sigma=diversity_sigma,
-                                               vy=scan_vy)
-            read_div = fixation_diversity_loss(read_locations, sigma=diversity_sigma,
-                                               vy=read_vy)
-            div_loss = scan_div + read_div
+                # Split diversity by phase
+                scan_locations = locations[:actual_n_scan + 1]
+                read_locations = locations[actual_n_scan:]
+                scan_div = fixation_diversity_loss(scan_locations, sigma=diversity_sigma,
+                                                   vy=scan_vy)
+                read_div = fixation_diversity_loss(read_locations, sigma=diversity_sigma,
+                                                   vy=read_vy)
+                div_loss = scan_div + read_div
 
-            # Content detection loss: sample clean image at scan locations
-            content_loss = torch.tensor(0.0, device=device)
-            if content_weight > 0 and len(scan_content_logits) > 0:
-                scan_locs = locations[1:actual_n_scan + 1]
-                for t, (loc, logit) in enumerate(zip(scan_locs, scan_content_logits)):
-                    grid = loc.view(B, 1, 1, 2)
-                    sampled = F.grid_sample(clean, grid, align_corners=True,
-                                            padding_mode='zeros')
-                    label = (sampled.view(-1, 1) > 0.1).float()
-                    content_loss = content_loss + bce(logit, label)
-                content_loss = content_loss / len(scan_content_logits)
+                # Content detection loss: sample clean image at scan locations
+                content_loss = torch.tensor(0.0, device=device)
+                if content_weight > 0 and len(scan_content_logits) > 0:
+                    scan_locs = locations[1:actual_n_scan + 1]
+                    for t, (loc, logit) in enumerate(zip(scan_locs, scan_content_logits)):
+                        grid = loc.view(B, 1, 1, 2)
+                        sampled = F.grid_sample(clean, grid, align_corners=True,
+                                                padding_mode='zeros')
+                        label = (sampled.view(-1, 1) > 0.1).float()
+                        content_loss = content_loss + bce(logit, label)
+                    content_loss = content_loss / len(scan_content_logits)
 
             # Isolation: prepare data (forward deferred in multi_head to save GPU memory)
             isolation_loss = torch.tensor(0.0, device=device)
@@ -399,8 +408,9 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                 iso_targets_t = torch.tensor(iso_targets, device=device)
                 if not multi_head:
                     # Single optimizer: forward now (needed for total_loss sum)
-                    _, iso_logits, _, _, _ = model(iso_batch)
-                    isolation_loss = F.cross_entropy(iso_logits[iso_k], iso_targets_t)
+                    with autocast('cuda', enabled=use_amp):
+                        _, iso_logits, _, _, _ = model(iso_batch)
+                        isolation_loss = F.cross_entropy(iso_logits[iso_k], iso_targets_t)
             elif isolation_weight > 0:
                 # Legacy mask-based isolation (fallback)
                 iso_k = torch.randint(0, n_positions, (1,)).item()
@@ -410,8 +420,9 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                 mask[:, :, :, iso_k * stripe_w:(iso_k + 1) * stripe_w] = 1.0
                 masked_img = img * mask
                 if not multi_head:
-                    _, iso_logits, _, _, _ = model(masked_img)
-                    isolation_loss = F.cross_entropy(iso_logits[iso_k], idx_list[iso_k])
+                    with autocast('cuda', enabled=use_amp):
+                        _, iso_logits, _, _, _ = model(masked_img)
+                        isolation_loss = F.cross_entropy(iso_logits[iso_k], idx_list[iso_k])
                 else:
                     iso_batch = masked_img
                     iso_targets_t = idx_list[iso_k]
@@ -433,28 +444,31 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                               + diversity_weight * div_loss
                               + content_weight * content_loss)
                 if active_attn:
-                    attn_total.backward(retain_graph=True, inputs=active_attn)
+                    scaler.scale(attn_total).backward(retain_graph=True, inputs=active_attn)
 
                 # 2. Classification losses -> readout, classifiers
                 cls_total = sum(cls_losses)
                 if active_cls:
-                    cls_total.backward(retain_graph=True, inputs=active_cls)
+                    scaler.scale(cls_total).backward(retain_graph=True, inputs=active_cls)
 
                 # 3. Reconstruction loss -> decoder (last pass, frees main graph)
-                recon_loss.backward(inputs=recon_params)
+                scaler.scale(recon_loss).backward(inputs=recon_params)
 
                 # Isolation forward + backward AFTER main graph freed (saves GPU memory)
                 if isolation_weight > 0 and iso_batch is not None and active_cls:
-                    _, iso_logits, _, _, _ = model(iso_batch)
-                    isolation_loss = F.cross_entropy(iso_logits[iso_k], iso_targets_t)
-                    (isolation_weight * isolation_loss).backward(inputs=active_cls)
+                    with autocast('cuda', enabled=use_amp):
+                        _, iso_logits, _, _, _ = model(iso_batch)
+                        isolation_loss = F.cross_entropy(iso_logits[iso_k], iso_targets_t)
+                    scaler.scale(isolation_weight * isolation_loss).backward(inputs=active_cls)
 
-                # Per-group clipping and step
+                # Unscale, clip, step — per group
                 for params, opt in [(active_attn, attn_opt), (active_cls, cls_opt),
                                      (recon_params, recon_opt)]:
+                    scaler.unscale_(opt)
                     if params:
                         clip_grad_norm_(params, 5.0)
-                    opt.step()
+                    scaler.step(opt)
+                scaler.update()
             else:
                 # Single optimizer: sum all losses
                 total_loss = (recon_loss + sum(cls_losses)
@@ -464,9 +478,11 @@ def train_word_model(data_dir, epochs=200, resume=None, save_dir='word_models',
                               + content_weight * content_loss
                               + isolation_weight * isolation_loss)
                 optimizer.zero_grad()
-                total_loss.backward()
+                scaler.scale(total_loss).backward()
+                scaler.unscale_(optimizer)
                 clip_grad_norm_(model.parameters(), 5.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
 
             total_loss_recon += recon_loss.item()
             for p in range(n_positions):

@@ -5,7 +5,8 @@ from fbrl.data import (generate_dataset, generate_test, generate_bigram_dataset,
 from fbrl.train import (train_model, check_attention, train_bigram_model,
                          check_bigram_attention, train_word_model)
 from fbrl.evaluate import (test_model, visualize_model, generate_atlas, test_bigram_model,
-                           generate_bigram_atlas, test_word_model, generate_word_atlas)
+                           generate_bigram_atlas, test_word_model, generate_word_atlas,
+                           test_word_isolation)
 
 
 def _parse_patch_size(s):
@@ -262,6 +263,8 @@ if __name__ == '__main__':
                                 help='Probability of substituting a random letter in isolation (0-1)')
     train_w_parser.add_argument('--multi_head', action='store_true', default=False,
                                 help='Use 3 separate optimizers for attention/classification/reconstruction')
+    train_w_parser.add_argument('--amp', action='store_true', default=False,
+                                help='Enable Automatic Mixed Precision (FP16) — halves VRAM usage')
 
     test_w_parser = subparsers.add_parser('test_words')
     test_w_parser.add_argument('--model_dir', required=True)
@@ -269,6 +272,13 @@ if __name__ == '__main__':
     test_w_parser.add_argument('--output_dir', default='word_results')
     test_w_parser.add_argument('--device', default='auto',
                                choices=['auto', 'cpu', 'cuda'])
+
+    iso_test_parser = subparsers.add_parser('test_word_isolation')
+    iso_test_parser.add_argument('--model_dir', required=True)
+    iso_test_parser.add_argument('--test_data_dir', required=True)
+    iso_test_parser.add_argument('--output_dir', default='word_results')
+    iso_test_parser.add_argument('--device', default='auto',
+                                  choices=['auto', 'cpu', 'cuda'])
 
     w_atlas_parser = subparsers.add_parser('word_atlas')
     w_atlas_parser.add_argument('--model_dir', required=True)
@@ -430,11 +440,16 @@ if __name__ == '__main__':
                           edge_weight=args.edge_weight,
                           isolation_data_dir=args.isolation_data_dir,
                           isolation_random_prob=args.isolation_random_prob,
-                          multi_head=args.multi_head)
+                          multi_head=args.multi_head,
+                          amp=args.amp)
 
     elif args.command == 'test_words':
         test_word_model(args.model_dir, args.test_data_dir, args.output_dir,
                          device=args.device)
+
+    elif args.command == 'test_word_isolation':
+        test_word_isolation(args.model_dir, args.test_data_dir, args.output_dir,
+                             device=args.device)
 
     elif args.command == 'word_atlas':
         generate_word_atlas(args.model_dir, args.test_data_dir, args.output,
