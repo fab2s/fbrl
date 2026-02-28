@@ -110,7 +110,7 @@ Input (128x128 grayscale) -> [noisy image, model only sees 12x12 patches]
                          |  x 10 glimpses
                     Latent (256-dim)
                 |         |          |
-         CNNDecoder   LetterCls   CaseCls
+       VisualDecoder  LetterCls   CaseCls
       (128x128 recon)  (26: A-Z)  (2: upper/lower)
 ```
 
@@ -135,7 +135,7 @@ Input (128x128 grayscale) -> [two lowercase letters, natural kerning]
          Pos1 Classifier       Pos2 Classifier
           (26: a-z)              (26: a-z)
                          |
-                   BigramDecoder
+                  VisualDecoder
                   (128x128 recon)
 ```
 
@@ -165,7 +165,7 @@ Input (256x128 grayscale) -> [4-letter word, centered]
            Classifier  Classifier Classifier Classifier
             (26: a-z)   (26: a-z)  (26: a-z)  (26: a-z)
                          |
-                    WordDecoder
+                   VisualDecoder
                    (256x128 recon)
 ```
 
@@ -271,26 +271,28 @@ make build up
 # === Single-letter pipeline ===
 make generate                    # Training data (52 letters x 20 variants x 11 fonts)
 make generate-test               # Clean test data
-make train DEVICE=cuda           # Train (100 epochs)
+make train DEVICE=cuda           # Train (configs/letter.yaml defaults)
 make test DEVICE=cuda            # Evaluate
 make atlas DEVICE=cuda           # Interactive attention atlas (HTML)
 
 # === Bigram pipeline ===
 make generate-bigrams
-make train-bigrams EPOCHS=150 DEVICE=cuda TRANSFER=data/models/model_final.pth
+make train-bigrams DEVICE=cuda TRANSFER=data/models/model_final.pth
 make bigram-atlas DEVICE=cuda
 
 # === Word pipeline ===
 make generate-words
-make train-words EPOCHS=200 DEVICE=cuda TRANSFER=data/models/model_final.pth \
-    ISOLATION_DATA=data/letters MULTI_HEAD=1
+make train-words DEVICE=cuda TRANSFER=data/models/model_final.pth
 make word-atlas DEVICE=cuda
 
+# Override any config value at the command line
+make train-words EPOCHS=300 BATCH=64 DEVICE=cuda
+
 # Archive any trained model
-make archive-words NAME=v2-multi-head EPOCHS=200
+make archive-words NAME=v2-multi-head
 ```
 
-See [docs/usage.md](docs/usage.md) for full CLI reference, training output format, and Makefile documentation.
+Training parameters live in YAML config files (`configs/letter.yaml`, `configs/bigram.yaml`, `configs/word.yaml`). CLI args override config values. See [docs/usage.md](docs/usage.md) for full reference.
 
 **Important:** Always `make restart` after code changes — Docker caches old code.
 
@@ -298,14 +300,23 @@ See [docs/usage.md](docs/usage.md) for full CLI reference, training output forma
 
 ```
 fbrl/
-+-- vision_training.py      # CLI entry point -- subcommand dispatch
++-- vision_training.py      # CLI entry point — subcommand dispatch
++-- configs/                # YAML training configs (one per model type)
+|   +-- letter.yaml         #   Single-letter defaults (no scan phase)
+|   +-- letter_scan.yaml    #   Single-letter with scan phase (3 scan + 10 read)
+|   +-- bigram.yaml         #   Bigram defaults (5 scan + 6 read)
+|   +-- word.yaml           #   Word defaults (8 scan + 12 read, multi-head, AMP)
 +-- fbrl/                   # Core package
 |   +-- __init__.py         # Device resolution helper
+|   +-- config.py           # ExperimentConfig dataclass, YAML load/save
 |   +-- model.py            # VisionModel, BigramVisionModel, WordVisionModel,
-|   |                       #   GlimpseSensor, AttentionController, CrossAttentionReadout
+|   |                       #   VisualDecoder, GlimpseSensor, AttentionController,
+|   |                       #   CrossAttentionReadout, encode_scan_read()
 |   +-- data.py             # LetterDataset, BigramDataset, WordDataset, data generation
 |   +-- train.py            # Training loops (single-letter + bigram)
 |   +-- _word_train.py      # Word training loop (train_word_model)
+|   +-- training_utils.py   # Shared training infrastructure: LossTracker, TrainingLogger,
+|   |                       #   checkpoint save/load, transfer learning, metrics plotting
 |   +-- evaluate.py         # Testing, visualization, atlas generation (single-letter + bigram)
 |   +-- _word_eval.py       # Word evaluation + atlas (test_word_model, generate_word_atlas)
 |   +-- losses.py           # Loss functions (attention guide, diversity, hit rate,

@@ -7,6 +7,7 @@ from fbrl.train import (train_model, check_attention, train_bigram_model,
 from fbrl.evaluate import (test_model, visualize_model, generate_atlas, test_bigram_model,
                            generate_bigram_atlas, test_word_model, generate_word_atlas,
                            test_word_isolation)
+from fbrl.config import load_config
 
 
 def _parse_patch_size(s):
@@ -27,6 +28,62 @@ def _parse_letters(letters_str):
     return list(letters_str)
 
 
+def _add_train_overrides(parser):
+    """Add common runtime override args to a training subparser."""
+    parser.add_argument('--config', required=True, help='Path to YAML config file')
+    parser.add_argument('--device', default=None, choices=['auto', 'cpu', 'cuda'])
+    parser.add_argument('--resume', default=None)
+    parser.add_argument('--transfer', default=None)
+    parser.add_argument('--epochs', type=int, default=None)
+    parser.add_argument('--batch_size', type=int, default=None)
+    parser.add_argument('--data_dir', default=None)
+    parser.add_argument('--save_dir', default=None)
+    parser.add_argument('--checkpoint_interval', type=int, default=None)
+    parser.add_argument('--guide_weight', type=float, default=None)
+    parser.add_argument('--scan_guide_weight', type=float, default=None)
+    parser.add_argument('--scaffold_ratio', type=float, default=None)
+    parser.add_argument('--scaffold_floor', type=float, default=None)
+    parser.add_argument('--scaffold_epochs', type=int, default=None)
+    parser.add_argument('--diversity_weight', type=float, default=None)
+    parser.add_argument('--diversity_sigma', type=float, default=None)
+    parser.add_argument('--scan_vy', type=float, default=None)
+    parser.add_argument('--read_vy', type=float, default=None)
+    parser.add_argument('--content_weight', type=float, default=None)
+    parser.add_argument('--edge_weight', type=float, default=None)
+    parser.add_argument('--blur_sigma_ratio', type=float, default=None)
+    parser.add_argument('--n_scan_glimpses', type=int, default=None)
+    parser.add_argument('--n_read_glimpses', type=int, default=None)
+    parser.add_argument('--n_positions', type=int, default=None)
+    parser.add_argument('--scan_patch_size', default=None)
+    parser.add_argument('--read_patch_size', type=int, default=None)
+    parser.add_argument('--n_scales', type=int, default=None)
+    # Letter-specific
+    parser.add_argument('--recode_weight', type=float, default=None)
+    parser.add_argument('--diversity_vy', type=float, default=None)
+    # Bigram-specific
+    parser.add_argument('--mask_weight', type=float, default=None)
+    # Word-specific
+    parser.add_argument('--isolation_weight', type=float, default=None)
+    parser.add_argument('--isolation_data_dir', default=None)
+    parser.add_argument('--isolation_random_prob', type=float, default=None)
+    parser.add_argument('--multi_head', action='store_true', default=None)
+    parser.add_argument('--amp', action='store_true', default=None)
+
+
+def _build_overrides(args):
+    """Extract non-None CLI overrides as a dict for config merging."""
+    overrides = {}
+    # Gather all override fields (skip 'command' and 'config')
+    for k, v in vars(args).items():
+        if k in ('command', 'config'):
+            continue
+        if v is not None:
+            if k == 'scan_patch_size':
+                v = _parse_patch_size(v)
+            overrides[k] = v
+    return overrides
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Vision-Only Letter Training Pipeline')
     subparsers = parser.add_subparsers(dest='command', required=True)
@@ -34,7 +91,7 @@ if __name__ == '__main__':
     gen_parser = subparsers.add_parser('generate')
     gen_parser.add_argument('--letters', default='Aa-Zz')
     gen_parser.add_argument('--num_variants', type=int, default=20)
-    gen_parser.add_argument('--noise_level', type=float, default=0.01)
+    gen_parser.add_argument('--noise_level', type=float, default=0.1)
     gen_parser.add_argument('--output_dir', default='data/letters')
     gen_parser.add_argument('--fonts', default='all',
                             help='Font spec: "all", "default", or comma-separated names')
@@ -45,42 +102,17 @@ if __name__ == '__main__':
     gentest_parser.add_argument('--fonts', default='all',
                                 help='Font spec: "all", "default", or comma-separated names')
 
+    # --- Training subcommands (config-based) ---
     train_parser = subparsers.add_parser('train')
-    train_parser.add_argument('--data_dir', required=True)
-    train_parser.add_argument('--epochs', type=int, default=200)
-    train_parser.add_argument('--save_dir', default='models')
-    train_parser.add_argument('--checkpoint_interval', type=int, default=10)
-    train_parser.add_argument('--n_glimpses', type=int, default=10)
-    train_parser.add_argument('--patch_size', type=int, default=12)
-    train_parser.add_argument('--n_scales', type=int, default=1)
-    train_parser.add_argument('--device', default='auto',
-                              choices=['auto', 'cpu', 'cuda'])
-    train_parser.add_argument('--resume', default=None)
-    train_parser.add_argument('--diversity_weight', type=float, default=1.0,
-                              help='Weight for fixation diversity loss (0=off)')
-    train_parser.add_argument('--diversity_sigma', type=float, default=0.1,
-                              help='Repulsion radius in normalized coords (0.1=10%% of image)')
-    train_parser.add_argument('--recode_weight', type=float, default=1.0,
-                              help='Weight for recode loss (0=off)')
-    train_parser.add_argument('--guide_weight', type=float, default=8.0,
-                              help='Weight for attention guide loss')
-    train_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16,
-                              help='Blur sigma as fraction of image size (0.16=proven default)')
-    train_parser.add_argument('--batch_size', type=int, default=52,
-                              help='Training batch size (default 52)')
-    train_parser.add_argument('--diversity_vy', type=float, default=1.0,
-                              help='Vertical diversity multiplier (1.5 = 50%% stronger vertical repulsion)')
-    train_parser.add_argument('--n_scan_glimpses', type=int, default=0,
-                              help='Scan-phase glimpses (0=no scan, 3=recommended)')
-    train_parser.add_argument('--scan_patch_size', default='12,18',
-                              help='Scan patch size as H,W (default: 12,18)')
-    train_parser.add_argument('--scan_vy', type=float, default=0.3,
-                              help='Scan diversity VY (<1 = horizontal spread)')
-    train_parser.add_argument('--scan_guide_weight', type=float, default=None,
-                              help='Scan guide weight (defaults to --guide_weight)')
-    train_parser.add_argument('--content_weight', type=float, default=0.5,
-                              help='Content detection BCE weight (0=off)')
+    _add_train_overrides(train_parser)
 
+    train_bi_parser = subparsers.add_parser('train_bigrams')
+    _add_train_overrides(train_bi_parser)
+
+    train_w_parser = subparsers.add_parser('train_words')
+    _add_train_overrides(train_w_parser)
+
+    # --- Test/eval/atlas subcommands (unchanged) ---
     test_parser = subparsers.add_parser('test')
     test_parser.add_argument('--model_dir', required=True)
     test_parser.add_argument('--test_data_dir', required=True)
@@ -114,17 +146,16 @@ if __name__ == '__main__':
     chk_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
     chk_parser.add_argument('--diversity_weight', type=float, default=1.0)
     chk_parser.add_argument('--diversity_sigma', type=float, default=0.1)
-    chk_parser.add_argument('--diversity_vy', type=float, default=1.0,
-                            help='Vertical diversity multiplier (1.5 = 50%% stronger vertical repulsion)')
+    chk_parser.add_argument('--diversity_vy', type=float, default=1.0)
 
     compress_parser = subparsers.add_parser('compress_model')
     compress_parser.add_argument('--input', required=True)
     compress_parser.add_argument('--output', required=True)
 
-    # --- Bigram subcommands ---
+    # --- Bigram subcommands (non-training unchanged) ---
     gen_bi_parser = subparsers.add_parser('generate_bigrams')
     gen_bi_parser.add_argument('--num_variants', type=int, default=20)
-    gen_bi_parser.add_argument('--noise_level', type=float, default=0.01)
+    gen_bi_parser.add_argument('--noise_level', type=float, default=0.1)
     gen_bi_parser.add_argument('--output_dir', default='data/bigrams')
     gen_bi_parser.add_argument('--fonts', default='default',
                                help='Font spec: "all", "default", or comma-separated names')
@@ -133,49 +164,6 @@ if __name__ == '__main__':
     gen_bi_test_parser.add_argument('--output_dir', default='data/bigram_test')
     gen_bi_test_parser.add_argument('--fonts', default='default',
                                     help='Font spec: "all", "default", or comma-separated names')
-
-    train_bi_parser = subparsers.add_parser('train_bigrams')
-    train_bi_parser.add_argument('--data_dir', required=True)
-    train_bi_parser.add_argument('--epochs', type=int, default=100)
-    train_bi_parser.add_argument('--save_dir', default='bigram_models')
-    train_bi_parser.add_argument('--checkpoint_interval', type=int, default=10)
-    train_bi_parser.add_argument('--n_scan_glimpses', type=int, default=5,
-                                 help='Number of scan-phase glimpses (wide patches)')
-    train_bi_parser.add_argument('--n_read_glimpses', type=int, default=6,
-                                 help='Number of read-phase glimpses (focused patches)')
-    train_bi_parser.add_argument('--scan_patch_size', default='12,18',
-                                 help='Scan patch size as H,W (default: 12,18)')
-    train_bi_parser.add_argument('--read_patch_size', type=int, default=12,
-                                 help='Read patch size (square, default: 12)')
-    train_bi_parser.add_argument('--n_scales', type=int, default=1)
-    train_bi_parser.add_argument('--device', default='auto',
-                                 choices=['auto', 'cpu', 'cuda'])
-    train_bi_parser.add_argument('--resume', default=None)
-    train_bi_parser.add_argument('--diversity_weight', type=float, default=1.0)
-    train_bi_parser.add_argument('--diversity_sigma', type=float, default=0.1)
-    train_bi_parser.add_argument('--guide_weight', type=float, default=8.0)
-    train_bi_parser.add_argument('--scan_guide_weight', type=float, default=None,
-                                 help='Scan-phase guide weight (defaults to --guide_weight)')
-    train_bi_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
-    train_bi_parser.add_argument('--batch_size', type=int, default=32)
-    train_bi_parser.add_argument('--scaffold_epochs', type=int, default=None,
-                                 help='Explicit scaffold epoch count (overrides --scaffold_ratio)')
-    train_bi_parser.add_argument('--scaffold_ratio', type=float, default=0.67,
-                                 help='Scaffold phase as fraction of total epochs '
-                                      '(default 0.67 = 67%%). Ignored if --scaffold_epochs set.')
-    train_bi_parser.add_argument('--scaffold_floor', type=float, default=0.0,
-                                 help='Minimum scaffold weight after annealing '
-                                      '(0.05 keeps gentle spatial pressure)')
-    train_bi_parser.add_argument('--transfer', default=None,
-                                 help='Path to single-letter .pth/.pth.gz for transfer learning')
-    train_bi_parser.add_argument('--mask_weight', type=float, default=0.5,
-                                 help='Weight for masked-half auxiliary loss (0=disabled)')
-    train_bi_parser.add_argument('--scan_vy', type=float, default=0.3,
-                                 help='Scan diversity VY (<1 = horizontal spread, default 0.3)')
-    train_bi_parser.add_argument('--read_vy', type=float, default=1.5,
-                                 help='Read diversity VY (>1 = vertical exploration, default 1.5)')
-    train_bi_parser.add_argument('--edge_weight', type=float, default=0.0,
-                                 help='Edge exploration weight — pushes scan fixations toward image sides (0=off)')
 
     chk_bi_parser = subparsers.add_parser('check_bigram_attention')
     chk_bi_parser.add_argument('--data_dir', required=True)
@@ -191,8 +179,7 @@ if __name__ == '__main__':
     chk_bi_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
     chk_bi_parser.add_argument('--diversity_weight', type=float, default=1.0)
     chk_bi_parser.add_argument('--diversity_sigma', type=float, default=0.1)
-    chk_bi_parser.add_argument('--diversity_vy', type=float, default=1.0,
-                                help='Vertical diversity multiplier (1.5 = 50%% stronger vertical repulsion)')
+    chk_bi_parser.add_argument('--diversity_vy', type=float, default=1.0)
 
     test_bi_parser = subparsers.add_parser('test_bigrams')
     test_bi_parser.add_argument('--model_dir', required=True)
@@ -208,10 +195,10 @@ if __name__ == '__main__':
     bi_atlas_parser.add_argument('--device', default='auto',
                                   choices=['auto', 'cpu', 'cuda'])
 
-    # --- Word subcommands ---
+    # --- Word subcommands (non-training unchanged) ---
     gen_w_parser = subparsers.add_parser('generate_words')
     gen_w_parser.add_argument('--num_variants', type=int, default=20)
-    gen_w_parser.add_argument('--noise_level', type=float, default=0.01)
+    gen_w_parser.add_argument('--noise_level', type=float, default=0.1)
     gen_w_parser.add_argument('--output_dir', default='data/words')
     gen_w_parser.add_argument('--fonts', default='default',
                               help='Font spec: "all", "default", or comma-separated names')
@@ -220,61 +207,6 @@ if __name__ == '__main__':
     gen_w_test_parser.add_argument('--output_dir', default='data/word_test')
     gen_w_test_parser.add_argument('--fonts', default='default',
                                    help='Font spec: "all", "default", or comma-separated names')
-
-    train_w_parser = subparsers.add_parser('train_words')
-    train_w_parser.add_argument('--data_dir', required=True)
-    train_w_parser.add_argument('--epochs', type=int, default=200)
-    train_w_parser.add_argument('--save_dir', default='word_models')
-    train_w_parser.add_argument('--checkpoint_interval', type=int, default=10)
-    train_w_parser.add_argument('--n_scan_glimpses', type=int, default=8,
-                                help='Number of scan-phase glimpses (prescribed x)')
-    train_w_parser.add_argument('--n_read_glimpses', type=int, default=12,
-                                help='Number of read-phase glimpses (free)')
-    train_w_parser.add_argument('--scan_patch_size', default='12,18',
-                                help='Scan patch size as H,W (default: 12,18)')
-    train_w_parser.add_argument('--read_patch_size', type=int, default=12,
-                                help='Read patch size (square, default: 12)')
-    train_w_parser.add_argument('--n_scales', type=int, default=1)
-    train_w_parser.add_argument('--n_positions', type=int, default=4,
-                                help='Number of letter positions (default: 4)')
-    train_w_parser.add_argument('--device', default='auto',
-                                choices=['auto', 'cpu', 'cuda'])
-    train_w_parser.add_argument('--resume', default=None)
-    train_w_parser.add_argument('--diversity_weight', type=float, default=1.0)
-    train_w_parser.add_argument('--diversity_sigma', type=float, default=0.1)
-    train_w_parser.add_argument('--guide_weight', type=float, default=8.0)
-    train_w_parser.add_argument('--scan_guide_weight', type=float, default=None,
-                                help='Scan-phase guide weight (defaults to --guide_weight)')
-    train_w_parser.add_argument('--blur_sigma_ratio', type=float, default=0.16)
-    train_w_parser.add_argument('--batch_size', type=int, default=32)
-    train_w_parser.add_argument('--scaffold_epochs', type=int, default=None,
-                                help='Explicit scaffold epoch count (overrides --scaffold_ratio)')
-    train_w_parser.add_argument('--scaffold_ratio', type=float, default=0.67,
-                                help='Scaffold phase as fraction of total epochs')
-    train_w_parser.add_argument('--scaffold_floor', type=float, default=0.0,
-                                help='Minimum scaffold weight after annealing')
-    train_w_parser.add_argument('--transfer', default=None,
-                                help='Path to single-letter .pth/.pth.gz for transfer learning')
-    train_w_parser.add_argument('--content_weight', type=float, default=0.5,
-                                help='Weight for content detection BCE loss (0=disabled)')
-    train_w_parser.add_argument('--isolation_weight', type=float, default=0.5,
-                                help='Weight for isolation mask loss — masks 3 of 4 letters, '
-                                     'forces single-letter fixation (0=disabled)')
-    train_w_parser.add_argument('--scan_vy', type=float, default=0.3,
-                                help='Scan diversity VY (<1 = horizontal spread)')
-    train_w_parser.add_argument('--read_vy', type=float, default=1.5,
-                                help='Read diversity VY (>1 = vertical exploration)')
-    train_w_parser.add_argument('--edge_weight', type=float, default=0.0,
-                                help='Edge exploration weight (0=off, prescribed x makes this unnecessary)')
-    train_w_parser.add_argument('--isolation_data_dir', default=None,
-                                help='Path to 128x128 single-letter data for isolation testing '
-                                     '(e.g. data/letters). When set, replaces mask-based isolation.')
-    train_w_parser.add_argument('--isolation_random_prob', type=float, default=0.0,
-                                help='Probability of substituting a random letter in isolation (0-1)')
-    train_w_parser.add_argument('--multi_head', action='store_true', default=False,
-                                help='Use 3 separate optimizers for attention/classification/reconstruction')
-    train_w_parser.add_argument('--amp', action='store_true', default=False,
-                                help='Enable Automatic Mixed Precision (FP16) — halves VRAM usage')
 
     test_w_parser = subparsers.add_parser('test_words')
     test_w_parser.add_argument('--model_dir', required=True)
@@ -309,23 +241,8 @@ if __name__ == '__main__':
         generate_test(letters, args.output_dir, font_spec=args.fonts)
 
     elif args.command == 'train':
-        scan_ps = _parse_patch_size(args.scan_patch_size)
-        train_model(args.data_dir, args.epochs, args.resume, args.save_dir,
-                    args.checkpoint_interval, n_glimpses=args.n_glimpses,
-                    patch_size=args.patch_size, n_scales=args.n_scales,
-                    device=args.device,
-                    diversity_weight=args.diversity_weight,
-                    diversity_sigma=args.diversity_sigma,
-                    diversity_vy=args.diversity_vy,
-                    recode_weight=args.recode_weight,
-                    guide_weight=args.guide_weight,
-                    blur_sigma_ratio=args.blur_sigma_ratio,
-                    batch_size=args.batch_size,
-                    n_scan_glimpses=args.n_scan_glimpses,
-                    scan_patch_size=scan_ps,
-                    scan_vy=args.scan_vy,
-                    scan_guide_weight=args.scan_guide_weight,
-                    content_weight=args.content_weight)
+        cfg = load_config(args.config, _build_overrides(args))
+        train_model(cfg)
 
     elif args.command == 'test':
         test_model(args.model_dir, args.test_data_dir, args.output_dir,
@@ -371,31 +288,8 @@ if __name__ == '__main__':
         generate_bigram_test(args.output_dir, font_spec=args.fonts)
 
     elif args.command == 'train_bigrams':
-        # Resolve scaffold duration: explicit --scaffold_epochs wins, else use ratio
-        scaffold_ep = (args.scaffold_epochs if args.scaffold_epochs is not None
-                       else int(args.scaffold_ratio * args.epochs))
-        scan_ps = _parse_patch_size(args.scan_patch_size)
-        train_bigram_model(args.data_dir, args.epochs, args.resume, args.save_dir,
-                           args.checkpoint_interval,
-                           n_scan_glimpses=args.n_scan_glimpses,
-                           n_read_glimpses=args.n_read_glimpses,
-                           scan_patch_size=scan_ps,
-                           read_patch_size=args.read_patch_size,
-                           n_scales=args.n_scales,
-                           device=args.device,
-                           diversity_weight=args.diversity_weight,
-                           diversity_sigma=args.diversity_sigma,
-                           scan_vy=args.scan_vy,
-                           read_vy=args.read_vy,
-                           guide_weight=args.guide_weight,
-                           scan_guide_weight=args.scan_guide_weight,
-                           blur_sigma_ratio=args.blur_sigma_ratio,
-                           batch_size=args.batch_size,
-                           scaffold_epochs=scaffold_ep,
-                           scaffold_floor=args.scaffold_floor,
-                           transfer_from=args.transfer,
-                           mask_weight=args.mask_weight,
-                           edge_weight=args.edge_weight)
+        cfg = load_config(args.config, _build_overrides(args))
+        train_bigram_model(cfg)
 
     elif args.command == 'check_bigram_attention':
         scan_ps = _parse_patch_size(args.scan_patch_size)
@@ -428,36 +322,8 @@ if __name__ == '__main__':
         generate_word_test(args.output_dir, font_spec=args.fonts)
 
     elif args.command == 'train_words':
-        scaffold_ep = (args.scaffold_epochs if args.scaffold_epochs is not None
-                       else int(args.scaffold_ratio * args.epochs))
-        scan_ps = _parse_patch_size(args.scan_patch_size)
-        train_word_model(args.data_dir, args.epochs, args.resume, args.save_dir,
-                          args.checkpoint_interval,
-                          n_scan_glimpses=args.n_scan_glimpses,
-                          n_read_glimpses=args.n_read_glimpses,
-                          scan_patch_size=scan_ps,
-                          read_patch_size=args.read_patch_size,
-                          n_scales=args.n_scales,
-                          n_positions=args.n_positions,
-                          device=args.device,
-                          diversity_weight=args.diversity_weight,
-                          diversity_sigma=args.diversity_sigma,
-                          scan_vy=args.scan_vy,
-                          read_vy=args.read_vy,
-                          guide_weight=args.guide_weight,
-                          scan_guide_weight=args.scan_guide_weight,
-                          blur_sigma_ratio=args.blur_sigma_ratio,
-                          batch_size=args.batch_size,
-                          scaffold_epochs=scaffold_ep,
-                          scaffold_floor=args.scaffold_floor,
-                          transfer_from=args.transfer,
-                          content_weight=args.content_weight,
-                          isolation_weight=args.isolation_weight,
-                          edge_weight=args.edge_weight,
-                          isolation_data_dir=args.isolation_data_dir,
-                          isolation_random_prob=args.isolation_random_prob,
-                          multi_head=args.multi_head,
-                          amp=args.amp)
+        cfg = load_config(args.config, _build_overrides(args))
+        train_word_model(cfg)
 
     elif args.command == 'test_words':
         test_word_model(args.model_dir, args.test_data_dir, args.output_dir,

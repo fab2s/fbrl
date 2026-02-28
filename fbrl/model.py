@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
+from typing import Optional
 
 
 # --- Glimpse Sensor ---
@@ -169,43 +171,132 @@ class VisualAttentionEncoder(nn.Module):
         return latent, locations
 
 
-# --- CNN Visual Decoder ---
+# --- Shared Encode Loop ---
 
-class CNNVisualDecoder(nn.Module):
-    """Generates 128x128 images from latent vectors using transposed convolutions.
+@dataclass
+class EncodeResult:
+    """Output of encode_scan_read — everything downstream needs."""
+    read_states: torch.Tensor    # (B, n_read, D) hidden states from read phase
+    locations: list              # list of (B, 2) fixation points (all phases)
+    latent: torch.Tensor         # (B, D) from latent_head(h_final)
+    scan_content_logits: list    # list of (B, 1), empty if no content_head
+    actual_n_scan: int           # scan glimpses used (may differ if dynamic)
 
-    Optionally conditioned on a case label (condition_dim floats concatenated to latent).
-    FC projects to 32x32, then two stride-2 deconvs: 32->64->128.
+
+def encode_scan_read(image, controller, scan_sensor, read_sensor,
+                     n_scan, n_read,
+                     content_head=None,
+                     prescribed_x=False,
+                     dynamic_width=None):
+    """Two-phase GRU attention loop. Shared by all model types.
+
+    Phase 1 — SCAN: n_scan glimpses with scan_sensor.
+      If prescribed_x: x = linspace(-0.75, 0.75, n_scan), y learned.
+      If dynamic_width set: n_scan scaled by (width/256)^1.5.
+    Phase 2 — READ: n_read glimpses with read_sensor, fully free x,y.
+      h carries forward from scan.
+
+    Args:
+        image: (B, C, H, W) input image
+        controller: AttentionController (has gru, location_head, latent_head, h0)
+        scan_sensor: GlimpseSensor for scan phase (or same as read_sensor)
+        read_sensor: GlimpseSensor for read phase
+        n_scan: base number of scan glimpses (0 = read-only)
+        n_read: number of read glimpses
+        content_head: nn.Linear(D, 1) or None — content detection on scan states
+        prescribed_x: if True, scan x positions are prescribed linspace
+        dynamic_width: if set (int), scale n_scan by (width/256)^1.5
     """
-    def __init__(self, latent_dim=256, condition_dim=0):
+    B = image.shape[0]
+    h = controller.h0.expand(B, -1).contiguous()
+    location = torch.zeros(B, 2, device=image.device)
+    locations = [location]
+    scan_content_logits = []
+
+    # Dynamic scan count
+    actual_n_scan = n_scan
+    if dynamic_width is not None and n_scan > 0:
+        actual_n_scan = max(1, round(n_scan * (dynamic_width / 256) ** 1.5))
+
+    # Phase 1: SCAN
+    if actual_n_scan > 0:
+        if prescribed_x:
+            scan_xs = torch.linspace(-0.75, 0.75, actual_n_scan, device=image.device)
+        for t in range(actual_n_scan):
+            glimpse = scan_sensor(image, location)
+            h = controller.gru(glimpse, h)
+            raw_loc = torch.tanh(controller.location_head(h))
+            if prescribed_x:
+                location = torch.stack([scan_xs[t].expand(B), raw_loc[:, 1]], dim=1)
+            else:
+                location = raw_loc
+            locations.append(location)
+            if content_head is not None:
+                scan_content_logits.append(content_head(h))
+
+    # Phase 2: READ
+    read_states = []
+    for t in range(n_read):
+        glimpse = read_sensor(image, location)
+        h = controller.gru(glimpse, h)
+        location = torch.tanh(controller.location_head(h))
+        locations.append(location)
+        read_states.append(h)
+
+    read_states_t = torch.stack(read_states, dim=1) if read_states else None
+    latent = controller.latent_head(h)
+
+    return EncodeResult(
+        read_states=read_states_t,
+        locations=locations,
+        latent=latent,
+        scan_content_logits=scan_content_logits,
+        actual_n_scan=actual_n_scan,
+    )
+
+
+# --- Visual Decoder ---
+
+class VisualDecoder(nn.Module):
+    """Generates images from latent/readout vectors using transposed convolutions.
+
+    Unified decoder for all model types — differs only in input_dim and output_shape.
+    FC projects to spatial feature map, then two stride-2 deconvs to output_shape.
+
+    Usage:
+      VisionModel:  VisualDecoder(input_dim=257, output_shape=(128, 128))  # latent + case label
+      BigramModel:  VisualDecoder(input_dim=512, output_shape=(128, 128))  # 2 * latent_dim
+      WordModel:    VisualDecoder(input_dim=1024, output_shape=(128, 256)) # 4 * latent_dim
+    """
+    def __init__(self, input_dim, output_shape=(128, 128)):
         super().__init__()
-        # FC expands the latent vector into a spatial feature map (128 channels x 32x32).
-        # This is the most parameter-heavy layer (~33.7M params at 128x128) — it gives
-        # the decoder enough capacity to render fine details, but also means it can
-        # sometimes reconstruct without good attention (hence the need for guide_weight).
+        self.spatial_h = output_shape[0] // 4  # 32
+        self.spatial_w = output_shape[1] // 4  # 32 or 64
         self.fc = nn.Sequential(
-            nn.Linear(latent_dim + condition_dim, 128 * 32 * 32),
+            nn.Linear(input_dim, 128 * self.spatial_h * self.spatial_w),
             nn.ReLU(),
         )
-        # Transposed convolutions upsample 32x32 -> 64x64 -> 128x128
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # 32->64
+            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 5, stride=2, padding=2, output_padding=1),  # 64->128
+            nn.ConvTranspose2d(64, 32, 5, stride=2, padding=2, output_padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 1, 3, padding=1),  # final 1-channel output
-            nn.Sigmoid(),                      # clamp to [0, 1] (pixel intensity)
+            nn.Conv2d(32, 1, 3, padding=1),
+            nn.Sigmoid(),
         )
 
     def forward(self, z, condition=None):
-        # Concatenate condition (e.g., case label) to latent before decoding
         if condition is not None:
             z = torch.cat([z, condition], dim=1)
         x = self.fc(z)
-        x = x.view(-1, 128, 32, 32)  # reshape flat vector into spatial feature map
+        x = x.view(-1, 128, self.spatial_h, self.spatial_w)
         return self.deconv(x)
+
+
+# Backward compat aliases
+CNNVisualDecoder = VisualDecoder
 
 
 # --- Vision Model ---
@@ -234,9 +325,8 @@ class VisionModel(nn.Module):
             n_glimpses=n_glimpses, patch_size=patch_size,
             n_scales=n_scales, latent_dim=latent_dim,
         )
-        # condition_dim=1: the decoder receives the case label (0.0 or 1.0)
-        # concatenated to the latent, so it knows which case to render
-        self.decoder = CNNVisualDecoder(latent_dim=latent_dim, condition_dim=1)
+        # input_dim = latent + 1 case label; output 128x128
+        self.decoder = VisualDecoder(input_dim=latent_dim + 1, output_shape=(128, 128))
         self.letter_classifier = nn.Linear(latent_dim, n_classes)  # 26: A-Z identity
         self.case_classifier = nn.Linear(latent_dim, 2)            # upper/lower
 
@@ -247,40 +337,25 @@ class VisionModel(nn.Module):
             )
             self.content_head = nn.Linear(latent_dim, 1)
 
-    def _forward_scan_read(self, img):
-        """Two-phase scan→read loop using encoder internals.
-
-        Phase 1 — SCAN: prescribed x at linspace(-0.75, 0.75, n_scan), learned y.
-        Phase 2 — READ: free x,y with existing encoder sensor.
-        Returns: latent, locations, scan_content_logits
-        """
-        B = img.shape[0]
-        ctrl = self.encoder.attention_controller
-        sensor = self.encoder.glimpse_sensor
-        h = ctrl.h0.expand(B, -1).contiguous()
-        location = torch.zeros(B, 2, device=img.device)
-        locations = [location]
-        scan_content_logits = []
-
-        # Phase 1: SCAN (prescribed x, learned y)
-        scan_xs = torch.linspace(-0.75, 0.75, self.n_scan_glimpses, device=img.device)
-        for t in range(self.n_scan_glimpses):
-            glimpse = self.scan_sensor(img, location)
-            h = ctrl.gru(glimpse, h)
-            raw_loc = torch.tanh(ctrl.location_head(h))
-            location = torch.stack([scan_xs[t].expand(B), raw_loc[:, 1]], dim=1)
-            locations.append(location)
-            scan_content_logits.append(self.content_head(h))
-
-        # Phase 2: READ (free x,y with existing sensor)
-        for t in range(self.encoder.n_glimpses):
-            glimpse = sensor(img, location)
-            h = ctrl.gru(glimpse, h)
-            location = torch.tanh(ctrl.location_head(h))
-            locations.append(location)
-
-        latent = ctrl.latent_head(h)
-        return latent, locations, scan_content_logits
+    def _encode(self, img):
+        """Run encode loop — shared scan/read or legacy encoder."""
+        if self.n_scan_glimpses > 0:
+            return encode_scan_read(
+                img, self.encoder.attention_controller,
+                self.scan_sensor, self.encoder.glimpse_sensor,
+                n_scan=self.n_scan_glimpses,
+                n_read=self.encoder.n_glimpses,
+                content_head=self.content_head,
+                prescribed_x=True,
+            )
+        else:
+            enc = encode_scan_read(
+                img, self.encoder.attention_controller,
+                self.encoder.glimpse_sensor, self.encoder.glimpse_sensor,
+                n_scan=0,
+                n_read=self.encoder.n_glimpses,
+            )
+            return enc
 
     def forward(self, img, case_label):
         """Forward pass with case-conditioned decoding.
@@ -291,68 +366,22 @@ class VisionModel(nn.Module):
         Returns:
             recon, letter_logits, case_logits, locations, latent, scan_content_logits
         """
-        if self.n_scan_glimpses > 0:
-            latent, locations, scan_content_logits = self._forward_scan_read(img)
-        else:
-            latent, locations = self.encoder(img)
-            scan_content_logits = []
-
-        recon = self.decoder(latent, case_label)
-        letter_logits = self.letter_classifier(latent)
-        case_logits = self.case_classifier(latent)
-        return recon, letter_logits, case_logits, locations, latent, scan_content_logits
+        enc = self._encode(img)
+        recon = self.decoder(enc.latent, case_label)
+        letter_logits = self.letter_classifier(enc.latent)
+        case_logits = self.case_classifier(enc.latent)
+        return recon, letter_logits, case_logits, enc.locations, enc.latent, enc.scan_content_logits
 
     def recode(self, img, target_case):
         """Encode image, decode with target case -> capitalize/uncapitalize."""
-        if self.n_scan_glimpses > 0:
-            latent, locations, _scan_logits = self._forward_scan_read(img)
-        else:
-            latent, locations = self.encoder(img)
-        recon = self.decoder(latent, target_case)
-        return recon, locations
+        enc = self._encode(img)
+        recon = self.decoder(enc.latent, target_case)
+        return recon, enc.locations
 
 
 # --- Bigram (Letter-Pair) Reading ---
 
-class BigramDecoder(nn.Module):
-    """Generates 128x128 images from concatenated readout states.
-
-    Input: concatenated readout states (2 * latent_dim = 512 by default).
-    FC projects to 128 channels x 32x32, then two stride-2 deconvs.
-    Output: (B, 1, 128, 128).
-    """
-    def __init__(self, latent_dim=256, n_positions=2):
-        super().__init__()
-        input_dim = latent_dim * n_positions  # 512 by default
-        # FC expands to spatial feature map: 128 channels x 32x32
-        # Two stride-2 deconvs: 32x32 -> 64x64 -> 128x128
-        self.fc = nn.Sequential(
-            nn.Linear(input_dim, 128 * 32 * 32),
-            nn.ReLU(),
-        )
-        # Transposed convolutions: 32x32 -> 64x64 -> 128x128
-        self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # 32->64
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 5, stride=2, padding=2, output_padding=1),  # 64->128
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Conv2d(32, 1, 3, padding=1),  # final 1-channel output
-            nn.Sigmoid(),
-        )
-
-    def forward(self, readout_states):
-        """Decode concatenated readout states into a 128x128 image.
-
-        Args:
-            readout_states: (B, n_positions * latent_dim) — concatenated readout hidden states
-        Returns:
-            (B, 1, 128, 128) reconstructed bigram image
-        """
-        x = self.fc(readout_states)
-        x = x.view(-1, 128, 32, 32)  # (B, 128, 32, 32)
-        return self.deconv(x)
+BigramDecoder = VisualDecoder  # backward compat alias
 
 
 class CrossAttentionReadout(nn.Module):
@@ -445,7 +474,9 @@ class BigramVisionModel(nn.Module):
             glimpse_dim=latent_dim, hidden_dim=latent_dim, latent_dim=latent_dim,
         )
 
-        self.decoder = BigramDecoder(latent_dim=latent_dim, n_positions=n_positions)
+        self.decoder = VisualDecoder(
+            input_dim=latent_dim * n_positions, output_shape=(128, 128),
+        )
 
         # Cross-attention readout — position tokens query READ states only
         self.readout = CrossAttentionReadout(
@@ -469,86 +500,22 @@ class BigramVisionModel(nn.Module):
             readout_states: (B, n_positions, latent_dim) per-position hidden states
         """
         B = img.shape[0]
-        h = self.controller.h0.expand(B, -1).contiguous()
-        location = torch.zeros(B, 2, device=img.device)  # center start
-        all_locations = [location]
+        enc = encode_scan_read(
+            img, self.controller, self.scan_sensor, self.read_sensor,
+            n_scan=self.n_scan_glimpses, n_read=self.n_read_glimpses,
+        )
 
-        # --- Phase 1: SCAN (wide patches, build spatial map) ---
-        for t in range(self.n_scan_glimpses):
-            glimpse = self.scan_sensor(img, location)
-            h = self.controller.gru(glimpse, h)
-            location = torch.tanh(self.controller.location_head(h))
-            all_locations.append(location)
+        readout_states = self.readout(enc.read_states)
+        logits_list = [self.classifiers[i](readout_states[:, i])
+                       for i in range(self.n_positions)]
+        recon = self.decoder(readout_states.view(B, -1))
 
-        # --- Phase 2: READ (focused patches, precise identification) ---
-        # h carries forward from scan — spatial knowledge persists
-        read_states = []
-        for t in range(self.n_read_glimpses):
-            glimpse = self.read_sensor(img, location)
-            h = self.controller.gru(glimpse, h)
-            location = torch.tanh(self.controller.location_head(h))
-            all_locations.append(location)
-            read_states.append(h)
-
-        # Stack READ states for cross-attention (B, n_read, latent_dim)
-        read_states = torch.stack(read_states, dim=1)
-
-        # --- Cross-attention readout (READ states only) ---
-        readout_states = self.readout(read_states)  # (B, n_positions, latent_dim)
-
-        # --- Classify each position ---
-        logits_list = []
-        for i in range(self.n_positions):
-            logits_list.append(self.classifiers[i](readout_states[:, i]))
-
-        # --- Reconstruct from concatenated readout states ---
-        concat = readout_states.view(B, -1)  # (B, n_positions * latent_dim)
-        recon = self.decoder(concat)
-
-        return recon, logits_list, all_locations, readout_states
+        return recon, logits_list, enc.locations, readout_states
 
 
 # --- Word (4-Letter) Reading ---
 
-class WordDecoder(nn.Module):
-    """Generates 256x128 images from concatenated readout states.
-
-    Input: concatenated readout states (4 * latent_dim = 1024 by default).
-    FC projects to 128 channels x 32x64, then two stride-2 deconvs:
-      32x64 -> 64x128 -> 128x256
-    Output: (B, 1, 128, 256).
-    """
-    def __init__(self, latent_dim=256, n_positions=4):
-        super().__init__()
-        input_dim = latent_dim * n_positions  # 1024 by default
-        # FC expands to spatial feature map: 128 channels x 32x64
-        self.fc = nn.Sequential(
-            nn.Linear(input_dim, 128 * 32 * 64),
-            nn.ReLU(),
-        )
-        # Transposed convolutions: 32x64 -> 64x128 -> 128x256
-        self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),  # 32x64->64x128
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 5, stride=2, padding=2, output_padding=1),  # 64x128->128x256
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Conv2d(32, 1, 3, padding=1),  # final 1-channel output
-            nn.Sigmoid(),
-        )
-
-    def forward(self, readout_states):
-        """Decode concatenated readout states into a 128x256 image.
-
-        Args:
-            readout_states: (B, n_positions * latent_dim)
-        Returns:
-            (B, 1, 128, 256) reconstructed word image
-        """
-        x = self.fc(readout_states)
-        x = x.view(-1, 128, 32, 64)  # (B, 128, 32, 64)
-        return self.deconv(x)
+WordDecoder = VisualDecoder  # backward compat alias
 
 
 class WordVisionModel(nn.Module):
@@ -592,7 +559,9 @@ class WordVisionModel(nn.Module):
         # Content detection head: predicts whether scan location has letter content
         self.content_head = nn.Linear(latent_dim, 1)
 
-        self.decoder = WordDecoder(latent_dim=latent_dim, n_positions=n_positions)
+        self.decoder = VisualDecoder(
+            input_dim=latent_dim * n_positions, output_shape=(128, 256),
+        )
 
         # Cross-attention readout — position tokens query READ states only
         self.readout = CrossAttentionReadout(
@@ -622,57 +591,16 @@ class WordVisionModel(nn.Module):
             scan_content_logits: list of (B, 1) content predictions per scan step
         """
         B = img.shape[0]
-        W = img.shape[3]
-        h = self.controller.h0.expand(B, -1).contiguous()
-        location = torch.zeros(B, 2, device=img.device)  # center start
-        all_locations = [location]
-        scan_content_logits = []
+        enc = encode_scan_read(
+            img, self.controller, self.scan_sensor, self.read_sensor,
+            n_scan=self.n_scan_glimpses, n_read=self.n_read_glimpses,
+            content_head=self.content_head, prescribed_x=True,
+            dynamic_width=img.shape[3],
+        )
 
-        # Dynamic scan count: scales with image width (power-1.5 "log dimming")
-        # 64px→1, 128px→3, 192px→5, 256px→8
-        n_scan = max(1, round(self.n_scan_glimpses * (W / 256) ** 1.5))
-        # Read count stays fixed — CrossAttentionReadout trained on fixed sequence length
-        n_read = self.n_read_glimpses
+        readout_states = self.readout(enc.read_states)
+        logits_list = [self.classifiers[i](readout_states[:, i])
+                       for i in range(self.n_positions)]
+        recon = self.decoder(readout_states.view(B, -1))
 
-        # Prescribed x positions: linear sweep left-to-right
-        scan_xs = torch.linspace(-0.75, 0.75, n_scan, device=img.device)
-
-        # --- Phase 1: SCAN (wide patches, prescribed x, learned y) ---
-        for t in range(n_scan):
-            glimpse = self.scan_sensor(img, location)
-            h = self.controller.gru(glimpse, h)
-            raw_loc = torch.tanh(self.controller.location_head(h))
-            # Prescribed x, learned y
-            location = torch.stack([
-                scan_xs[t].expand(B),
-                raw_loc[:, 1],
-            ], dim=1)
-            all_locations.append(location)
-            scan_content_logits.append(self.content_head(h))  # (B, 1)
-
-        # --- Phase 2: READ (focused patches, fully free) ---
-        # h carries forward from scan — spatial knowledge persists
-        read_states = []
-        for t in range(self.n_read_glimpses):
-            glimpse = self.read_sensor(img, location)
-            h = self.controller.gru(glimpse, h)
-            location = torch.tanh(self.controller.location_head(h))
-            all_locations.append(location)
-            read_states.append(h)
-
-        # Stack READ states for cross-attention (B, n_read, latent_dim)
-        read_states = torch.stack(read_states, dim=1)
-
-        # --- Cross-attention readout (READ states only) ---
-        readout_states = self.readout(read_states)  # (B, n_positions, latent_dim)
-
-        # --- Classify each position ---
-        logits_list = []
-        for i in range(self.n_positions):
-            logits_list.append(self.classifiers[i](readout_states[:, i]))
-
-        # --- Reconstruct from concatenated readout states ---
-        concat = readout_states.view(B, -1)  # (B, n_positions * latent_dim)
-        recon = self.decoder(concat)
-
-        return recon, logits_list, all_locations, readout_states, scan_content_logits
+        return recon, logits_list, enc.locations, readout_states, enc.scan_content_logits

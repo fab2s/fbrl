@@ -62,11 +62,86 @@ Epoch 5/200: Recon 0.0312  P1 3.1000 (5%)  P2 3.0800 (5%)  P3 3.1200 (4%)  P4 3.
 
 ## CLI Reference
 
-All commands run via `python vision_training.py <command>`:
+All commands run via `python vision_training.py <command>`.
 
-### Single-letter commands
+### Config-based training
 
-#### generate
+Training commands (`train`, `train_bigrams`, `train_words`) use YAML config files for all hyperparameters. A config file is required; CLI args override individual values.
+
+```bash
+# Basic usage — all params from config
+python vision_training.py train --config configs/letter.yaml
+
+# Override specific values
+python vision_training.py train_words --config configs/word.yaml --epochs 300 --device cuda
+
+# Resume from checkpoint
+python vision_training.py train_words --config configs/word.yaml --resume data/word_models/model_final.pth
+
+# Transfer learning
+python vision_training.py train_words --config configs/word.yaml --transfer data/models/model_final.pth
+```
+
+#### Config files
+
+Each YAML file mirrors the fields of `ExperimentConfig` in `fbrl/config.py`:
+
+| Config | Model type | Key settings |
+|--------|-----------|--------------|
+| `configs/letter.yaml` | letter | batch_size=52, n_read_glimpses=10, no scan phase |
+| `configs/letter_scan.yaml` | letter | n_scan_glimpses=3, diversity_vy=1.5, for pretrained scan+content_head |
+| `configs/bigram.yaml` | bigram | n_scan=5, n_read=6, scaffold_ratio=0.67 |
+| `configs/word.yaml` | word | n_scan=8, n_read=12, multi_head=true, amp=true |
+
+#### Training CLI overrides
+
+All training subcommands accept these optional overrides (non-None values replace the config):
+
+```
+--config PATH             YAML config file (required)
+--device auto|cpu|cuda    Compute device
+--resume PATH             Resume from checkpoint
+--transfer PATH           Source model for transfer learning
+--epochs N                Training epochs
+--batch_size N            Batch size
+--data_dir PATH           Training data directory
+--save_dir PATH           Checkpoint output directory
+--checkpoint_interval N   Save checkpoint every N epochs
+--guide_weight F          Attention guide loss weight
+--scan_guide_weight F     Scan-phase guide weight (defaults to guide_weight)
+--scaffold_ratio F        Scaffold phase as fraction of total epochs
+--scaffold_floor F        Minimum scaffold weight after annealing
+--scaffold_epochs N       Explicit scaffold epoch count (overrides ratio)
+--diversity_weight F      Fixation spread pressure
+--diversity_sigma F       Repulsion radius
+--scan_vy F               Scan diversity VY (<1 = horizontal spread)
+--read_vy F               Read diversity VY (>1 = vertical exploration)
+--content_weight F        Content detection BCE weight
+--edge_weight F           Edge exploration weight
+--blur_sigma_ratio F      Blur sigma as fraction of image size
+--n_scan_glimpses N       Scan-phase glimpse count
+--n_read_glimpses N       Read-phase glimpse count
+--n_positions N           Letter positions per word
+--scan_patch_size H,W     Scan patch dimensions (e.g. 12,18)
+--read_patch_size N       Read patch size (square)
+--n_scales N              Resolution scales
+--recode_weight F         Case-flip reconstruction weight (letter only)
+--diversity_vy F          Single-letter diversity VY
+--mask_weight F           Masked-half auxiliary loss (bigram only)
+--isolation_weight F      Isolation loss weight (word only)
+--isolation_data_dir PATH 128x128 single-letter data for isolation
+--isolation_random_prob F Random letter substitution probability in isolation
+--multi_head              Multi-head optimization (3 separate backward passes)
+--amp                     Automatic mixed precision
+```
+
+### Non-training commands
+
+These commands keep their own argument sets (no config file needed).
+
+#### Single-letter
+
+**generate**
 ```
 --letters Aa-Zz        Letter range (A-Z, a-z, Aa-Zz, or individual chars)
 --num_variants 20      Noisy copies per letter
@@ -75,33 +150,14 @@ All commands run via `python vision_training.py <command>`:
 --fonts all            Font spec: "all", "default", or comma-separated names
 ```
 
-#### generate_test
+**generate_test**
 ```
 --letters Aa-Zz
 --output_dir data/test
---fonts all            Font spec: "all", "default", or comma-separated names
+--fonts all
 ```
 
-#### train
-```
---data_dir data/letters    Training data path
---epochs 200               Epochs to train
---save_dir data/models     Checkpoint output
---checkpoint_interval 10
---n_glimpses 10            Fixations per image
---patch_size 12            Glimpse window size
---n_scales 1               Resolution scales (1=foveal only)
---device auto|cpu|cuda
---resume PATH              Resume from checkpoint
---guide_weight 8.0         Attention guide loss weight
---blur_sigma_ratio 0.16    Blur sigma as fraction of image size (auto-scales)
---diversity_weight 1.0     Fixation spread pressure (0=off)
---diversity_sigma 0.1      Repulsion radius in normalized coords
---recode_weight 1.0        Case-flip reconstruction loss weight (0=off)
---batch_size 52            Training batch size
-```
-
-#### test
+**test**
 ```
 --model_dir data/models
 --test_data_dir data/test
@@ -109,7 +165,7 @@ All commands run via `python vision_training.py <command>`:
 --device auto|cpu|cuda
 ```
 
-#### atlas
+**atlas**
 ```
 --model_dir data/models
 --test_data_dir data/test
@@ -119,7 +175,7 @@ All commands run via `python vision_training.py <command>`:
 
 Generates an interactive attention atlas — a single HTML file with Canvas-based Gaussian-splat heatmaps for all 52 letters across all fonts. The grid view shows averaged attention across fonts; clicking a letter drills down into per-font fixation patterns. Controls: heatmap/path toggle, upper/lower/both filter, opacity slider. Cell borders show correctness: green = all fonts correct, yellow = some wrong, red = all wrong.
 
-#### check_attention
+**check_attention**
 ```
 --data_dir data/letters    Dataset to check against
 --n_epochs 10              Diagnostic epochs to run
@@ -128,7 +184,7 @@ Generates an interactive attention atlas — a single HTML file with Canvas-base
 --blur_sigma_ratio 0.16    Blur ratio to test
 ```
 
-#### visualize
+**visualize**
 ```
 --model_dir data/models
 --data_dir data/letters
@@ -136,47 +192,23 @@ Generates an interactive attention atlas — a single HTML file with Canvas-base
 --device auto|cpu|cuda
 ```
 
-### Bigram commands
+#### Bigram
 
-#### generate_bigrams
+**generate_bigrams**
 ```
 --num_variants 20          Noisy copies per bigram
---noise_level 0.01         Gaussian noise std
+--noise_level 0.1          Gaussian noise std
 --output_dir data/bigrams
 --fonts default            Font spec: "all", "default", or comma-separated names
 ```
 
-#### generate_bigrams_test
+**generate_bigrams_test**
 ```
 --output_dir data/bigram_test
 --fonts default
 ```
 
-#### train_bigrams
-```
---data_dir data/bigrams
---epochs 100
---save_dir data/bigram_models
---checkpoint_interval 10
---n_scan_glimpses 5          Scan-phase glimpses (wide patches)
---n_read_glimpses 6          Read-phase glimpses (focused patches)
---scan_patch_size 12,18      Scan patch H,W
---read_patch_size 12         Read patch size (square)
---device auto|cpu|cuda
---resume PATH                Resume from checkpoint
---guide_weight 8.0           Read-phase guide weight
---scan_guide_weight 8.0      Scan-phase guide weight (defaults to --guide_weight)
---batch_size 32
---scaffold_ratio 0.67        Scaffold phase as fraction of total epochs
---scaffold_floor 0.0         Minimum scaffold weight after annealing
---transfer PATH              Single-letter .pth/.pth.gz for transfer learning
---mask_weight 0.5            Masked-half auxiliary loss (0=disabled)
---scan_vy 0.3                Scan diversity VY (<1 = horizontal spread)
---read_vy 1.5                Read diversity VY (>1 = vertical exploration)
---edge_weight 0.0            Edge exploration weight (pushes scan to image sides)
-```
-
-#### test_bigrams
+**test_bigrams**
 ```
 --model_dir data/bigram_models
 --test_data_dir data/bigram_test
@@ -184,7 +216,7 @@ Generates an interactive attention atlas — a single HTML file with Canvas-base
 --device auto|cpu|cuda
 ```
 
-#### bigram_atlas
+**bigram_atlas**
 ```
 --model_dir data/bigram_models
 --test_data_dir data/bigram_test
@@ -194,59 +226,30 @@ Generates an interactive attention atlas — a single HTML file with Canvas-base
 
 Same concept as the single-letter atlas but for 200 bigrams on 128x128 canvases. Grid flows with auto-fill layout. Cell borders show correctness: green = both letters correct, yellow = one correct, red = neither.
 
-#### check_bigram_attention
+**check_bigram_attention**
 ```
 --data_dir data/bigrams
 --n_epochs 10
 --device auto|cpu|cuda
 ```
 
-### Word commands
+#### Word
 
-#### generate_words
+**generate_words**
 ```
 --num_variants 20          Noisy copies per word
---noise_level 0.01         Gaussian noise std
+--noise_level 0.1          Gaussian noise std
 --output_dir data/words
 --fonts default            Font spec: "all", "default", or comma-separated names
 ```
 
-#### generate_words_test
+**generate_words_test**
 ```
 --output_dir data/word_test
 --fonts default
 ```
 
-#### train_words
-```
---data_dir data/words
---epochs 200
---save_dir data/word_models
---checkpoint_interval 10
---n_scan_glimpses 8          Prescribed x-scan glimpses (wide patches)
---n_read_glimpses 12         Free read-phase glimpses (focused patches)
---scan_patch_size 12,18      Scan patch H,W
---read_patch_size 12         Read patch size (square)
---n_positions 4              Letter positions in each word
---device auto|cpu|cuda
---resume PATH                Resume from checkpoint
---guide_weight 8.0           Read-phase guide weight
---scan_guide_weight 8.0      Scan-phase guide weight (defaults to --guide_weight)
---batch_size 32
---scaffold_ratio 0.67        Scaffold phase as fraction of total epochs
---scaffold_floor 0.0         Minimum scaffold weight after annealing
---transfer PATH              Single-letter .pth/.pth.gz for transfer learning
---content_weight 0.5         Content detection BCE loss (0=disabled)
---isolation_weight 0.5       Isolation loss weight (0=disabled)
---isolation_data_dir PATH    Path to 128x128 single-letter data for isolation (e.g. data/letters)
---isolation_random_prob 0.0  Probability of random letter substitution in isolation (0-1)
---multi_head                 Use 3 separate optimizers for attention/classification/reconstruction
---scan_vy 0.3                Scan diversity VY (<1 = horizontal spread)
---read_vy 1.5                Read diversity VY (>1 = vertical exploration)
---edge_weight 0.0            Edge exploration weight (unnecessary with prescribed x)
-```
-
-#### test_words
+**test_words**
 ```
 --model_dir data/word_models
 --test_data_dir data/word_test
@@ -254,7 +257,7 @@ Same concept as the single-letter atlas but for 200 bigrams on 128x128 canvases.
 --device auto|cpu|cuda
 ```
 
-#### word_atlas
+**word_atlas**
 ```
 --model_dir data/word_models
 --test_data_dir data/word_test
@@ -266,47 +269,44 @@ Same concept as the bigram atlas but for 200 four-letter words on 256x128 canvas
 
 ## Makefile
 
-All targets accept overridable variables:
+Training targets use YAML config files for hyperparameters. Most parameters live in the config; the Makefile exposes a few key runtime overrides.
 
 ```bash
-make train EPOCHS=200 DEVICE=cuda BATCH=52
+make train DEVICE=cuda                    # Uses configs/letter.yaml
+make train-bigrams DEVICE=cuda TRANSFER=data/models/model_final.pth
+make train-words EPOCHS=300 BATCH=64 DEVICE=cuda
 make generate LETTERS=A-Z VARIANTS=10 NOISE=0.2 FONTS=all
-make train-bigrams EPOCHS=150 DEVICE=cuda TRANSFER=data/models/model_final.pth
-make train-words EPOCHS=200 DEVICE=cuda TRANSFER=data/models/model_final.pth MULTI_HEAD=1
 ```
+
+### Makefile variables
+
+**Training overrides** (passed as CLI args, override config values):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `CONFIG` | configs/letter.yaml | YAML config file for `make train` / `make resume` |
+| `BIGRAM_CONFIG` | configs/bigram.yaml | YAML config file for `make train-bigrams` / `make resume-bigrams` |
+| `WORD_CONFIG` | configs/word.yaml | YAML config file for `make train-words` / `make resume-words` |
 | `DEVICE` | auto | auto, cpu, or cuda |
-| `EPOCHS` | 100 | Training epochs |
-| `CKPT` | 50 | Checkpoint interval |
+| `EPOCHS` | *(empty)* | Training epochs (overrides config) |
+| `BATCH` | *(empty)* | Batch size (overrides config) |
+| `TRANSFER` | *(empty)* | Path to source model for transfer learning |
+| `CKPT` | *(empty)* | Checkpoint interval (overrides config) |
+| `RESUME_FROM` | model_final.pth | Checkpoint filename for resume targets |
+
+**Generation variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `LETTERS` | Aa-Zz | Letter range for generation |
 | `VARIANTS` | 20 | Noisy variants per letter/bigram/word |
 | `NOISE` | 0.1 | Gaussian noise level |
 | `FONTS` | all | Font spec: all, default, or comma-separated names |
-| `BATCH` | 52 | Training batch size |
-| `GUIDE` | 8.0 | Attention guide loss weight |
-| `SCAFFOLD_RATIO` | 0.67 | Scaffold phase as fraction of total epochs |
-| `SCAFFOLD_FLOOR` | 0.0 | Minimum scaffold weight after annealing |
-| `SCAFFOLD_EPOCHS` | *(empty)* | Explicit scaffold epoch count (overrides ratio) |
-| `TRANSFER` | *(empty)* | Path to single-letter model for transfer learning |
-| `SCAN_GLIMPSES` | 5 | Bigram scan glimpses |
-| `READ_GLIMPSES` | 6 | Bigram read glimpses |
-| `SCAN_PATCH` | 12,18 | Scan patch size (H,W) |
-| `READ_PATCH` | 12 | Read patch size (square) |
-| `SCAN_GUIDE` | *(empty)* | Scan-phase guide weight (defaults to GUIDE) |
-| `MASK` | 0.5 | Bigram masked-half loss weight |
-| `SCAN_VY` | 0.3 | Scan diversity VY |
-| `READ_VY` | 1.5 | Read diversity VY |
-| `VY` | 1.0 | Single-letter diversity VY |
-| `EDGE` | 0.0 | Edge exploration weight |
-| `CONTENT` | 0.5 | Word content detection weight |
-| `ISOLATION` | 0.5 | Word isolation loss weight |
-| `WORD_SCAN_GLIMPSES` | 8 | Word scan glimpses (prescribed x) |
-| `WORD_READ_GLIMPSES` | 12 | Word read glimpses (free) |
-| `ISOLATION_DATA` | *(empty)* | Path to 128x128 letter data for isolation testing |
-| `MULTI_HEAD` | *(empty)* | Set to 1 for multi-head optimization |
-| `RESUME_FROM` | model_final.pth | Checkpoint filename for resume targets |
+
+Each pipeline has its own config variable with a sensible default. Override to use a custom config:
+```bash
+make train-words WORD_CONFIG=configs/word_experimental.yaml
+```
 
 ### Single-letter targets
 
@@ -328,7 +328,7 @@ make train-words EPOCHS=200 DEVICE=cuda TRANSFER=data/models/model_final.pth MUL
 |--------|-------------|
 | `make generate-bigrams` | Generate bigram training data |
 | `make generate-bigrams-test` | Generate clean bigram test data |
-| `make train-bigrams` | Train bigram model (supports `TRANSFER=`) |
+| `make train-bigrams` | Train bigram model (uses `configs/bigram.yaml`, supports `TRANSFER=`) |
 | `make resume-bigrams` | Resume bigram training |
 | `make test-bigrams` | Run bigram test evaluation |
 | `make bigram-atlas` | Generate bigram attention atlas (HTML) |
@@ -341,7 +341,7 @@ make train-words EPOCHS=200 DEVICE=cuda TRANSFER=data/models/model_final.pth MUL
 |--------|-------------|
 | `make generate-words` | Generate 4-letter word training data (256x128) |
 | `make generate-words-test` | Generate clean word test data |
-| `make train-words` | Train word model (prescribed scan, supports `TRANSFER=`) |
+| `make train-words` | Train word model (uses `configs/word.yaml`, supports `TRANSFER=`) |
 | `make resume-words` | Resume word training |
 | `make test-words` | Run word test evaluation (per-position + all-correct) |
 | `make word-atlas` | Generate word attention atlas (HTML) |
