@@ -255,6 +255,8 @@ Deep learning terms, acronyms, and concepts as they appear in this project. Orga
 
 **Docker** — Containerization platform ensuring reproducible environments. FBRL runs in a container with PyTorch 2.5.1, system fonts, and GPU support.
 
+**AMP** (Automatic Mixed Precision) — Training technique that uses float16 for most operations and float32 only where needed (loss scaling, accumulation). Halves VRAM usage and speeds up computation on GPUs with hardware float16 support. In FBRL, enabled via `torch.amp.autocast('cuda')` with a `GradScaler` to prevent underflow. ~17% speedup on Pascal (GTX 1080 Ti). Controlled by the `amp` config flag.
+
 **CUDA** — NVIDIA's parallel computing platform for GPU acceleration. Training on GPU is ~10-100x faster than CPU.
 
 **GPU** (Graphics Processing Unit) — Hardware accelerator optimized for parallel matrix operations. FBRL trains on a GTX 1080 Ti (Pascal architecture, compute capability 6.1).

@@ -1,0 +1,38 @@
+model_type: letter_motor
+n_positions: 1
+n_scan_glimpses: 3
+n_read_glimpses: 10
+scan_patch_size: [12, 18]
+read_patch_size: 12
+latent_dim: 256
+n_scales: 1
+
+epochs: 200
+batch_size: 52
+checkpoint_interval: 10
+multi_head: true
+amp: false
+
+guide_weight: 8.0
+blur_sigma_ratio: 0.16
+diversity_weight: 1.0
+diversity_sigma: 0.1
+scan_vy: 0.3
+read_vy: 1.5
+diversity_vy: 1.5
+content_weight: 0.5
+recode_weight: 1.0
+
+# Motor
+motor_enabled: true
+n_trajectory_points: 32
+render_sigma: 1.5
+traj_weight: 1.0
+traj_scaffold_ratio: 0.67
+traj_scaffold_floor: 0.1
+rr_cls_weight: 1.0
+canonical_font: dejavu-sans
+trajectory_data_dir: data/trajectories
+
+data_dir: data/letters
+save_dir: data/motor_models

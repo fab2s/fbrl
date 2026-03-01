@@ -1,0 +1,5 @@
+git: df0c0e1
+date: 2026-03-01
+make: make train-motor DEVICE=cuda TRANSFER=runs/letters/v5-scan/model_final.pth.gz
+cli: python vision_training.py train_motor --config configs/letter_motor.yaml --device cuda --transfer runs/letters/v5-scan/model_final.pth.gz
+transfer: runs/letters/v5-scan/model_final.pth.gz
