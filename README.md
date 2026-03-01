@@ -277,12 +277,12 @@ make atlas DEVICE=cuda           # Interactive attention atlas (HTML)
 
 # === Bigram pipeline ===
 make generate-bigrams
-make train-bigrams DEVICE=cuda TRANSFER=data/models/model_final.pth
+make train-bigrams DEVICE=cuda TRANSFER=data/letter_models/model_final.pth
 make bigram-atlas DEVICE=cuda
 
 # === Word pipeline ===
 make generate-words
-make train-words DEVICE=cuda TRANSFER=data/models/model_final.pth
+make train-words DEVICE=cuda TRANSFER=data/letter_models/model_final.pth
 make word-atlas DEVICE=cuda
 
 # Override any config value at the command line

@@ -9,7 +9,7 @@
 - **Training time**: 200 epochs, ~300s/epoch (728 min total)
 - **Dataset**: 4,000 word samples (200 words × 20 variants × 1 font, default)
 - **Isolation data**: 128x128 single-letter images (default font only)
-- **Transfer from**: single-letter model (`data/models/model_final.pth`)
+- **Transfer from**: single-letter model (`runs/letters/v3-cosine/model_final.pth.gz`)
 
 ## What changed from v1
 
@@ -72,7 +72,7 @@ Confusions show systematic patterns: bold fonts trigger `n` predictions (bold ve
 make train-words EPOCHS=200 DEVICE=cuda BATCH=52 GUIDE=8.0 \
     SCAFFOLD_RATIO=0.67 CONTENT=0.5 ISOLATION=0.5 \
     SCAN_VY=0.3 READ_VY=1.5 \
-    TRANSFER=data/models/model_final.pth \
+    TRANSFER=runs/letters/v3-cosine/model_final.pth.gz \
     ISOLATION_DATA=data/letters MULTI_HEAD=1
 ```
 

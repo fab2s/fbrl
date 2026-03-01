@@ -15,4 +15,4 @@ diversity_sigma: 0.1
 diversity_vy: 1.0
 recode_weight: 1.0
 data_dir: data/letters
-save_dir: data/models
+save_dir: data/letter_models

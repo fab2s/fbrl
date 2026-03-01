@@ -288,6 +288,7 @@ def generate_trajectory_dataset(output_dir, font_name='dejavu-sans', n_points=32
 
         ax.set_xlim(-1.1, 1.1)
         ax.set_ylim(-1.1, 1.1)
+        ax.invert_yaxis()  # y-down to match image coordinates
         ax.set_aspect('equal')
         ax.set_title(char, fontsize=10)
         ax.axis('off')

@@ -104,7 +104,7 @@ if __name__ == '__main__':
 
     gentest_parser = subparsers.add_parser('generate_test')
     gentest_parser.add_argument('--letters', default='Aa-Zz')
-    gentest_parser.add_argument('--output_dir', default='data/test')
+    gentest_parser.add_argument('--output_dir', default='data/letter_test')
     gentest_parser.add_argument('--fonts', default='all',
                                 help='Font spec: "all", "default", or comma-separated names')
 
@@ -122,21 +122,21 @@ if __name__ == '__main__':
     test_parser = subparsers.add_parser('test')
     test_parser.add_argument('--model_dir', required=True)
     test_parser.add_argument('--test_data_dir', required=True)
-    test_parser.add_argument('--output_dir', default='results')
+    test_parser.add_argument('--output_dir', default='letter_results')
     test_parser.add_argument('--device', default='auto',
                              choices=['auto', 'cpu', 'cuda'])
 
     viz_parser = subparsers.add_parser('visualize')
     viz_parser.add_argument('--model_dir', required=True)
     viz_parser.add_argument('--data_dir', required=True)
-    viz_parser.add_argument('--output_dir', default='visualizations')
+    viz_parser.add_argument('--output_dir', default='letter_visualizations')
     viz_parser.add_argument('--device', default='auto',
                             choices=['auto', 'cpu', 'cuda'])
 
     atlas_parser = subparsers.add_parser('atlas')
     atlas_parser.add_argument('--model_dir', required=True)
     atlas_parser.add_argument('--test_data_dir', required=True)
-    atlas_parser.add_argument('--output', default='data/atlas.html')
+    atlas_parser.add_argument('--output', default='data/letter_atlas.html')
     atlas_parser.add_argument('--device', default='auto',
                               choices=['auto', 'cpu', 'cuda'])
 

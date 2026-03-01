@@ -145,7 +145,7 @@ def _tensor_to_base64_png(tensor):
 
 # --- Testing ---
 
-def test_model(model_dir, test_data_dir, output_dir='results', device='auto'):
+def test_model(model_dir, test_data_dir, output_dir='letter_results', device='auto'):
     device = _resolve_device(device)
     print(f"Testing on: {device}")
 
@@ -317,7 +317,7 @@ def test_model(model_dir, test_data_dir, output_dir='results', device='auto'):
 
 # --- Visualization ---
 
-def visualize_model(model_dir, data_dir, output_dir='visualizations', device='auto'):
+def visualize_model(model_dir, data_dir, output_dir='letter_visualizations', device='auto'):
     device = _resolve_device(device)
     print(f"Visualizing on: {device}")
 
@@ -709,7 +709,7 @@ buildGrid();
 </html>'''
 
 
-def generate_atlas(model_dir, test_data_dir, output_path='data/atlas.html', device='auto'):
+def generate_atlas(model_dir, test_data_dir, output_path='data/letter_atlas.html', device='auto'):
     """Generate an interactive HTML attention atlas from a trained model.
 
     Runs inference on all test samples, collects fixation coordinates and clean

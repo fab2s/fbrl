@@ -50,6 +50,8 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
 
     font_stats = {}
     errors = []
+    correct_list = []
+    rr_errors = []
 
     for i in range(len(dataset)):
         img, clean, letter, case, font, partner_clean = dataset[i]
@@ -127,12 +129,32 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
 
         if not (letter_ok and case_ok):
             errors.append((original_char, font, pred_char, letter_ok, case_ok))
+        else:
+            correct_list.append((original_char, font))
+
+        if not (rr_letter_ok and rr_case_ok):
+            rr_errors.append((original_char, font, rr_pred_char, rr_letter_ok, rr_case_ok))
 
         # Save attention overlay
         suffix = f'_{font}' if len(set(dataset.fonts)) > 1 else ''
         visualize_attention(
             img.squeeze(0), locations,
             os.path.join(output_dir, f'attention_{original_char}{suffix}.png'),
+        )
+
+        # Save reconstruction image
+        recon_np = recon.squeeze().cpu().clamp(0, 1).numpy()
+        Image.fromarray((recon_np * 255).astype(np.uint8)).save(
+            os.path.join(output_dir, f'recon_{original_char}{suffix}.png'),
+        )
+
+        # Save recode (opposite case) image
+        with torch.no_grad():
+            recode_case = torch.tensor([[1.0 - case_float.item()]], device=device)
+            recode_img, _ = model.recode(img, recode_case)
+        recode_np = recode_img.squeeze().cpu().clamp(0, 1).numpy()
+        Image.fromarray((recode_np * 255).astype(np.uint8)).save(
+            os.path.join(output_dir, f'recode_{original_char}{suffix}.png'),
         )
 
         # Save rendered trajectory image
@@ -168,37 +190,75 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
             rr = s['rr_letter_ok'] / s['total'] * 100
             print(f"  {fname:<24s}: Ltr {lt:5.1f}%  RR {rr:5.1f}%  ({s['total']})")
 
-    # Write summary
+    # Write summary.txt — vision metrics only, matching letter model format
     summary_path = os.path.join(output_dir, 'summary.txt')
     with open(summary_path, 'w') as f:
-        f.write(f"Letter:    {letter_correct}/{total} ({letter_acc:.1%})\n")
-        f.write(f"Case:      {case_correct}/{total} ({case_acc:.1%})\n")
-        f.write(f"RR Letter: {rr_letter_correct}/{total} ({rr_letter_acc:.1%})\n")
-        f.write(f"RR Case:   {rr_case_correct}/{total} ({rr_case_acc:.1%})\n")
+        f.write(f"Letter: {letter_correct}/{total} ({letter_acc:.1%})\n")
+        f.write(f"Case:   {case_correct}/{total} ({case_acc:.1%})\n")
         f.write(f"Avg MSE:      {avg_mse:.4f}\n")
-        f.write(f"Avg Traj MSE: {avg_traj_mse:.4f}\n")
-        f.write(f"Pen F1:       {pen_f1:.3f}\n")
-
-        if len(font_stats) > 1:
-            f.write(f"\nPer-font:\n")
-            for fname in sorted(font_stats.keys()):
-                s = font_stats[fname]
-                lt = s['letter_ok'] / s['total'] * 100
-                rr = s['rr_letter_ok'] / s['total'] * 100
-                f.write(f"  {fname:<24s}: Ltr {lt:5.1f}%  RR {rr:5.1f}%  ({s['total']})\n")
 
         if errors:
             f.write(f"\nErrors ({len(errors)}):\n")
             for char, font, pred, l_ok, c_ok in sorted(errors):
                 parts = []
                 if not l_ok:
-                    parts.append(f"ltr: {char}->{pred}")
+                    parts.append(f"ltr: {char}\u2192{pred}")
+                if not c_ok:
+                    parts.append("case wrong")
+                font_tag = f"  [{font}]" if font != 'default' else ''
+                f.write(f"  {char}{font_tag}  ({', '.join(parts)})\n")
+
+        if len(font_stats) > 1:
+            f.write(f"\nPer-font:\n")
+            for fname in sorted(font_stats.keys()):
+                s = font_stats[fname]
+                lt_acc = s['letter_ok'] / s['total'] * 100
+                cs_acc = s['case_ok'] / s['total'] * 100
+                f.write(f"  {fname:<24s}: Letter {lt_acc:5.1f}%  Case {cs_acc:5.1f}%  "
+                        f"({s['total']})\n")
+
+        f.write(f"\nCorrect ({len(correct_list)}):\n")
+        line = '  '
+        for i, (char, _font) in enumerate(sorted(correct_list)):
+            line += char
+            if i < len(correct_list) - 1:
+                line += ', '
+            if len(line) > 78:
+                f.write(line + '\n')
+                line = '  '
+        if line.strip():
+            f.write(line + '\n')
+
+    # Write summary_motor.txt — motor-specific metrics
+    motor_summary_path = os.path.join(output_dir, 'summary_motor.txt')
+    with open(motor_summary_path, 'w') as f:
+        f.write(f"Re-read Letter: {rr_letter_correct}/{total} ({rr_letter_acc:.1%})\n")
+        f.write(f"Re-read Case:   {rr_case_correct}/{total} ({rr_case_acc:.1%})\n")
+        f.write(f"Avg Traj MSE:   {avg_traj_mse:.4f}\n")
+        f.write(f"Pen F1:         {pen_f1:.3f} (P={pen_precision:.3f} R={pen_recall:.3f})\n")
+
+        if len(font_stats) > 1:
+            f.write(f"\nPer-font re-read:\n")
+            for fname in sorted(font_stats.keys()):
+                s = font_stats[fname]
+                rr_lt = s['rr_letter_ok'] / s['total'] * 100
+                rr_cs = s['rr_case_ok'] / s['total'] * 100
+                f.write(f"  {fname:<24s}: Letter {rr_lt:5.1f}%  Case {rr_cs:5.1f}%  "
+                        f"({s['total']})\n")
+
+        if rr_errors:
+            f.write(f"\nRe-read errors ({len(rr_errors)}):\n")
+            for char, font, pred, l_ok, c_ok in sorted(rr_errors):
+                parts = []
+                if not l_ok:
+                    parts.append(f"ltr: {char}\u2192{pred}")
                 if not c_ok:
                     parts.append("case wrong")
                 font_tag = f"  [{font}]" if font != 'default' else ''
                 f.write(f"  {char}{font_tag}  ({', '.join(parts)})\n")
 
     print(f"Summary written to {summary_path}")
+    print(f"Motor summary written to {motor_summary_path}")
     print(f"Results saved in {output_dir}")
 
 

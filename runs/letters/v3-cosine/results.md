@@ -27,7 +27,7 @@ make generate-test FONTS=all LETTERS=Aa-Zz
 make train EPOCHS=100 DEVICE=cuda BATCH=52 GUIDE=8.0 FONTS=all
 
 # Full CLI equivalent
-python vision_training.py train --data_dir data/letters --epochs 100 --save_dir data/models --checkpoint_interval 10 --n_glimpses 10 --patch_size 12 --n_scales 1 --device cuda --batch_size 52 --guide_weight 8.0 --diversity_weight 1.0 --diversity_sigma 0.1 --recode_weight 1.0 --blur_sigma_ratio 0.16 --diversity_vy 1.0
+python vision_training.py train --data_dir data/letters --epochs 100 --save_dir data/letter_models --checkpoint_interval 10 --n_glimpses 10 --patch_size 12 --n_scales 1 --device cuda --batch_size 52 --guide_weight 8.0 --diversity_weight 1.0 --diversity_sigma 0.1 --recode_weight 1.0 --blur_sigma_ratio 0.16 --diversity_vy 1.0
 ```
 
 ## Final epoch losses
@@ -71,5 +71,5 @@ liberation-serif        : Letter 100.0%  Case 100.0%  (52 samples)
 | Scheduler | constant | constant | CosineAnnealingLR |
 
 ## What to try next
-- **Attention atlas**: `make atlas` → `data/atlas.html` — explore per-font fixation strategies
+- **Attention atlas**: `make atlas` → `data/letter_atlas.html` — explore per-font fixation strategies
 - **Bigrams**: the attention mechanism generalizes across 11 font styles with perfect accuracy — ready to test multi-character sequences

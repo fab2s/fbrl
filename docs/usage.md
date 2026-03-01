@@ -79,7 +79,7 @@ python vision_training.py train_words --config configs/word.yaml --epochs 300 --
 python vision_training.py train_words --config configs/word.yaml --resume data/word_models/model_final.pth
 
 # Transfer learning
-python vision_training.py train_words --config configs/word.yaml --transfer data/models/model_final.pth
+python vision_training.py train_words --config configs/word.yaml --transfer data/letter_models/model_final.pth
 ```
 
 #### Config files
@@ -167,9 +167,9 @@ These commands keep their own argument sets (no config file needed).
 
 **atlas**
 ```
---model_dir data/models
---test_data_dir data/test
---output data/atlas.html    Self-contained HTML file
+--model_dir data/letter_models
+--test_data_dir data/letter_test
+--output data/letter_atlas.html    Self-contained HTML file
 --device auto|cpu|cuda
 ```
 
@@ -273,7 +273,7 @@ Training targets use YAML config files for hyperparameters. Most parameters live
 
 ```bash
 make train DEVICE=cuda                    # Uses configs/letter.yaml
-make train-bigrams DEVICE=cuda TRANSFER=data/models/model_final.pth
+make train-bigrams DEVICE=cuda TRANSFER=data/letter_models/model_final.pth
 make train-words EPOCHS=300 BATCH=64 DEVICE=cuda
 make generate LETTERS=A-Z VARIANTS=10 NOISE=0.2 FONTS=all
 ```

@@ -20,7 +20,7 @@ make train EPOCHS=200 DEVICE=cuda BATCH=26 GUIDE=8.0 FONTS=default
 
 # Full CLI equivalent
 python vision_training.py generate --letters Aa-Zz --num_variants 20 --noise_level 0.1 --output_dir data/letters --fonts default
-python vision_training.py train --data_dir data/letters --epochs 200 --save_dir data/models --checkpoint_interval 10 --n_glimpses 10 --patch_size 12 --n_scales 1 --device cuda --batch_size 26 --guide_weight 8.0 --diversity_weight 1.0 --diversity_sigma 0.1 --recode_weight 1.0 --blur_sigma_ratio 0.16 --diversity_vy 1.0
+python vision_training.py train --data_dir data/letters --epochs 200 --save_dir data/letter_models --checkpoint_interval 10 --n_glimpses 10 --patch_size 12 --n_scales 1 --device cuda --batch_size 26 --guide_weight 8.0 --diversity_weight 1.0 --diversity_sigma 0.1 --recode_weight 1.0 --blur_sigma_ratio 0.16 --diversity_vy 1.0
 ```
 
 ## Final epoch losses

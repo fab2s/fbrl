@@ -20,4 +20,4 @@ scan_vy: 0.3
 content_weight: 0.5
 recode_weight: 1.0
 data_dir: data/letters
-save_dir: data/models
+save_dir: data/letter_models

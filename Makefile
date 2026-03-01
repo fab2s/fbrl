@@ -34,8 +34,8 @@ shell:
 	docker compose exec $(SERVICE) bash
 
 # Cleanup helpers — remove all files except .gitignore and archived logs
-CLEAN_MODELS = find data/models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
-CLEAN_RESULTS = find data/results -type f ! -name .gitignore -delete 2>/dev/null; true
+CLEAN_MODELS = find data/letter_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_RESULTS = find data/letter_results -type f ! -name .gitignore -delete 2>/dev/null; true
 CLEAN_BIGRAM_MODELS = find data/bigram_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
 CLEAN_BIGRAM_RESULTS = find data/bigram_results -type f ! -name .gitignore -delete 2>/dev/null; true
 CLEAN_WORD_MODELS = find data/word_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
@@ -46,7 +46,7 @@ generate:
 	$(RUN) generate --letters $(LETTERS) --num_variants $(VARIANTS) --noise_level $(NOISE) --output_dir data/letters --fonts $(FONTS)
 
 generate-test:
-	$(RUN) generate_test --letters $(LETTERS) --output_dir data/test --fonts $(FONTS)
+	$(RUN) generate_test --letters $(LETTERS) --output_dir data/letter_test --fonts $(FONTS)
 
 # Config-based training commands
 # Override any config value via CLI: make train EPOCHS=500 BATCH=64
@@ -57,18 +57,18 @@ train:
 	$(RUN) train --config $(CONFIG) --device $(DEVICE) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH)) $(if $(TRANSFER),--transfer $(TRANSFER)) $(if $(CKPT),--checkpoint_interval $(CKPT))
 
 resume:
-	$(RUN) train --config $(CONFIG) --device $(DEVICE) --resume data/models/$(RESUME_FROM) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH))
+	$(RUN) train --config $(CONFIG) --device $(DEVICE) --resume data/letter_models/$(RESUME_FROM) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH))
 
 test:
 	@$(CLEAN_RESULTS)
-	$(RUN) test --model_dir data/models --test_data_dir data/test --output_dir data/results --device $(DEVICE)
+	$(RUN) test --model_dir data/letter_models --test_data_dir data/letter_test --output_dir data/letter_results --device $(DEVICE)
 
 visualize:
-	$(RUN) visualize --model_dir data/models --data_dir data/letters --output_dir data/visualizations
+	$(RUN) visualize --model_dir data/letter_models --data_dir data/letters --output_dir data/letter_visualizations
 
 atlas:
-	@rm -f data/atlas.html
-	$(RUN) atlas --model_dir data/models --test_data_dir data/test --output data/atlas.html --device $(DEVICE)
+	@rm -f data/letter_atlas.html
+	$(RUN) atlas --model_dir data/letter_models --test_data_dir data/letter_test --output data/letter_atlas.html --device $(DEVICE)
 
 check-attention:
 	$(RUN) check_attention --data_dir data/letters --device $(DEVICE)
@@ -79,11 +79,11 @@ ifndef NAME
 	$(error Usage: make archive NAME=v1-single-font)
 endif
 	@mkdir -p runs/$(NAME)
-	$(RUN) compress_model --input data/models/model_final.pth --output data/models/_archive.pth.gz
-	mv data/models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
-	cp data/models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
-	cp data/models/training.log runs/$(NAME)/ 2>/dev/null || true
-	cp data/atlas.html runs/$(NAME)/ 2>/dev/null || true
+	$(RUN) compress_model --input data/letter_models/model_final.pth --output data/letter_models/_archive.pth.gz
+	mv data/letter_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
+	cp data/letter_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
+	cp data/letter_models/training.log runs/$(NAME)/ 2>/dev/null || true
+	cp data/letter_atlas.html runs/$(NAME)/ 2>/dev/null || true
 	cp $(CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
 	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
 	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
@@ -154,7 +154,7 @@ test-words:
 	$(RUN) test_words --model_dir data/word_models --test_data_dir data/word_test --output_dir data/word_results --device $(DEVICE)
 
 test-word-isolation:
-	$(RUN) test_word_isolation --model_dir data/word_models --test_data_dir data/test --output_dir data/word_results --device $(DEVICE)
+	$(RUN) test_word_isolation --model_dir data/word_models --test_data_dir data/letter_test --output_dir data/word_results --device $(DEVICE)
 
 word-atlas:
 	@rm -f data/word_atlas.html
@@ -162,7 +162,7 @@ word-atlas:
 
 isolation-atlas:
 	@rm -f data/isolation_atlas.html
-	$(RUN) isolation_atlas --model_dir data/word_models --test_data_dir data/test --output data/isolation_atlas.html --device $(DEVICE)
+	$(RUN) isolation_atlas --model_dir data/word_models --test_data_dir data/letter_test --output data/isolation_atlas.html --device $(DEVICE)
 
 archive-words:
 ifndef NAME
@@ -198,11 +198,11 @@ resume-motor:
 
 test-motor:
 	@$(CLEAN_MOTOR_RESULTS)
-	$(RUN) test_motor --model_dir data/motor_models --test_data_dir data/test --output_dir data/motor_results --device $(DEVICE)
+	$(RUN) test_motor --model_dir data/motor_models --test_data_dir data/letter_test --output_dir data/motor_results --device $(DEVICE)
 
 motor-atlas:
 	@rm -f data/motor_atlas.html
-	$(RUN) motor_atlas --model_dir data/motor_models --test_data_dir data/test --output data/motor_atlas.html --device $(DEVICE)
+	$(RUN) motor_atlas --model_dir data/motor_models --test_data_dir data/letter_test --output data/motor_atlas.html --device $(DEVICE)
 
 archive-motor:
 ifndef NAME
