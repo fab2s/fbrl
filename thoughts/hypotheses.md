@@ -34,23 +34,32 @@ This maps directly to the model: fixate on a letter, extract a patch, encode int
 
 **Data source**: Handwriting trajectory data exists in public datasets (IAM On-Line Handwriting Database, UNIPEN). Or generate synthetic trajectories from font bezier curves — less naturalistic but fully controlled.
 
-### Motor v1 results and next directions
+### Motor v1 results
 
-Motor trace decoding is now implemented and tested. Key findings from v1-transfer (200 epochs, curriculum learning from v5-scan):
+Motor trace decoding is implemented and tested. Key findings from v1-transfer (200 epochs, curriculum learning from v5-scan):
 
 **What worked**: Curriculum learning — transferring pretrained vision weights and training motor on top — dramatically outperformed training from scratch (97.9% vs 84.6% letter accuracy, 64.2% vs 47.6% re-read). Vision stays stable while motor learns against a meaningful latent.
 
 **What didn't work**: Despite 64% re-read accuracy, most rendered trajectories aren't visually readable. The motor decoder learns structural families (D→T shapes, O→Q shapes, l/I/j collapse) but not true letter shapes. The re-read signal is too soft: fat Gaussian blobs (sigma=1.5) let vague spatial distributions pass, and the same encoder co-adapts to motor artifacts.
 
-**Next: enhanced motor loss stack** — four complementary signals, weighted by abstraction level:
-1. **Latent matching** (MSE between original and re-read latents, weight=2.0) — forces cross-modal convergence to the same abstract concept. This IS the multimodal fusion signal from Hypothesis 1.
-2. **Frozen re-reader** (static encoder copy, never updates, weight=0.5) — prevents co-adaptation, honest readability check
-3. **Rendered image matching** (MSE to clean image, weight=0.25) — gentle pixel anchor, prevents total divergence
-4. **Sharper rendering** (sigma 1.5→0.75) — thinner lines, less forgiving blobs
+### Motor v2 — what we learned
+
+**Enhanced motor loss stack** — tested with uppercase-only (26 letters, single font):
+1. **Latent matching** (MSE between original and re-read latents, weight=2.0) — the primary signal. Dense, continuous, structurally prevents co-adaptation.
+2. **Rendered image matching** (MSE to clean image, weight=0.25) — gentle pixel anchor
+3. **Sharper rendering** (sigma 1.5→0.75) — thinner lines, more honest
+
+**Frozen re-reader was redundant**: Elegant in theory (static encoder copy, no co-adaptation). In practice, latent matching already prevents co-adaptation structurally — if the loss demands representational identity, the encoder gains nothing from learning motor-specific shortcuts. From random init, a frozen random encoder gives random gradients forever. Removed (weight=0).
+
+**From-scratch co-evolution is viable**: 200-epoch from-scratch run achieved 100% vision accuracy and 57.7% re-read (15/26 uppercase letters), with Pen F1 0.992 and traj MSE 0.360. The co-evolved latent space preserved vision perfectly while giving motor a workable representation. Transfer learning (v1) got higher re-read (64%) but at the cost of a latent space that was never designed for motor. Simultaneous training produces a more honest shared representation — supports Hypothesis 1.
+
+**Outline trajectories are wrong guidance**: Font vector trajectories trace glyph *outlines* (contours), not pen strokes (centerlines). The scaffold teaches the motor decoder to draw hollow shapes, then anneals and expects re-read to fix it — fighting the model's initial learning. The from-scratch run without scaffold showed a cold-start problem (re-read stuck at random), confirming *some* guidance is needed. But the right guidance, not the wrong guidance held longer.
+
+**Centerline trajectories**: Render letter → Zhang-Suen skeletonization → graph-based stroke tracing. Produces actual pen-stroke paths through the center of each stroke. Combined with short, fast-annealing scaffold (25% of training, low weight 0.5, floor 0.05) so latent matching takes over early. Currently training.
 
 **Why latent matching matters for the broader hypothesis**: if latent₂ (from rendered motor output) must match latent₁ (from font image), the motor decoder is forced to produce output that evokes the same abstract representation — regardless of visual style. This is exactly the "early fusion" mechanism: two modalities constrained to the same latent geometry. The motor trace doesn't need to look like the font; it needs to carry the same information.
 
-**Uppercase-only first**: 26 simpler shapes (straight lines, no ascenders/descenders) to isolate the motor learning signal before tackling the full 52-letter mixed-case task.
+**Lowercase may be easier to write**: Uppercase letters have more multi-stroke structures (B, E, K, M, R, W). Lowercase cursive-style letters are often single continuous strokes (a, b, c, d, e, o, s, u...). Since reading is already solved and writing is the bottleneck, lowercase could be a better motor training target. Trade-off: more visually confusable pairs (b/d, p/q) but that's a vision problem, not a motor one.
 
 ## Hypothesis 3: Canvas Geometry as Anti-Cheating Mechanism
 
@@ -78,8 +87,10 @@ Each stage added constraints because the previous stage found a shortcut. The pa
 ## Future Directions
 
 ### Near-term (single GPU feasible)
-- **Enhanced motor losses**: Latent matching + frozen re-reader + sharper rendering on uppercase-only, then scale to full alphabet
-- **Scan-anchored grouped read for letters**: Apply the word model's grouped read strategy to single-letter models. 3 scan glimpses with learnable x → inner scan(s) anchor read groups. Forces systematic spatial examination (left/center/right strokes). Particularly valuable for motor training — gives the motor decoder better structural information about letter anatomy. Could become a standard pattern: learnable scan x → anchored grouped read at every scale.
+- **Centerline scaffold + latent matching convergence**: Current experiment — does correct stroke guidance + fast annealing + dense latent signal produce readable motor traces? If yes, scale to full alphabet and multi-font.
+- **Lowercase motor training**: Test if single-stroke lowercase letters converge faster than multi-stroke uppercase. Same architecture, just `case_filter: lower`.
+- **Scan-anchored grouped read for letters**: Already wired up. 3 scan glimpses with learnable x → middle scan anchors read group. Tests whether anchoring improves attention efficiency. Could enable fewer total glimpses (10 instead of 13) with no accuracy loss.
+- **Longer simultaneous training (400-1000 epochs)**: The from-scratch co-evolution thesis — more time for vision+motor to find a truly shared latent space. Impractical on current hardware for rapid iteration but could be a definitive test.
 - **Variable-length words**: Language model prior, test if model skips predictable letters (human-like)
 - **Mixed case**: Uppercase + lowercase in same word, test if scan y adapts
 

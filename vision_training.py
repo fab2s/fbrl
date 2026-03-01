@@ -254,6 +254,7 @@ if __name__ == '__main__':
     gen_traj_parser.add_argument('--font', default='dejavu-sans')
     gen_traj_parser.add_argument('--n_points', type=int, default=32)
     gen_traj_parser.add_argument('--letters', default='Aa-Zz')
+    gen_traj_parser.add_argument('--mode', choices=['outline', 'centerline'], default='outline')
 
     train_motor_parser = subparsers.add_parser('train_motor')
     _add_train_overrides(train_motor_parser)
@@ -391,7 +392,8 @@ if __name__ == '__main__':
         from fbrl.motor import generate_trajectory_dataset
         letters = _parse_letters(args.letters)
         generate_trajectory_dataset(args.output_dir, font_name=args.font,
-                                     n_points=args.n_points, letters=letters)
+                                     n_points=args.n_points, letters=letters,
+                                     mode=args.mode)
 
     elif args.command == 'train_motor':
         cfg = load_config(args.config, _build_overrides(args))

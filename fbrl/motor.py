@@ -85,6 +85,234 @@ def _fallback_trajectory(n_points):
     return torch.zeros(n_points, 3)
 
 
+# --- Centerline trajectory extraction ---
+
+def _render_letter_binary(font_path, char, img_size=128, font_size=60):
+    """Render a letter as a binary numpy array (1=ink, 0=background)."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new('L', (img_size, img_size), color=0)
+    draw = ImageDraw.Draw(img)
+    if font_path is None:
+        font = ImageFont.load_default(size=font_size)
+    else:
+        font = ImageFont.truetype(font_path, size=font_size)
+    bbox = draw.textbbox((0, 0), char, font=font)
+    x = (img_size - bbox[2] - bbox[0]) / 2
+    y = (img_size - bbox[3] - bbox[1]) / 2
+    draw.text((x, y), char, fill=255, font=font)
+    import numpy as np
+    return (np.array(img) > 127).astype(np.uint8)
+
+
+def _skeletonize(binary):
+    """Zhang-Suen morphological thinning — produces clean, connected 1px skeleton."""
+    import numpy as np
+
+    img = binary.copy().astype(np.uint8)
+    rows, cols = img.shape
+
+    def _neighbors(img, r, c):
+        """Return 8-neighbors in clockwise order: P2,P3,P4,P5,P6,P7,P8,P9."""
+        return [
+            img[r-1, c],   img[r-1, c+1], img[r, c+1],   img[r+1, c+1],
+            img[r+1, c],   img[r+1, c-1], img[r, c-1],   img[r-1, c-1],
+        ]
+
+    def _transitions(neighbors):
+        """Count 0->1 transitions in the circular sequence."""
+        n = neighbors + [neighbors[0]]
+        return sum(1 for i in range(8) if n[i] == 0 and n[i+1] == 1)
+
+    changed = True
+    while changed:
+        changed = False
+
+        # Sub-iteration 1
+        to_remove = []
+        for r in range(1, rows - 1):
+            for c in range(1, cols - 1):
+                if img[r, c] == 0:
+                    continue
+                nb = _neighbors(img, r, c)
+                B = sum(nb)
+                A = _transitions(nb)
+                if (2 <= B <= 6 and A == 1 and
+                    nb[0] * nb[2] * nb[4] == 0 and
+                    nb[2] * nb[4] * nb[6] == 0):
+                    to_remove.append((r, c))
+        for r, c in to_remove:
+            img[r, c] = 0
+            changed = True
+
+        # Sub-iteration 2
+        to_remove = []
+        for r in range(1, rows - 1):
+            for c in range(1, cols - 1):
+                if img[r, c] == 0:
+                    continue
+                nb = _neighbors(img, r, c)
+                B = sum(nb)
+                A = _transitions(nb)
+                if (2 <= B <= 6 and A == 1 and
+                    nb[0] * nb[2] * nb[6] == 0 and
+                    nb[0] * nb[4] * nb[6] == 0):
+                    to_remove.append((r, c))
+        for r, c in to_remove:
+            img[r, c] = 0
+            changed = True
+
+    return img
+
+
+def _order_skeleton_pixels(skel):
+    """Order skeleton pixels into a pen trajectory via graph-based stroke tracing.
+
+    Builds an adjacency graph from the skeleton, identifies endpoints and
+    junctions, then traces connected strokes. Pen lifts only between
+    disconnected strokes.
+
+    Returns list of (x, y, pen_down) tuples.
+    """
+    import numpy as np
+
+    ys, xs = np.where(skel > 0)
+    if len(xs) == 0:
+        return []
+
+    N = len(xs)
+    # Map (y, x) -> index for fast neighbor lookup
+    coord_to_idx = {}
+    for i in range(N):
+        coord_to_idx[(ys[i], xs[i])] = i
+
+    # Build 8-connected adjacency lists
+    neighbors = [[] for _ in range(N)]
+    for i in range(N):
+        y, x = ys[i], xs[i]
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dy == 0 and dx == 0:
+                    continue
+                j = coord_to_idx.get((y + dy, x + dx))
+                if j is not None:
+                    neighbors[i].append(j)
+
+    # Classify pixels: degree = number of neighbors
+    degree = np.array([len(neighbors[i]) for i in range(N)])
+    endpoints = np.where(degree == 1)[0]  # dead ends
+
+    # Choose starting points: prefer endpoints, sorted top-left
+    visited = np.zeros(N, dtype=bool)
+    ordered = []
+
+    def _pick_start():
+        """Pick best unvisited starting point: endpoint first, then any."""
+        unvisited_endpoints = [e for e in endpoints if not visited[e]]
+        if unvisited_endpoints:
+            # Top-left preference
+            best = min(unvisited_endpoints, key=lambda i: (ys[i], xs[i]))
+            return best
+        unvisited = np.where(~visited)[0]
+        if len(unvisited) == 0:
+            return None
+        return min(unvisited, key=lambda i: (ys[i], xs[i]))
+
+    def _trace_from(start_idx):
+        """Trace a stroke from start_idx, following unvisited neighbors.
+        At junctions, prefer the straightest continuation."""
+        chain = [start_idx]
+        visited[start_idx] = True
+        current = start_idx
+
+        while True:
+            # Find unvisited neighbors
+            unvis = [j for j in neighbors[current] if not visited[j]]
+            if not unvis:
+                break
+            if len(unvis) == 1:
+                nxt = unvis[0]
+            else:
+                # At junction: prefer straightest continuation
+                if len(chain) >= 2:
+                    prev = chain[-2]
+                    dx0 = xs[current] - xs[prev]
+                    dy0 = ys[current] - ys[prev]
+                    best_dot = -2
+                    nxt = unvis[0]
+                    for j in unvis:
+                        dx1 = xs[j] - xs[current]
+                        dy1 = ys[j] - ys[current]
+                        # Cosine similarity (unnormalized, just for comparison)
+                        dot = dx0 * dx1 + dy0 * dy1
+                        if dot > best_dot:
+                            best_dot = dot
+                            nxt = j
+                else:
+                    # No direction history — pick topmost/leftmost
+                    nxt = min(unvis, key=lambda j: (ys[j], xs[j]))
+
+            visited[nxt] = True
+            chain.append(nxt)
+            current = nxt
+
+        return chain
+
+    while True:
+        start = _pick_start()
+        if start is None:
+            break
+        chain = _trace_from(start)
+        pen_start = 0.0 if len(ordered) > 0 else 1.0  # pen up between strokes
+        for k, idx in enumerate(chain):
+            pen = pen_start if k == 0 else 1.0
+            ordered.append((float(xs[idx]), float(ys[idx]), pen))
+
+    return ordered
+
+
+def extract_centerline_trajectory(font_path, char, n_points=32, img_size=128):
+    """Extract a centerline (stroke-center) trajectory for a character.
+
+    Unlike extract_glyph_trajectory which traces font vector outlines,
+    this renders the letter, skeletonizes it to 1px-wide strokes,
+    then orders the skeleton pixels into a pen trajectory.
+
+    Returns: (n_points, 3) tensor of (x, y, pen_down) in [-1, 1].
+    """
+    import numpy as np
+
+    binary = _render_letter_binary(font_path, char, img_size=img_size)
+    skel = _skeletonize(binary)
+
+    ordered = _order_skeleton_pixels(skel)
+    if len(ordered) < 2:
+        return _fallback_trajectory(n_points)
+
+    # Convert pixel coords to [-1, 1] (centered, uniform scaling)
+    points = [(p[0], p[1]) for p in ordered]
+    pen_states = [p[2] for p in ordered]
+
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    # Pixel coords: center of image = img_size/2
+    # Map to [-1, 1]: x_norm = (x - center) / (img_size/2)
+    center = img_size / 2.0
+    half = img_size / 2.0
+    norm_points = [((p[0] - center) / half, (p[1] - center) / half) for p in points]
+
+    # Resample to n_points
+    resampled, resampled_pen = _resample_trajectory(norm_points, pen_states, n_points)
+
+    trajectory = torch.zeros(n_points, 3)
+    for i, ((x, y), pen) in enumerate(zip(resampled, resampled_pen)):
+        trajectory[i, 0] = x
+        trajectory[i, 1] = y
+        trajectory[i, 2] = pen
+
+    return trajectory
+
+
 def extract_glyph_trajectory(font_path, char, n_points=32):
     """TTF glyph -> (n_points, 3) tensor of (x, y, pen_down).
 
@@ -233,8 +461,11 @@ def resolve_font_path(font_name):
 # --- Pre-generation ---
 
 def generate_trajectory_dataset(output_dir, font_name='dejavu-sans', n_points=32,
-                                 letters=None):
+                                 letters=None, mode='outline'):
     """Pre-generate all letter trajectories for canonical font.
+
+    Args:
+        mode: 'outline' (font vector contours) or 'centerline' (skeletonized strokes)
 
     Saves: output_dir/trajectories.pt  (dict: char -> (N, 3) tensor)
     Saves: output_dir/trajectory_atlas.png  (visualization grid)
@@ -247,10 +478,14 @@ def generate_trajectory_dataset(output_dir, font_name='dejavu-sans', n_points=32
 
     font_path = resolve_font_path(font_name)
     os.makedirs(output_dir, exist_ok=True)
+    print(f"Generating {mode} trajectories for {len(letters)} letters ({font_name})")
 
     traj_dict = {}
     for char in letters:
-        traj = extract_glyph_trajectory(font_path, char, n_points=n_points)
+        if mode == 'centerline':
+            traj = extract_centerline_trajectory(font_path, char, n_points=n_points)
+        else:
+            traj = extract_glyph_trajectory(font_path, char, n_points=n_points)
         traj_dict[char] = traj
         pen_up = (traj[:, 2] < 0.5).sum().item()
         pen_down = (traj[:, 2] >= 0.5).sum().item()

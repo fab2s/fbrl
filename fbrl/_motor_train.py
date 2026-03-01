@@ -79,10 +79,15 @@ def train_motor_model(cfg):
     if latent_match_weight > 0 or frozen_rr_weight > 0 or render_match_weight > 0:
         v2_str = (f"\nMotor v2: latent_match={latent_match_weight}  "
                   f"frozen_rr={frozen_rr_weight}  render_match={render_match_weight}")
-    print(f"Motor: n_points={n_trajectory_points}  render_sigma={render_sigma}  "
-          f"traj_weight={traj_weight}  rr_cls_weight={rr_cls_weight}  "
-          f"traj_scaffold={traj_scaffold_epochs}ep (floor={traj_scaffold_floor})"
-          f"{v2_str}")
+    if traj_weight > 0:
+        print(f"Motor: n_points={n_trajectory_points}  render_sigma={render_sigma}  "
+              f"traj_weight={traj_weight}  rr_cls_weight={rr_cls_weight}  "
+              f"traj_scaffold={traj_scaffold_epochs}ep (floor={traj_scaffold_floor})"
+              f"{v2_str}")
+    else:
+        print(f"Motor: n_points={n_trajectory_points}  render_sigma={render_sigma}  "
+              f"traj_scaffold=OFF  rr_cls_weight={rr_cls_weight}"
+              f"{v2_str}")
 
     os.makedirs(save_dir, exist_ok=True)
     save_run_info(save_dir, cfg)
@@ -96,8 +101,12 @@ def train_motor_model(cfg):
         print("No partner images -- recode loss disabled")
 
     # Load trajectory ground truth
-    traj_data = load_trajectory_data(trajectory_data_dir)
-    print(f"Loaded {len(traj_data)} trajectory templates from {trajectory_data_dir}")
+    if traj_weight > 0:
+        traj_data = load_trajectory_data(trajectory_data_dir)
+        print(f"Loaded {len(traj_data)} trajectory templates from {trajectory_data_dir}")
+    else:
+        traj_data = None
+        print("Trajectory scaffold disabled (traj_weight=0)")
 
     model = MotorVisionModel(
         n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
@@ -165,7 +174,9 @@ def train_motor_model(cfg):
     # Loss tracking
     loss_names = ['recon', 'letter_cls', 'case_cls', 'attn', 'div',
                   'recode', 'content', 'hit_rate', 'hit_intensity',
-                  'traj_mse', 'pen_bce', 'rr_cls', 'rr_letter_acc', 'rr_case_acc']
+                  'rr_cls', 'rr_letter_acc', 'rr_case_acc']
+    if traj_weight > 0:
+        loss_names[len(loss_names):len(loss_names)] = ['traj_mse', 'pen_bce']
     if latent_match_weight > 0:
         loss_names.append('latent_match')
     if frozen_rr_weight > 0:
@@ -224,12 +235,14 @@ def train_motor_model(cfg):
         v2_hdr += f"  {'frz_rr':>6s}"
     if render_match_weight > 0:
         v2_hdr += f"  {'rnd_m':>6s}"
+    traj_hdr = f"  {'traj':>6s}  {'pen':>6s}" if traj_weight > 0 else ""
+    scaff_hdr = f"  {'scaff':>6s}" if traj_weight > 0 else ""
     header = (f"{'epoch':>5s}  {'recon':>6s}  {'ltr':>6s}  {'case':>6s}  {'attn':>7s}  {'div':>6s}  "
-              f"{'hit':>6s}  {'recode':>6s}{content_hdr}  "
-              f"{'traj':>6s}  {'pen':>6s}  {'rr_cls':>6s}  "
+              f"{'hit':>6s}  {'recode':>6s}{content_hdr}"
+              f"{traj_hdr}  {'rr_cls':>6s}  "
               f"{'rr_ltr':>6s}  {'rr_cas':>6s}"
               f"{v2_hdr}  "
-              f"{'lr_attn':>8s}  {'lr_mot':>8s}  {'scaff':>6s}  time")
+              f"{'lr_attn':>8s}  {'lr_mot':>8s}{scaff_hdr}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
 
     for epoch in range(start_epoch, end_epoch):
@@ -329,11 +342,15 @@ def train_motor_model(cfg):
 
             # Motor decode
             trajectory = model.motor_decoder(latent_d)
-            gt_traj = batch_gt_trajectories(letters, cases, traj_data, device)
 
-            # Trajectory MSE (xy only) + pen BCE
-            traj_mse = F.mse_loss(trajectory[:, :, :2], gt_traj[:, :, :2])
-            pen_bce_loss = bce_logits(trajectory[:, :, 2], gt_traj[:, :, 2])
+            # Trajectory MSE (xy only) + pen BCE — only if scaffold enabled
+            if traj_weight > 0:
+                gt_traj = batch_gt_trajectories(letters, cases, traj_data, device)
+                traj_mse = F.mse_loss(trajectory[:, :, :2], gt_traj[:, :, :2])
+                pen_bce_loss = bce_logits(trajectory[:, :, 2], gt_traj[:, :, 2])
+            else:
+                traj_mse = torch.tensor(0.0)
+                pen_bce_loss = torch.tensor(0.0)
 
             # Render + re-read
             rendered = model._soft_render(trajectory, sigma=render_sigma)
@@ -393,13 +410,16 @@ def train_motor_model(cfg):
             if render_match_weight > 0:
                 extra_metrics['render_match'] = render_match_val
 
+            traj_metrics = {}
+            if traj_weight > 0:
+                traj_metrics = {'traj_mse': traj_mse, 'pen_bce': pen_bce_loss}
             tracker.update(
                 recon=recon_loss, letter_cls=letter_cls_loss, case_cls=case_cls_loss,
                 attn=attn_loss, div=div_loss, content=content_loss,
                 recode=recode_loss_val, hit_rate=hr, hit_intensity=hi,
-                traj_mse=traj_mse, pen_bce=pen_bce_loss, rr_cls=rr_cls_loss,
+                rr_cls=rr_cls_loss,
                 rr_letter_acc=rr_letter_acc, rr_case_acc=rr_case_acc,
-                **extra_metrics,
+                **traj_metrics, **extra_metrics,
             )
 
         avgs = tracker.end_epoch()
@@ -411,6 +431,9 @@ def train_motor_model(cfg):
         lr_motor = motor_sched.get_last_lr()[0]
 
         content_str = f"  Cont {avgs['content']:.4f}" if n_scan_glimpses > 0 else ""
+        traj_str = (f"  TrajMSE {avgs['traj_mse']:.4f}  PenBCE {avgs['pen_bce']:.4f}"
+                    if traj_weight > 0 else "")
+        scaff_str = f"  scaff {traj_scaff_w:.2f}" if traj_weight > 0 else ""
         v2_str = ""
         if latent_match_weight > 0:
             v2_str += f"  LatM {avgs['latent_match']:.4f}"
@@ -422,14 +445,16 @@ def train_motor_model(cfg):
               f"Recon {avgs['recon']:.4f}  Ltr {avgs['letter_cls']:.4f}  "
               f"Case {avgs['case_cls']:.4f}  Attn {avgs['attn']:.4f}  "
               f"Div {avgs['div']:.4f}{content_str}  Hit {avgs['hit_rate']:.0%}  "
-              f"Recode {avgs['recode']:.4f}  "
-              f"TrajMSE {avgs['traj_mse']:.4f}  PenBCE {avgs['pen_bce']:.4f}  "
+              f"Recode {avgs['recode']:.4f}{traj_str}  "
               f"RR_cls {avgs['rr_cls']:.4f}  RR_ltr {avgs['rr_letter_acc']:.0%}  "
               f"RR_case {avgs['rr_case_acc']:.0%}{v2_str}  "
-              f"lr {lr_attn:.6f}/{lr_motor:.6f}  scaff {traj_scaff_w:.2f}  "
+              f"lr {lr_attn:.6f}/{lr_motor:.6f}{scaff_str}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
         content_log = f"  {avgs['content']:>7.4f}" if n_scan_glimpses > 0 else ""
+        traj_log = (f"  {avgs['traj_mse']:>6.4f}  {avgs['pen_bce']:>6.4f}"
+                    if traj_weight > 0 else "")
+        scaff_log = f"  {traj_scaff_w:>6.4f}" if traj_weight > 0 else ""
         v2_log = ""
         if latent_match_weight > 0:
             v2_log += f"  {avgs['latent_match']:>6.4f}"
@@ -440,11 +465,11 @@ def train_motor_model(cfg):
         logger.write_line(
             f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {avgs['letter_cls']:>6.4f}  "
             f"{avgs['case_cls']:>6.4f}  {avgs['attn']:>7.4f}  {avgs['div']:>6.4f}  "
-            f"{avgs['hit_rate']:>6.4f}  {avgs['recode']:>6.4f}{content_log}  "
-            f"{avgs['traj_mse']:>6.4f}  {avgs['pen_bce']:>6.4f}  {avgs['rr_cls']:>6.4f}  "
+            f"{avgs['hit_rate']:>6.4f}  {avgs['recode']:>6.4f}{content_log}"
+            f"{traj_log}  {avgs['rr_cls']:>6.4f}  "
             f"{avgs['rr_letter_acc']:>6.4f}  {avgs['rr_case_acc']:>6.4f}"
             f"{v2_log}  "
-            f"{lr_attn:>8.6f}  {lr_motor:>8.6f}  {traj_scaff_w:>6.4f}  {epoch_time:.1f}s")
+            f"{lr_attn:>8.6f}  {lr_motor:>8.6f}{scaff_log}  {epoch_time:.1f}s")
 
         attn_sched.step()
         cls_sched.step()
@@ -502,10 +527,11 @@ def train_motor_model(cfg):
     if has_content:
         specs.append({'keys': ['content'], 'labels': ['Content BCE'], 'colors': ['tab:cyan'],
                       'title': 'Content detection (scan phase)', 'ylabel': 'Loss'})
+    if traj_weight > 0:
+        specs.append({'keys': ['traj_mse', 'pen_bce'], 'labels': ['Traj MSE', 'Pen BCE'],
+                      'colors': ['tab:brown', 'tab:olive'], 'styles': ['-', '--'],
+                      'title': 'Trajectory (scaffold anneals)', 'ylabel': 'Loss'})
     specs.extend([
-        {'keys': ['traj_mse', 'pen_bce'], 'labels': ['Traj MSE', 'Pen BCE'],
-         'colors': ['tab:brown', 'tab:olive'], 'styles': ['-', '--'],
-         'title': 'Trajectory (scaffold anneals)', 'ylabel': 'Loss'},
         {'keys': ['rr_cls'], 'labels': ['Re-read CE'], 'colors': ['tab:red'],
          'title': 'Re-read classification', 'ylabel': 'Cross-Entropy',
          'hlines': [(np.log(26), f'Random ({np.log(26):.1f})', 'gray')]},

@@ -30,12 +30,12 @@ recode_weight: 1.0
 motor_enabled: true
 n_trajectory_points: 32
 render_sigma: 0.75
-traj_weight: 1.0
-traj_scaffold_ratio: 0.67
-traj_scaffold_floor: 0.1
+traj_weight: 0.5
+traj_scaffold_ratio: 0.25
+traj_scaffold_floor: 0.05
 rr_cls_weight: 1.0
 canonical_font: dejavu-sans
-trajectory_data_dir: data/trajectories
+trajectory_data_dir: data/trajectories_centerline
 
 # Enhanced motor losses (v2)
 latent_match_weight: 2.0
