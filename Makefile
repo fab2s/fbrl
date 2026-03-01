@@ -84,10 +84,8 @@ endif
 	cp data/letter_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
 	cp data/letter_models/training.log runs/$(NAME)/ 2>/dev/null || true
 	cp data/letter_atlas.html runs/$(NAME)/ 2>/dev/null || true
-	cp $(CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
-	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
-	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
-	@echo "config: $(CONFIG)" >> runs/$(NAME)/info.txt
+	cp data/letter_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp data/letter_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(CONFIG)" > runs/$(NAME)/info.txt; }
 	@echo "Archived to runs/$(NAME)/"
 
 # Bigram pipeline
@@ -127,10 +125,8 @@ endif
 	cp data/bigram_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
 	cp data/bigram_models/training.log runs/$(NAME)/ 2>/dev/null || true
 	cp data/bigram_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
-	cp $(BIGRAM_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
-	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
-	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
-	@echo "config: $(BIGRAM_CONFIG)" >> runs/$(NAME)/info.txt
+	cp data/bigram_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(BIGRAM_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp data/bigram_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(BIGRAM_CONFIG)" > runs/$(NAME)/info.txt; }
 	@echo "Archived to runs/$(NAME)/"
 
 # Word pipeline
@@ -175,10 +171,8 @@ endif
 	cp data/word_models/training.log runs/$(NAME)/ 2>/dev/null || true
 	cp data/word_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
 	cp data/isolation_atlas.html runs/$(NAME)/isolation_atlas.html 2>/dev/null || true
-	cp $(WORD_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
-	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
-	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
-	@echo "config: $(WORD_CONFIG)" >> runs/$(NAME)/info.txt
+	cp data/word_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(WORD_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp data/word_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(WORD_CONFIG)" > runs/$(NAME)/info.txt; }
 	@echo "Archived to runs/$(NAME)/"
 
 # Motor pipeline
@@ -214,10 +208,8 @@ endif
 	cp data/motor_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
 	cp data/motor_models/training.log runs/$(NAME)/ 2>/dev/null || true
 	cp data/motor_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
-	cp $(MOTOR_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
-	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
-	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
-	@echo "config: $(MOTOR_CONFIG)" >> runs/$(NAME)/info.txt
+	cp data/motor_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(MOTOR_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp data/motor_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(MOTOR_CONFIG)" > runs/$(NAME)/info.txt; }
 	@echo "Archived to runs/$(NAME)/"
 
 test-unit:

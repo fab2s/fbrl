@@ -18,7 +18,9 @@ This extends naturally as the project scales. At word level, the feedback loop b
 
 **Bigrams** — Two-phase scan/read architecture on 128x128 canvas. 98-99% both-correct on 200 common English bigrams with transfer learning.
 
-**Words** — 4-letter words on 256x128 canvas with prescribed left-to-right scan. 100% accuracy on all 4 positions with single-font training. Multi-head optimization (v2, in progress) showing faster convergence with separate gradient paths for attention, classification, and reconstruction.
+**Words** — 4-letter words on 256x128 canvas with prescribed left-to-right scan. 100% accuracy on all 4 positions with single-font training. Multi-head optimization (v2) showing faster convergence with separate gradient paths for attention, classification, and reconstruction.
+
+**Motor traces** — Read-Write-Render-Re-Read loop: the vision encoder produces a latent, a GRU motor decoder writes a trajectory, a differentiable renderer draws it, and the same encoder re-reads the result. With curriculum learning (transfer from pretrained v5-scan), 97.9% letter accuracy (vision preserved) and 64.2% re-read accuracy (motor catching up). Rendered trajectories show structural families but not yet readable letter shapes — the re-read signal needs strengthening.
 
 The attention patterns show structural reading — not brute-force tracing:
 
@@ -173,6 +175,29 @@ At 256x128, a 12x12 foveal window covers only 0.4% of the image — holistic che
 
 **Dynamic scan count**: When the model processes narrower images (e.g., 128x128 for isolation testing), the scan glimpse count scales automatically: `n_scan = max(1, round(base * (width/256)^1.5))`. This gives 3 scan glimpses at 128px instead of 8 at 256px — matching the intuition that wider images need disproportionately more scanning.
 
+### Motor model (`MotorVisionModel`) — read, write, re-read
+
+```
+Input (128x128 grayscale) -> VisionModel encoder (3 scan + 10 read)
+                         |
+                    Latent (256-dim)
+          |         |          |            |
+     VisualDecoder LetterCls CaseCls  MotorTraceDecoder
+    (128x128 recon) (26:A-Z) (2:case)    (GRU → 32 points)
+                                              |
+                                    (x, y, pen_down) trajectory
+                                              |
+                                     SoftRender (Gaussian blobs)
+                                              |
+                                    Rendered image (128x128)
+                                              |
+                                     Re-read through SAME encoder
+                                              |
+                                         Re-read classification
+```
+
+Four multi-head backward passes: attention → sensors/controller, classification → classifiers, reconstruction → decoder, motor → motor_decoder (deferred after main graph is freed for VRAM safety). The motor decoder receives a detached latent, so motor gradients don't interfere with vision.
+
 ## Training Loss
 
 ### Single-letter
@@ -228,6 +253,18 @@ total = recon + sum(pos_cls[1..4])
 
 **Multi-head optimization** (v2): Instead of summing all losses, 3 separate backward passes target specific components: attention losses train only the controller and sensors, classification losses train only the readout and classifiers, reconstruction loss trains only the decoder. This prevents gradient cross-contamination and accelerates convergence.
 
+### Motor (read-write-re-read)
+
+Extends the single-letter loss with a 4th motor head:
+
+| Term | Purpose |
+|------|---------|
+| **Trajectory MSE** (scaffold, anneals) | Point-wise match against font vector ground truth — teaches basic letter shapes early, then fades |
+| **Pen BCE** (scaffold, anneals) | Pen up/down timing against ground truth |
+| **Re-read CE** | Classify the rendered trajectory — forces motor output to be readable |
+
+The trajectory scaffold provides initial shape guidance (like temporal scaffold for reading order), then anneals to a floor so the re-read classification signal dominates. The motor decoder must ultimately produce traces that are *readable*, not just geometrically close to ground truth.
+
 ## Design Journey
 
 Each design decision was driven by something that didn't work in the previous stage.
@@ -262,6 +299,9 @@ Detailed analysis for each training run:
 - [v1: prescribed x-scan, 200 epochs](runs/words/v1-prescribed/results.md) — 100% all 4 positions
 - [v2: multi-head + isolation, 200 epochs](runs/words/v2-multihead/results.md) — 99.5%, 128px isolation
 
+**Motor** (`runs/motor/`):
+- [v1: transfer from v5-scan, 200 epochs](runs/motor/v1-transfer/results.md) — 97.9% letter, 64.2% re-read (curriculum learning)
+
 ## Quick Start
 
 ```bash
@@ -284,6 +324,12 @@ make bigram-atlas DEVICE=cuda
 make generate-words
 make train-words DEVICE=cuda TRANSFER=data/letter_models/model_final.pth
 make word-atlas DEVICE=cuda
+
+# === Motor pipeline ===
+make generate-trajectories              # Extract trajectory GT from TTF fonts
+make train-motor DEVICE=cuda TRANSFER=runs/letters/v5-scan/model_final.pth.gz
+make test-motor DEVICE=cuda
+make motor-atlas DEVICE=cuda
 
 # Override any config value at the command line
 make train-words EPOCHS=300 BATCH=64 DEVICE=cuda
@@ -344,6 +390,7 @@ fbrl/
 |   +-- letters/            #   Single-letter experiments (v1-v5)
 |   +-- bigrams/            #   Bigram experiments (v1)
 |   +-- words/              #   Word experiments (v1-v2)
+|   +-- motor/              #   Motor trace experiments (v1)
 +-- data/                   # Generated data (Docker volume mount, not in git)
 +-- docs/
     +-- glossary.md         # Deep learning terms and concepts
@@ -357,10 +404,12 @@ The research goal is to scale foveal attention from character recognition toward
 1. **Multi-font single letters** — Same letters, 11 fonts (serif, sans, mono, narrow, bold). Tests whether attention strategies generalize across visual styles. *Done — 100% across all fonts.*
 2. **Bigrams** — 200 common English bigrams with two-phase scan/read. Tests sequential reading and per-position classification. *Done — 98-99% with transfer learning. Key finding: 128px canvas is too small for 2 letters to force genuine sequential reading.*
 3. **4-letter words** — 200 common words on 256x128 canvas with prescribed x-scan, content detection, and isolation testing. *Done — 100% all 4 positions (v1, single optimizer). v2 (multi-head optimization + 128px isolation) in progress.*
-4. **Multi-font words** — Can the word model generalize across fonts?
-5. **Variable-length words** — Mixed word lengths with a language model prior. Tests whether the model skips predictable letters, fixates word centers, and spends more glimpses on rare words (all human reading behaviors).
-6. **Meta-attention** — A coarse controller that finds word boundaries (whitespace, line breaks) and deploys the fine letter-reader within each region. Hierarchical saccade planning.
-7. **Multimodal** — Integrate audio to provide top-down priors (syllable boundaries, word predictions) that guide visual attention during reading.
+4. **Motor traces** — Read-Write-Render-Re-Read loop on single letters. Motor decoder learns to write by re-reading its own output. *Done — v1 with curriculum learning (transfer from v5-scan) achieves 64% re-read accuracy. Vision preserved at 98%. Key insight: the re-read classification signal is too coarse — next iteration will add latent matching, frozen re-reader, and sharper rendering.*
+5. **Scan-anchored grouped read** — Learnable scan x positions that anchor read groups, forcing systematic spatial examination. Planned for both word model (4 groups) and single-letter model (left/center/right strokes). See [word read phase notes](thoughts/word_read_phase.md).
+6. **Multi-font words** — Can the word model generalize across fonts?
+7. **Variable-length words** — Mixed word lengths with a language model prior. Tests whether the model skips predictable letters, fixates word centers, and spends more glimpses on rare words (all human reading behaviors).
+8. **Meta-attention** — A coarse controller that finds word boundaries (whitespace, line breaks) and deploys the fine letter-reader within each region. Hierarchical saccade planning.
+9. **Multimodal** — Integrate audio to provide top-down priors (syllable boundaries, word predictions) that guide visual attention during reading.
 
 ## Reference
 

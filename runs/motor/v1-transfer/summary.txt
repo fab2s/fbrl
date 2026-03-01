@@ -1,0 +1,112 @@
+Letter: 560/572 (97.9%)
+Case:   510/572 (89.2%)
+Avg MSE:      0.0018
+
+Errors (72):
+  A  [dejavu-serif-bold]  (case wrong)
+  B  [dejavu-serif-bold]  (case wrong)
+  D  [dejavu-serif-bold]  (ltr: D→Q)
+  G  [liberation-serif]  (case wrong)
+  I  (ltr: I→L, case wrong)
+  I  [dejavu-sans]  (case wrong)
+  I  [dejavu-sans-bold]  (ltr: I→L)
+  I  [dejavu-serif]  (case wrong)
+  I  [dejavu-serif-bold]  (ltr: I→L)
+  I  [liberation-narrow]  (ltr: I→L, case wrong)
+  I  [liberation-sans]  (case wrong)
+  I  [liberation-serif]  (case wrong)
+  J  [dejavu-sans]  (case wrong)
+  J  [dejavu-serif]  (case wrong)
+  J  [liberation-serif]  (case wrong)
+  K  [dejavu-sans-bold]  (case wrong)
+  M  [dejavu-sans]  (case wrong)
+  M  [dejavu-sans-bold]  (case wrong)
+  M  [dejavu-serif-bold]  (case wrong)
+  M  [liberation-mono]  (case wrong)
+  M  [liberation-mono-bold]  (case wrong)
+  M  [liberation-sans-bold]  (case wrong)
+  Q  (ltr: Q→O)
+  U  [dejavu-serif-bold]  (ltr: U→C)
+  W  [dejavu-sans-bold]  (case wrong)
+  W  [liberation-mono]  (case wrong)
+  W  [liberation-mono-bold]  (case wrong)
+  W  [liberation-narrow]  (case wrong)
+  W  [liberation-sans-bold]  (case wrong)
+  X  [dejavu-sans-bold]  (case wrong)
+  X  [dejavu-serif-bold]  (case wrong)
+  X  [liberation-mono-bold]  (case wrong)
+  X  [liberation-sans-bold]  (case wrong)
+  Z  [dejavu-serif-bold]  (case wrong)
+  d  [liberation-mono-bold]  (case wrong)
+  d  [liberation-sans-bold]  (case wrong)
+  f  [liberation-serif]  (ltr: f→T)
+  g  [liberation-serif]  (case wrong)
+  i  (ltr: i→J)
+  i  [dejavu-sans-bold]  (case wrong)
+  j  [dejavu-sans-bold]  (case wrong)
+  j  [dejavu-serif-bold]  (case wrong)
+  j  [liberation-sans-bold]  (case wrong)
+  k  [liberation-serif]  (case wrong)
+  l  [dejavu-sans-bold]  (case wrong)
+  l  [dejavu-serif-bold]  (case wrong)
+  l  [liberation-narrow]  (ltr: l→I)
+  l  [liberation-sans-bold]  (case wrong)
+  q  [dejavu-sans]  (ltr: q→G)
+  t  [liberation-sans-bold]  (ltr: t→R)
+  v  (case wrong)
+  v  [dejavu-sans]  (case wrong)
+  v  [liberation-mono]  (case wrong)
+  v  [liberation-sans]  (case wrong)
+  w  [dejavu-serif]  (case wrong)
+  w  [dejavu-serif-bold]  (case wrong)
+  w  [liberation-serif]  (case wrong)
+  x  (case wrong)
+  x  [dejavu-sans]  (case wrong)
+  x  [liberation-mono]  (case wrong)
+  x  [liberation-narrow]  (case wrong)
+  x  [liberation-sans]  (case wrong)
+  x  [liberation-sans-bold]  (case wrong)
+  x  [liberation-serif]  (case wrong)
+  y  [dejavu-sans-bold]  (case wrong)
+  y  [dejavu-serif-bold]  (case wrong)
+  y  [liberation-mono-bold]  (case wrong)
+  y  [liberation-sans-bold]  (case wrong)
+  z  [dejavu-sans-bold]  (case wrong)
+  z  [dejavu-serif-bold]  (case wrong)
+  z  [liberation-mono-bold]  (case wrong)
+  z  [liberation-sans-bold]  (case wrong)
+
+Per-font:
+  default                 : Letter  94.2%  Case  94.2%  (52)
+  dejavu-sans             : Letter  98.1%  Case  90.4%  (52)
+  dejavu-sans-bold        : Letter  98.1%  Case  82.7%  (52)
+  dejavu-serif            : Letter 100.0%  Case  94.2%  (52)
+  dejavu-serif-bold       : Letter  94.2%  Case  80.8%  (52)
+  liberation-mono         : Letter 100.0%  Case  92.3%  (52)
+  liberation-mono-bold    : Letter 100.0%  Case  88.5%  (52)
+  liberation-narrow       : Letter  96.2%  Case  94.2%  (52)
+  liberation-sans         : Letter 100.0%  Case  94.2%  (52)
+  liberation-sans-bold    : Letter  98.1%  Case  82.7%  (52)
+  liberation-serif        : Letter  98.1%  Case  86.5%  (52)
+
+Correct (500):
+  A, A, A, A, A, A, A, A, A, A, B, B, B, B, B, B, B, B, B, B, C, C, C, C, C, C, 
+  C, C, C, C, C, D, D, D, D, D, D, D, D, D, D, E, E, E, E, E, E, E, E, E, E, E, 
+  F, F, F, F, F, F, F, F, F, F, F, G, G, G, G, G, G, G, G, G, G, H, H, H, H, H, 
+  H, H, H, H, H, H, I, I, I, J, J, J, J, J, J, J, J, K, K, K, K, K, K, K, K, K, 
+  K, L, L, L, L, L, L, L, L, L, L, L, M, M, M, M, M, N, N, N, N, N, N, N, N, N, 
+  N, N, O, O, O, O, O, O, O, O, O, O, O, P, P, P, P, P, P, P, P, P, P, P, Q, Q, 
+  Q, Q, Q, Q, Q, Q, Q, Q, R, R, R, R, R, R, R, R, R, R, R, S, S, S, S, S, S, S, 
+  S, S, S, S, T, T, T, T, T, T, T, T, T, T, T, U, U, U, U, U, U, U, U, U, U, V, 
+  V, V, V, V, V, V, V, V, V, V, W, W, W, W, W, W, X, X, X, X, X, X, X, Y, Y, Y, 
+  Y, Y, Y, Y, Y, Y, Y, Y, Z, Z, Z, Z, Z, Z, Z, Z, Z, Z, a, a, a, a, a, a, a, a, 
+  a, a, a, b, b, b, b, b, b, b, b, b, b, b, c, c, c, c, c, c, c, c, c, c, c, d, 
+  d, d, d, d, d, d, d, d, e, e, e, e, e, e, e, e, e, e, e, f, f, f, f, f, f, f, 
+  f, f, f, g, g, g, g, g, g, g, g, g, g, h, h, h, h, h, h, h, h, h, h, h, i, i, 
+  i, i, i, i, i, i, i, j, j, j, j, j, j, j, j, k, k, k, k, k, k, k, k, k, k, l, 
+  l, l, l, l, l, l, m, m, m, m, m, m, m, m, m, m, m, n, n, n, n, n, n, n, n, n, 
+  n, n, o, o, o, o, o, o, o, o, o, o, o, p, p, p, p, p, p, p, p, p, p, p, q, q, 
+  q, q, q, q, q, q, q, q, r, r, r, r, r, r, r, r, r, r, r, s, s, s, s, s, s, s, 
+  s, s, s, s, t, t, t, t, t, t, t, t, t, t, u, u, u, u, u, u, u, u, u, u, u, v, 
+  v, v, v, v, v, v, w, w, w, w, w, w, w, w, x, x, x, x, y, y, y, y, y, y, y, z, 
+  z, z, z, z, z, z
