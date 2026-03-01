@@ -290,6 +290,9 @@ make train-words EPOCHS=300 BATCH=64 DEVICE=cuda
 
 # Archive any trained model
 make archive-words NAME=v2-multi-head
+
+# Run unit tests (no GPU needed, fast)
+make test-unit
 ```
 
 Training parameters live in YAML config files (`configs/letter.yaml`, `configs/bigram.yaml`, `configs/word.yaml`). CLI args override config values. See [docs/usage.md](docs/usage.md) for full reference.
@@ -305,7 +308,8 @@ fbrl/
 |   +-- letter.yaml         #   Single-letter defaults (no scan phase)
 |   +-- letter_scan.yaml    #   Single-letter with scan phase (3 scan + 10 read)
 |   +-- bigram.yaml         #   Bigram defaults (5 scan + 6 read)
-|   +-- word.yaml           #   Word defaults (8 scan + 12 read, multi-head, AMP)
+|   +-- word.yaml           #   Word defaults (6 scan + 20 read, grouped, multi-head, AMP)
+|   +-- letter_motor.yaml   #   Motor letter defaults (3 scan + 10 read, trajectory decoder)
 +-- fbrl/                   # Core package
 |   +-- __init__.py         # Device resolution helper
 |   +-- config.py           # ExperimentConfig dataclass, YAML load/save
@@ -320,7 +324,18 @@ fbrl/
 |   +-- evaluate.py         # Testing, visualization, atlas generation (single-letter + bigram)
 |   +-- _word_eval.py       # Word evaluation + atlas (test_word_model, generate_word_atlas)
 |   +-- losses.py           # Loss functions (attention guide, diversity, hit rate,
-|                           #   two_phase_attention_loss, word_attention_loss)
+|   |                       #   two_phase_attention_loss, word_attention_loss)
+|   +-- motor.py            # MotorTraceDecoder, soft_render, trajectory extraction from TTF
+|   +-- _motor_train.py     # Motor letter training loop (train_motor_model)
+|   +-- _motor_eval.py      # Motor evaluation + atlas (test_motor_model, generate_motor_atlas)
++-- tests/                  # Unit tests (pytest, runs inside Docker)
+|   +-- conftest.py         #   Shared fixtures (device, batch size, synthetic images)
+|   +-- test_model.py       #   Forward pass shapes for all model types
+|   +-- test_losses.py      #   All loss functions with synthetic tensors
+|   +-- test_config.py      #   Config load/save/roundtrip
+|   +-- test_data.py        #   Dataset word lists, font discovery
+|   +-- test_motor.py       #   Trajectory extraction, soft render, motor decoder
+|   +-- test_utils.py       #   LossTracker, checkpoint save/load, ETA formatting
 +-- Dockerfile              # python:3.10-slim + torch 2.5.1 + fonts
 +-- docker-compose.yml      # GPU-enabled container with data volume
 +-- Makefile                # Pipeline shortcuts (all targets accept variable overrides)

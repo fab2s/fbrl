@@ -356,4 +356,21 @@ make train-words WORD_CONFIG=configs/word_experimental.yaml
 | `make logs` | Follow container logs |
 | `make shell` | Shell into container |
 
+### Unit tests
+
+```bash
+make test-unit          # runs pytest tests/ -v inside Docker
+```
+
+Tests cover all core modules with synthetic tensors — no training data or GPU needed (runs on CPU). The suite validates forward pass shapes, loss function properties, config round-trips, dataset invariants, and motor pipeline components.
+
+| File | Covers |
+|------|--------|
+| `test_model.py` | Forward shapes for VisionModel, BigramVisionModel, WordVisionModel, MotorVisionModel, CrossAttentionReadout |
+| `test_losses.py` | All loss functions: attention guide, diversity, edge, hit rate, two-phase, word attention |
+| `test_config.py` | YAML load, CLI overrides, scan_patch_size tuple conversion, scaffold computation, round-trip serialization |
+| `test_data.py` | BIGRAMS_200 and WORDS_200 word lists (length, uniqueness, letter coverage), font discovery |
+| `test_motor.py` | Bezier flattening, trajectory resampling, font resolution, batch GT trajectories, soft render (shape/range/gradients), MotorTraceDecoder output |
+| `test_utils.py` | LossTracker flow, checkpoint save/load round-trip, ETA formatting |
+
 **Important:** Always `make restart` after code changes — Docker caches old code.

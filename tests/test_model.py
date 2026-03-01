@@ -92,7 +92,7 @@ class TestWordVisionModel:
             scan_patch_size=(8, 12), read_patch_size=8,
         )
         img = torch.randn(B, 1, 128, 256)
-        recon, logits_list, locs, readout, scan_cl = model(img)
+        recon, logits_list, locs, readout, scan_cl, group_bounds = model(img)
         assert recon.shape == (B, 1, 128, 256)
         assert len(logits_list) == 4
         for lg in logits_list:

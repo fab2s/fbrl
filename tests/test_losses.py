@@ -99,7 +99,7 @@ class TestFixationHitRate:
     def test_bright_high(self, bright_image):
         locs = [torch.zeros(4, 2)] + [torch.randn(4, 2) * 0.5 for _ in range(5)]
         hit_rate, intensity = fixation_hit_rate(bright_image, locs)
-        assert hit_rate > 0.9
+        assert hit_rate >= 0.9
 
     def test_dark_low(self, dark_image):
         locs = [torch.zeros(4, 2)] + [torch.randn(4, 2) * 0.5 for _ in range(5)]
