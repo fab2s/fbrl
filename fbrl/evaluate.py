@@ -55,10 +55,15 @@ def _load_model(model_dir, device):
         scan_ps = ckpt.get('scan_patch_size', (12, 18))
         read_ps = ckpt.get('read_patch_size', 12)
         n_positions = ckpt.get('n_positions', 4)
+        read_anchor = ckpt.get('read_anchor_scan_indices', None)
+        if isinstance(read_anchor, list):
+            read_anchor = tuple(read_anchor)
+        n_rpg = ckpt.get('n_read_per_group', None)
         model = WordVisionModel(
             n_scan_glimpses=n_scan, n_read_glimpses=n_read,
             scan_patch_size=scan_ps, read_patch_size=read_ps,
             n_scales=n_scales, n_positions=n_positions,
+            read_anchor_scan_indices=read_anchor, n_read_per_group=n_rpg,
         ).to(device)
     elif model_type == 'bigram':
         # Two-phase checkpoint (has n_scan_glimpses)
@@ -1386,4 +1391,4 @@ def generate_bigram_atlas(model_dir, test_data_dir, output_path='data/bigram_atl
 
 
 # --- Word evaluation (imported from separate module to keep file manageable) ---
-from fbrl._word_eval import test_word_model, generate_word_atlas, test_word_isolation  # noqa: E402, F401
+from fbrl._word_eval import test_word_model, generate_word_atlas, test_word_isolation, generate_isolation_atlas  # noqa: E402, F401

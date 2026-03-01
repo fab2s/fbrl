@@ -160,6 +160,10 @@ word-atlas:
 	@rm -f data/word_atlas.html
 	$(RUN) word_atlas --model_dir data/word_models --test_data_dir data/word_test --output data/word_atlas.html --device $(DEVICE)
 
+isolation-atlas:
+	@rm -f data/isolation_atlas.html
+	$(RUN) isolation_atlas --model_dir data/word_models --test_data_dir data/test --output data/isolation_atlas.html --device $(DEVICE)
+
 archive-words:
 ifndef NAME
 	$(error Usage: make archive-words NAME=v1-word-prescribed)
@@ -170,6 +174,7 @@ endif
 	cp data/word_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
 	cp data/word_models/training.log runs/$(NAME)/ 2>/dev/null || true
 	cp data/word_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
+	cp data/isolation_atlas.html runs/$(NAME)/isolation_atlas.html 2>/dev/null || true
 	cp $(WORD_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
 	@echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')" > runs/$(NAME)/info.txt
 	@echo "date: $$(date -Iseconds)" >> runs/$(NAME)/info.txt
@@ -221,6 +226,6 @@ test-unit:
 .PHONY: build up down restart logs shell generate generate-test train resume test visualize atlas check-attention archive \
        generate-bigrams generate-bigrams-test train-bigrams resume-bigrams test-bigrams check-bigram-attention \
        bigram-atlas archive-bigrams \
-       generate-words generate-words-test train-words resume-words test-words test-word-isolation word-atlas archive-words \
+       generate-words generate-words-test train-words resume-words test-words test-word-isolation word-atlas isolation-atlas archive-words \
        generate-trajectories train-motor resume-motor test-motor motor-atlas archive-motor \
        test-unit

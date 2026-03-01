@@ -3,7 +3,7 @@ FROM python:3.10-slim AS deps
 WORKDIR /app
 
 RUN --mount=type=cache,target=/root/.cache/pip pip install torch==2.5.1
-RUN --mount=type=cache,target=/root/.cache/pip pip install numpy 'matplotlib<3.8' pillow fonttools pytest
+RUN --mount=type=cache,target=/root/.cache/pip pip install numpy 'matplotlib<3.8' pillow fonttools pyyaml pytest
 
 FROM deps
 

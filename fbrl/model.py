@@ -181,20 +181,27 @@ class EncodeResult:
     latent: torch.Tensor         # (B, D) from latent_head(h_final)
     scan_content_logits: list    # list of (B, 1), empty if no content_head
     actual_n_scan: int           # scan glimpses used (may differ if dynamic)
+    read_group_boundaries: list = None  # e.g. [0, 5, 10, 15] for 4 groups of 5
 
 
 def encode_scan_read(image, controller, scan_sensor, read_sensor,
                      n_scan, n_read,
                      content_head=None,
                      prescribed_x=False,
-                     dynamic_width=None):
+                     dynamic_width=None,
+                     scan_xs=None,
+                     read_group_anchors=None,
+                     n_read_per_group=None):
     """Two-phase GRU attention loop. Shared by all model types.
 
     Phase 1 — SCAN: n_scan glimpses with scan_sensor.
-      If prescribed_x: x = linspace(-0.75, 0.75, n_scan), y learned.
+      If scan_xs provided: x = tanh(scan_xs) (learnable parameter), y learned.
+      Elif prescribed_x: x = linspace(-0.75, 0.75, n_scan), y learned.
       If dynamic_width set: n_scan scaled by (width/256)^1.5.
     Phase 2 — READ: n_read glimpses with read_sensor, fully free x,y.
       h carries forward from scan.
+      If read_group_anchors set: read is grouped; each group resets location
+      to the scan position at the anchor index. h carries forward across groups.
 
     Args:
         image: (B, C, H, W) input image
@@ -202,10 +209,13 @@ def encode_scan_read(image, controller, scan_sensor, read_sensor,
         scan_sensor: GlimpseSensor for scan phase (or same as read_sensor)
         read_sensor: GlimpseSensor for read phase
         n_scan: base number of scan glimpses (0 = read-only)
-        n_read: number of read glimpses
+        n_read: number of read glimpses (ignored when read_group_anchors set)
         content_head: nn.Linear(D, 1) or None — content detection on scan states
         prescribed_x: if True, scan x positions are prescribed linspace
         dynamic_width: if set (int), scale n_scan by (width/256)^1.5
+        scan_xs: Tensor or nn.Parameter of raw scan x positions (tanh applied)
+        read_group_anchors: list of scan step indices for group anchoring
+        n_read_per_group: glimpses per group (required when read_group_anchors set)
     """
     B = image.shape[0]
     h = controller.h0.expand(B, -1).contiguous()
@@ -219,29 +229,51 @@ def encode_scan_read(image, controller, scan_sensor, read_sensor,
         actual_n_scan = max(1, round(n_scan * (dynamic_width / 256) ** 1.5))
 
     # Phase 1: SCAN
+    scan_locs_by_step = {}
     if actual_n_scan > 0:
-        if prescribed_x:
-            scan_xs = torch.linspace(-0.75, 0.75, actual_n_scan, device=image.device)
+        if scan_xs is not None:
+            effective_scan_xs = torch.tanh(scan_xs)
+        elif prescribed_x:
+            effective_scan_xs = torch.linspace(-0.75, 0.75, actual_n_scan, device=image.device)
+        else:
+            effective_scan_xs = None
         for t in range(actual_n_scan):
             glimpse = scan_sensor(image, location)
             h = controller.gru(glimpse, h)
             raw_loc = torch.tanh(controller.location_head(h))
-            if prescribed_x:
-                location = torch.stack([scan_xs[t].expand(B), raw_loc[:, 1]], dim=1)
+            if effective_scan_xs is not None:
+                location = torch.stack([effective_scan_xs[t].expand(B), raw_loc[:, 1]], dim=1)
             else:
                 location = raw_loc
             locations.append(location)
+            scan_locs_by_step[t] = location
             if content_head is not None:
                 scan_content_logits.append(content_head(h))
 
     # Phase 2: READ
     read_states = []
-    for t in range(n_read):
-        glimpse = read_sensor(image, location)
-        h = controller.gru(glimpse, h)
-        location = torch.tanh(controller.location_head(h))
-        locations.append(location)
-        read_states.append(h)
+    read_group_boundaries = None
+
+    if read_group_anchors is not None and n_read_per_group is not None:
+        # Grouped read: each group resets location to its scan anchor
+        read_group_boundaries = []
+        for anchor_idx in read_group_anchors:
+            read_group_boundaries.append(len(read_states))
+            location = scan_locs_by_step[anchor_idx]
+            for _g in range(n_read_per_group):
+                glimpse = read_sensor(image, location)
+                h = controller.gru(glimpse, h)
+                location = torch.tanh(controller.location_head(h))
+                locations.append(location)
+                read_states.append(h)
+    else:
+        # Flat read (backward compat)
+        for t in range(n_read):
+            glimpse = read_sensor(image, location)
+            h = controller.gru(glimpse, h)
+            location = torch.tanh(controller.location_head(h))
+            locations.append(location)
+            read_states.append(h)
 
     read_states_t = torch.stack(read_states, dim=1) if read_states else None
     latent = controller.latent_head(h)
@@ -252,6 +284,7 @@ def encode_scan_read(image, controller, scan_sensor, read_sensor,
         latent=latent,
         scan_content_logits=scan_content_logits,
         actual_n_scan=actual_n_scan,
+        read_group_boundaries=read_group_boundaries,
     )
 
 
@@ -495,15 +528,19 @@ class CrossAttentionReadout(nn.Module):
         self.value_proj = nn.Linear(latent_dim, latent_dim)
         self.out_proj = nn.Linear(latent_dim, latent_dim)
 
-    def forward(self, glimpse_states):
+    def forward(self, glimpse_states, group_boundaries=None):
         """Cross-attend position tokens over glimpse history.
 
         Args:
             glimpse_states: (B, T, latent_dim) hidden states from all visual glimpses
+            group_boundaries: list of start indices for per-group attention.
+                When provided, query token i attends only to its group's states.
+                When None: global attention over all states (original behavior).
         Returns:
             readout_states: (B, n_positions, latent_dim) per-position outputs
         """
-        B = glimpse_states.shape[0]
+        B, T, D = glimpse_states.shape
+        n_pos = self.query_tokens.shape[0]
 
         Q = self.query_proj(
             self.query_tokens.unsqueeze(0).expand(B, -1, -1)
@@ -513,6 +550,15 @@ class CrossAttentionReadout(nn.Module):
 
         # Scaled dot-product attention
         attn = torch.bmm(Q, K.transpose(1, 2)) * self.scale  # (B, n_pos, T)
+
+        if group_boundaries is not None:
+            # Per-group masking: query i only attends to its group's keys
+            mask = torch.full((n_pos, T), float('-inf'), device=glimpse_states.device)
+            for i, start in enumerate(group_boundaries):
+                end = group_boundaries[i + 1] if i + 1 < len(group_boundaries) else T
+                mask[i, start:end] = 0.0
+            attn = attn + mask.unsqueeze(0)  # broadcast over batch
+
         attn = F.softmax(attn, dim=-1)
 
         out = torch.bmm(attn, V)      # (B, n_positions, D)
@@ -620,12 +666,15 @@ class WordVisionModel(nn.Module):
     def __init__(self, n_classes=26, latent_dim=256,
                  n_scan_glimpses=8, n_read_glimpses=12,
                  scan_patch_size=(12, 18), read_patch_size=12,
-                 n_scales=1, n_positions=4):
+                 n_scales=1, n_positions=4,
+                 read_anchor_scan_indices=None, n_read_per_group=None):
         super().__init__()
         self.n_positions = n_positions
         self.latent_dim = latent_dim
         self.n_scan_glimpses = n_scan_glimpses
         self.n_read_glimpses = n_read_glimpses
+        self.read_anchor_scan_indices = read_anchor_scan_indices
+        self.n_read_per_group = n_read_per_group
 
         # Two sensors: wide scan, focused read
         self.scan_sensor = GlimpseSensor(
@@ -642,6 +691,19 @@ class WordVisionModel(nn.Module):
 
         # Content detection head: predicts whether scan location has letter content
         self.content_head = nn.Linear(latent_dim, 1)
+
+        # Learnable scan x positions (when grouped read is enabled)
+        if read_anchor_scan_indices is not None:
+            # Init: boundary scans at ±0.99 (atanh safe), inner at letter centers
+            letter_centers = torch.linspace(-0.75, 0.75, n_positions)
+            init_xs = torch.cat([
+                torch.tensor([-0.99]),
+                letter_centers,
+                torch.tensor([0.99]),
+            ])
+            self.scan_xs = nn.Parameter(torch.atanh(init_xs))
+        else:
+            self.scan_xs = None
 
         self.decoder = VisualDecoder(
             input_dim=latent_dim * n_positions, output_shape=(128, 256),
@@ -673,18 +735,23 @@ class WordVisionModel(nn.Module):
             locations: list of (B, 2) fixation coords (all phases)
             readout_states: (B, n_positions, latent_dim)
             scan_content_logits: list of (B, 1) content predictions per scan step
+            read_group_boundaries: list of int or None
         """
         B = img.shape[0]
         enc = encode_scan_read(
             img, self.controller, self.scan_sensor, self.read_sensor,
             n_scan=self.n_scan_glimpses, n_read=self.n_read_glimpses,
             content_head=self.content_head, prescribed_x=True,
-            dynamic_width=img.shape[3],
+            dynamic_width=img.shape[3] if self.scan_xs is None else None,
+            scan_xs=self.scan_xs,
+            read_group_anchors=list(self.read_anchor_scan_indices) if self.read_anchor_scan_indices else None,
+            n_read_per_group=self.n_read_per_group,
         )
 
-        readout_states = self.readout(enc.read_states)
+        readout_states = self.readout(enc.read_states,
+                                       group_boundaries=enc.read_group_boundaries)
         logits_list = [self.classifiers[i](readout_states[:, i])
                        for i in range(self.n_positions)]
         recon = self.decoder(readout_states.view(B, -1))
 
-        return recon, logits_list, enc.locations, readout_states, enc.scan_content_logits
+        return recon, logits_list, enc.locations, readout_states, enc.scan_content_logits, enc.read_group_boundaries

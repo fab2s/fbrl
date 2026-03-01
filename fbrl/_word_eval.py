@@ -48,7 +48,7 @@ def test_word_model(model_dir, test_data_dir, output_dir='word_results', device=
         idx = [ord(l) - ord('a') for l in letters[:n_positions]]
 
         with torch.no_grad():
-            recon, logits_list, locations, _, _ = model(img)
+            recon, logits_list, locations, _, _, _ = model(img)
 
         preds = [logits_list[p].argmax(dim=1).item() for p in range(n_positions)]
         oks = [preds[p] == idx[p] for p in range(n_positions)]
@@ -545,7 +545,7 @@ def generate_word_atlas(model_dir, test_data_dir, output_path='data/word_atlas.h
         idx = [ord(l) - ord('a') for l in letters[:n_positions]]
 
         with torch.no_grad():
-            recon, logits_list, locations, _, _ = model(img_dev)
+            recon, logits_list, locations, _, _, _ = model(img_dev)
 
         # Collect fixation coordinates
         fixations = []
@@ -660,7 +660,7 @@ def test_word_isolation(model_dir, test_data_dir, output_dir='word_results', dev
         letter_idx = ord(letter) - ord('a')
 
         with torch.no_grad():
-            _, logits_list, locations, _, _ = model(tensor)
+            _, logits_list, locations, _, _, _ = model(tensor)
 
         preds = [logits_list[p].argmax(dim=1).item() for p in range(n_positions)]
         oks = [preds[p] == letter_idx for p in range(n_positions)]
@@ -743,3 +743,457 @@ def test_word_isolation(model_dir, test_data_dir, output_dir='word_results', dev
                 f.write(f"  {letter} [{font}]: predicted {preds_str}\n")
 
     print(f"\nSummary written to {summary_path}")
+
+
+def _isolation_atlas_html_template():
+    """Return self-contained HTML/CSS/JS template for the word isolation atlas.
+
+    Adapted from word atlas with:
+    - 1:1 aspect ratio cells (128x128 images)
+    - Detail cells: 180x180
+    - Grid items: single letters instead of words
+    - Correctness: green=all 4, yellow=some, red=none
+    """
+    return r'''<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Word Isolation Atlas</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; }
+#controls {
+  position: sticky; top: 0; z-index: 10; background: #16213e;
+  padding: 10px 20px; display: flex; gap: 20px; align-items: center;
+  border-bottom: 1px solid #0f3460; flex-wrap: wrap;
+}
+#controls label { font-size: 13px; color: #a0a0c0; }
+#controls button {
+  background: #0f3460; color: #e0e0e0; border: 1px solid #1a1a4e;
+  padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;
+}
+#controls button.active { background: #e94560; border-color: #e94560; }
+#controls input[type=range] { width: 120px; vertical-align: middle; }
+#grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 4px; padding: 12px; max-width: 1800px; margin: 0 auto;
+}
+.cell {
+  position: relative; cursor: pointer; border: 2px solid transparent;
+  border-radius: 4px; overflow: hidden; transition: transform 0.15s;
+  aspect-ratio: 1;
+}
+.cell:hover { transform: scale(1.3); z-index: 5; }
+.cell.correct { border-color: #2ecc71; }
+.cell.partial { border-color: #f39c12; }
+.cell.wrong { border-color: #e74c3c; }
+.cell.selected { border-color: #3498db; box-shadow: 0 0 8px #3498db; }
+.cell canvas { width: 100%; height: 100%; display: block; }
+.cell-label {
+  position: absolute; bottom: 1px; right: 3px; font-size: 10px;
+  color: #fff; text-shadow: 0 0 3px #000; pointer-events: none;
+}
+#detail-panel {
+  background: #16213e; border-top: 2px solid #0f3460;
+  padding: 16px; display: none; max-width: 1800px; margin: 0 auto;
+}
+#detail-title { font-size: 18px; margin-bottom: 12px; color: #e94560; }
+#detail-grid {
+  display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
+}
+.detail-cell {
+  text-align: center; border: 2px solid transparent; border-radius: 4px;
+  padding: 4px; background: #1a1a2e;
+}
+.detail-cell.correct { border-color: #2ecc71; }
+.detail-cell.partial { border-color: #f39c12; }
+.detail-cell.wrong { border-color: #e74c3c; }
+.detail-cell canvas { width: 180px; height: 180px; display: block; }
+.detail-cell .font-name { font-size: 11px; color: #a0a0c0; margin-top: 2px; }
+.detail-cell .pred-info { font-size: 10px; color: #888; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <span style="font-weight:bold;color:#e94560;">Word Isolation Atlas</span>
+  <div>
+    <label>View:</label>
+    <button id="btn-heatmap" class="active" onclick="setView('heatmap')">Heatmap</button>
+    <button id="btn-path" onclick="setView('path')">Path</button>
+  </div>
+  <div>
+    <label>Opacity:</label>
+    <input type="range" id="opacity-slider" min="0" max="100" value="60"
+           oninput="setOpacity(this.value)">
+    <span id="opacity-val">60%</span>
+  </div>
+  <div style="margin-left:auto;font-size:12px;color:#666;">
+    <span id="stats"></span>
+  </div>
+</div>
+<div id="grid"></div>
+<div id="detail-panel">
+  <div id="detail-title"></div>
+  <div id="detail-grid"></div>
+</div>
+
+<script>
+const DATA = ATLAS_JSON_PLACEHOLDER;
+const W = DATA.image_width;
+const H = DATA.image_height;
+const NP = DATA.n_positions;
+let viewMode = 'heatmap';
+let opacity = 0.6;
+let selectedIdx = -1;
+
+function hotColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  let r, g, b;
+  if (t < 0.33) { r = t / 0.33; g = 0; b = 0; }
+  else if (t < 0.66) { r = 1; g = (t - 0.33) / 0.33; b = 0; }
+  else { r = 1; g = 1; b = (t - 0.66) / 0.34; }
+  return [r * 255 | 0, g * 255 | 0, b * 255 | 0];
+}
+
+function renderHeatmap(fixations, width, height) {
+  const sigma = Math.min(width, height) * 0.06;
+  const sigma2 = 2 * sigma * sigma;
+  const field = new Float32Array(width * height);
+  let maxVal = 0;
+
+  for (const [fx, fy] of fixations) {
+    const cx = (fx + 1) / 2 * width;
+    const cy = (fy + 1) / 2 * height;
+    const r = Math.ceil(sigma * 3);
+    const x0 = Math.max(0, cx - r | 0), x1 = Math.min(width - 1, cx + r | 0);
+    const y0 = Math.max(0, cy - r | 0), y1 = Math.min(height - 1, cy + r | 0);
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x - cx, dy = y - cy;
+        const v = Math.exp(-(dx * dx + dy * dy) / sigma2);
+        const idx = y * width + x;
+        field[idx] += v;
+        if (field[idx] > maxVal) maxVal = field[idx];
+      }
+    }
+  }
+
+  if (maxVal === 0) maxVal = 1;
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < width * height; i++) {
+    const t = field[i] / maxVal;
+    const [r, g, b] = hotColor(t);
+    data[i * 4] = r; data[i * 4 + 1] = g; data[i * 4 + 2] = b;
+    data[i * 4 + 3] = t > 0.01 ? (t * opacity * 255) | 0 : 0;
+  }
+  return new ImageData(data, width, height);
+}
+
+function renderPath(ctx, fixations, width, height) {
+  const n = fixations.length;
+  for (let i = 0; i < n; i++) {
+    const [fx, fy] = fixations[i];
+    const cx = (fx + 1) / 2 * width;
+    const cy = (fy + 1) / 2 * height;
+    const t = i / Math.max(1, n - 1);
+    const [r, g, b] = hotColor(0.2 + t * 0.7);
+    const color = `rgb(${r},${g},${b})`;
+
+    if (i > 0) {
+      const [px, py] = fixations[i - 1];
+      const pcx = (px + 1) / 2 * width;
+      const pcy = (py + 1) / 2 * height;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(pcx, pcy); ctx.lineTo(cx, cy); ctx.stroke();
+      const angle = Math.atan2(cy - pcy, cx - pcx);
+      const hl = 5;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx - hl * Math.cos(angle - 0.4), cy - hl * Math.sin(angle - 0.4));
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx - hl * Math.cos(angle + 0.4), cy - hl * Math.sin(angle + 0.4));
+      ctx.stroke();
+    }
+
+    ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+    ctx.fillStyle = color; ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 0.5; ctx.stroke();
+
+    ctx.fillStyle = '#fff'; ctx.font = '7px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(i.toString(), cx, cy);
+  }
+}
+
+function drawCell(canvas, b64, fixations, width, height) {
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  const img = new window.Image();
+  img.onload = function() {
+    ctx.drawImage(img, 0, 0, width, height);
+
+    if (viewMode === 'heatmap') {
+      const hm = renderHeatmap(fixations, width, height);
+      const tmp = document.createElement('canvas');
+      tmp.width = width; tmp.height = height;
+      tmp.getContext('2d').putImageData(hm, 0, 0);
+      ctx.drawImage(tmp, 0, 0);
+    } else {
+      renderPath(ctx, fixations, width, height);
+    }
+  };
+  img.src = 'data:image/png;base64,' + b64;
+}
+
+function aggregateFixations(entry) {
+  const all = [];
+  for (const fname of DATA.font_names) {
+    const fd = entry.fonts[fname];
+    if (fd) all.push(...fd.fixations);
+  }
+  return all;
+}
+
+function representativeImage(entry) {
+  for (const fname of DATA.font_names) {
+    const fd = entry.fonts[fname];
+    if (fd) return fd.clean_b64;
+  }
+  return '';
+}
+
+function correctnessClass(entry) {
+  let allOk = 0, total = 0;
+  for (const fname of DATA.font_names) {
+    const fd = entry.fonts[fname];
+    if (!fd) continue;
+    total++;
+    let ok = true;
+    for (let p = 0; p < NP; p++) { if (!fd['ok' + (p+1)]) ok = false; }
+    if (ok) allOk++;
+  }
+  if (allOk === total) return 'correct';
+  if (allOk === 0) return 'wrong';
+  return 'partial';
+}
+
+function fontCorrectness(fd) {
+  let nOk = 0;
+  for (let p = 0; p < NP; p++) { if (fd['ok' + (p+1)]) nOk++; }
+  if (nOk === NP) return 'correct';
+  if (nOk === 0) return 'wrong';
+  return 'partial';
+}
+
+function buildGrid() {
+  const grid = document.getElementById('grid');
+  grid.innerHTML = '';
+  let totalAll = 0, totalSamples = 0;
+
+  DATA.letters.forEach((entry, idx) => {
+    const cell = document.createElement('div');
+    cell.className = 'cell ' + correctnessClass(entry);
+    if (idx === selectedIdx) cell.classList.add('selected');
+
+    const canvas = document.createElement('canvas');
+    const fixations = aggregateFixations(entry);
+    const b64 = representativeImage(entry);
+    drawCell(canvas, b64, fixations, W, H);
+    cell.appendChild(canvas);
+
+    const label = document.createElement('span');
+    label.className = 'cell-label';
+    label.textContent = entry.letter;
+    cell.appendChild(label);
+
+    cell.onclick = () => { selectedIdx = idx; buildGrid(); showDetail(entry); };
+    grid.appendChild(cell);
+
+    for (const fname of DATA.font_names) {
+      const fd = entry.fonts[fname];
+      if (fd) {
+        totalSamples++;
+        let ok = true;
+        for (let p = 0; p < NP; p++) { if (!fd['ok' + (p+1)]) ok = false; }
+        if (ok) totalAll++;
+      }
+    }
+  });
+
+  document.getElementById('stats').textContent =
+    `${totalAll}/${totalSamples} all-correct (${(totalAll/totalSamples*100).toFixed(1)}%)`;
+}
+
+function showDetail(entry) {
+  const panel = document.getElementById('detail-panel');
+  const title = document.getElementById('detail-title');
+  const grid = document.getElementById('detail-grid');
+
+  title.textContent = `"${entry.letter}" \u2014 per-font attention (${DATA.font_names.length} fonts)`;
+  grid.innerHTML = '';
+  panel.style.display = 'block';
+
+  for (const fname of DATA.font_names) {
+    const fd = entry.fonts[fname];
+    if (!fd) continue;
+
+    const cell = document.createElement('div');
+    cell.className = 'detail-cell ' + fontCorrectness(fd);
+
+    const canvas = document.createElement('canvas');
+    drawCell(canvas, fd.clean_b64, fd.fixations, 180, 180);
+    cell.appendChild(canvas);
+
+    const fnLabel = document.createElement('div');
+    fnLabel.className = 'font-name';
+    fnLabel.textContent = fname;
+    cell.appendChild(fnLabel);
+
+    const pred = document.createElement('div');
+    pred.className = 'pred-info';
+    let allOk = true;
+    for (let p = 0; p < NP; p++) { if (!fd['ok' + (p+1)]) allOk = false; }
+    if (allOk) {
+      pred.textContent = 'OK';
+    } else {
+      let parts = [];
+      for (let p = 0; p < NP; p++) {
+        parts.push('P' + (p+1) + ':' + (fd['ok' + (p+1)] ? 'OK' : fd['pred' + (p+1)]));
+      }
+      pred.textContent = parts.join(' ');
+    }
+    cell.appendChild(pred);
+
+    grid.appendChild(cell);
+  }
+
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function setView(mode) {
+  viewMode = mode;
+  document.getElementById('btn-heatmap').className = mode === 'heatmap' ? 'active' : '';
+  document.getElementById('btn-path').className = mode === 'path' ? 'active' : '';
+  buildGrid();
+  if (selectedIdx >= 0) showDetail(DATA.letters[selectedIdx]);
+}
+
+function setOpacity(val) {
+  opacity = val / 100;
+  document.getElementById('opacity-val').textContent = val + '%';
+  buildGrid();
+  if (selectedIdx >= 0) showDetail(DATA.letters[selectedIdx]);
+}
+
+buildGrid();
+</script>
+</body>
+</html>'''
+
+
+def generate_isolation_atlas(model_dir, test_data_dir,
+                             output_path='data/isolation_atlas.html',
+                             device='auto'):
+    """Generate an interactive HTML attention atlas for word model isolation test.
+
+    Runs single 128x128 lowercase letter images through the WordVisionModel and
+    shows fixation heatmaps/paths with per-position classification results.
+    """
+    device = _resolve_device(device)
+    print(f"Generating isolation atlas on: {device}")
+
+    model, n_glimpses, model_type = _load_model(model_dir, device)
+    if model_type != 'word':
+        print(f"Warning: checkpoint model_type is '{model_type}', expected 'word'")
+
+    n_positions = model.n_positions
+
+    # Discover lowercase test images (same logic as test_word_isolation)
+    test_files = []
+    for fname in sorted(os.listdir(test_data_dir)):
+        if not fname.startswith('img_') or not fname.endswith('.png'):
+            continue
+        parts = fname[4:-4].split('_', 1)
+        if len(parts) != 2:
+            continue
+        letter, font = parts
+        if len(letter) != 1 or not letter.islower():
+            continue
+        test_files.append((letter, font, os.path.join(test_data_dir, fname)))
+
+    if not test_files:
+        print(f"No lowercase test images found in {test_data_dir}")
+        return
+
+    font_names = sorted(set(f for _, f, _ in test_files))
+    entries = {}  # letter -> {letter, fonts: {font -> {...}}}
+
+    for letter, font, img_path in test_files:
+        img = Image.open(img_path).convert('L')
+        tensor = torch.tensor(np.array(img) / 255.0, dtype=torch.float32)
+        tensor = tensor.unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, 128, 128)
+
+        letter_idx = ord(letter) - ord('a')
+
+        with torch.no_grad():
+            _, logits_list, locations, _, _, _ = model(tensor)
+
+        fixations = []
+        for loc in locations:
+            loc_np = loc[0].cpu().detach().tolist()
+            fixations.append([round(loc_np[0], 4), round(loc_np[1], 4)])
+
+        preds = [logits_list[p].argmax(dim=1).item() for p in range(n_positions)]
+        oks = [preds[p] == letter_idx for p in range(n_positions)]
+        pred_chars = [chr(preds[p] + ord('a')) for p in range(n_positions)]
+
+        if letter not in entries:
+            entries[letter] = {'letter': letter, 'fonts': {}}
+
+        # Clean image for display (use the raw grayscale tensor)
+        clean_tensor = tensor.squeeze(0)  # (1, 128, 128)
+        font_data = {
+            'fixations': fixations,
+            'clean_b64': _tensor_to_base64_png(clean_tensor),
+        }
+        for p in range(n_positions):
+            font_data[f'pred{p+1}'] = pred_chars[p]
+            font_data[f'ok{p+1}'] = oks[p]
+
+        entries[letter]['fonts'][font] = font_data
+
+        ok_all = all(oks)
+        mark = 'OK' if ok_all else ' '.join(
+            f'P{p+1}={pred_chars[p]}' if not oks[p] else f'P{p+1}=OK'
+            for p in range(n_positions)
+        )
+        print(f"  {letter} [{font}]: {mark}")
+
+    # Build ordered list (alphabetical)
+    letters_list = [entries[k] for k in sorted(entries.keys())]
+
+    atlas_data = {
+        'image_width': 128,
+        'image_height': 128,
+        'n_fixations': n_glimpses + 1,
+        'n_positions': n_positions,
+        'font_names': font_names,
+        'letters': letters_list,
+    }
+
+    atlas_json = json.dumps(atlas_data)
+    html = _isolation_atlas_html_template().replace('ATLAS_JSON_PLACEHOLDER', atlas_json)
+
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    with open(output_path, 'w') as f:
+        f.write(html)
+
+    total = sum(len(e['fonts']) for e in letters_list)
+    all_ok = sum(1 for e in letters_list for fd in e['fonts'].values()
+                 if all(fd.get(f'ok{p+1}', False) for p in range(n_positions)))
+    size_kb = os.path.getsize(output_path) / 1024
+    print(f"\nAtlas: {len(letters_list)} letters x {len(font_names)} fonts = {total} samples")
+    print(f"All-correct: {all_ok}/{total} ({all_ok/total*100:.1f}%)")
+    print(f"Written to {output_path} ({size_kb:.0f} KB)")

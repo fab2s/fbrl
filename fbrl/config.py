@@ -55,6 +55,10 @@ class ExperimentConfig:
     isolation_data_dir: Optional[str] = None
     isolation_random_prob: float = 0.0
 
+    # Grouped read (word only)
+    read_anchor_scan_indices: Optional[tuple] = None  # e.g. (1,2,3,4)
+    n_read_per_group: Optional[int] = None            # glimpses per group
+
     # Motor trace
     motor_enabled: bool = False
     n_trajectory_points: int = 32
@@ -84,9 +88,11 @@ def load_config(yaml_path, cli_overrides=None):
     with open(yaml_path) as f:
         data = yaml.safe_load(f) or {}
 
-    # Convert scan_patch_size list -> tuple
+    # Convert list -> tuple for tuple fields
     if 'scan_patch_size' in data and isinstance(data['scan_patch_size'], list):
         data['scan_patch_size'] = tuple(data['scan_patch_size'])
+    if 'read_anchor_scan_indices' in data and isinstance(data['read_anchor_scan_indices'], list):
+        data['read_anchor_scan_indices'] = tuple(data['read_anchor_scan_indices'])
 
     # Apply CLI overrides
     if cli_overrides:
@@ -94,9 +100,11 @@ def load_config(yaml_path, cli_overrides=None):
             if v is not None:
                 data[k] = v
 
-    # Convert scan_patch_size from override too
+    # Convert from override too
     if 'scan_patch_size' in data and isinstance(data['scan_patch_size'], list):
         data['scan_patch_size'] = tuple(data['scan_patch_size'])
+    if 'read_anchor_scan_indices' in data and isinstance(data['read_anchor_scan_indices'], list):
+        data['read_anchor_scan_indices'] = tuple(data['read_anchor_scan_indices'])
 
     # Filter to valid fields only
     valid = {f.name for f in fields(ExperimentConfig)}
@@ -118,9 +126,11 @@ def load_config(yaml_path, cli_overrides=None):
 def config_to_dict(cfg):
     """Serialize config for checkpoint storage."""
     d = asdict(cfg)
-    # Ensure scan_patch_size is a list for YAML/JSON compat
+    # Ensure tuples are lists for YAML/JSON compat
     if isinstance(d.get('scan_patch_size'), tuple):
         d['scan_patch_size'] = list(d['scan_patch_size'])
+    if isinstance(d.get('read_anchor_scan_indices'), tuple):
+        d['read_anchor_scan_indices'] = list(d['read_anchor_scan_indices'])
     return d
 
 
@@ -128,6 +138,8 @@ def config_from_dict(d):
     """Restore config from checkpoint dict."""
     if 'scan_patch_size' in d and isinstance(d['scan_patch_size'], list):
         d['scan_patch_size'] = tuple(d['scan_patch_size'])
+    if 'read_anchor_scan_indices' in d and isinstance(d['read_anchor_scan_indices'], list):
+        d['read_anchor_scan_indices'] = tuple(d['read_anchor_scan_indices'])
     valid = {f.name for f in fields(ExperimentConfig)}
     filtered = {k: v for k, v in d.items() if k in valid}
     return ExperimentConfig(**filtered)

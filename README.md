@@ -350,5 +350,6 @@ The research goal is to scale foveal attention from character recognition toward
 ## Reference
 
 - [Research Hypotheses](thoughts/hypotheses.md) — Core intuitions, testable predictions, and the multimodal roadmap
+- [Word Read Phase](thoughts/word_read_phase.md) — Why free read fixations degenerate and how scan-anchored groups fix it
 - [Glossary](docs/glossary.md) — Deep learning terms, acronyms, and concepts as they appear in this project
 - [Usage Reference](docs/usage.md) — Full CLI reference, training output format, Makefile documentation

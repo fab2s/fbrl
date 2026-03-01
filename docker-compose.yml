@@ -7,6 +7,8 @@ services:
       - ./runs:/app/runs
       - ./vision_training.py:/app/vision_training.py
       - ./fbrl:/app/fbrl
+      - ./tests:/app/tests
+      - ./pytest.ini:/app/pytest.ini
     deploy:
       resources:
         reservations:

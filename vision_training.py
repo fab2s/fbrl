@@ -6,7 +6,7 @@ from fbrl.train import (train_model, check_attention, train_bigram_model,
                          check_bigram_attention, train_word_model, train_motor_model)
 from fbrl.evaluate import (test_model, visualize_model, generate_atlas, test_bigram_model,
                            generate_bigram_atlas, test_word_model, generate_word_atlas,
-                           test_word_isolation)
+                           test_word_isolation, generate_isolation_atlas)
 from fbrl._motor_eval import test_motor_model, generate_motor_atlas
 from fbrl.config import load_config
 
@@ -69,6 +69,9 @@ def _add_train_overrides(parser):
     parser.add_argument('--isolation_random_prob', type=float, default=None)
     parser.add_argument('--multi_head', action='store_true', default=None)
     parser.add_argument('--amp', action='store_true', default=None)
+    # Grouped read
+    parser.add_argument('--read_anchor_scan_indices', type=int, nargs='+', default=None)
+    parser.add_argument('--n_read_per_group', type=int, default=None)
 
 
 def _build_overrides(args):
@@ -81,6 +84,8 @@ def _build_overrides(args):
         if v is not None:
             if k == 'scan_patch_size':
                 v = _parse_patch_size(v)
+            elif k == 'read_anchor_scan_indices' and isinstance(v, list):
+                v = tuple(v)
             overrides[k] = v
     return overrides
 
@@ -230,6 +235,13 @@ if __name__ == '__main__':
     w_atlas_parser.add_argument('--device', default='auto',
                                 choices=['auto', 'cpu', 'cuda'])
 
+    iso_atlas_parser = subparsers.add_parser('isolation_atlas')
+    iso_atlas_parser.add_argument('--model_dir', required=True)
+    iso_atlas_parser.add_argument('--test_data_dir', required=True)
+    iso_atlas_parser.add_argument('--output', default='data/isolation_atlas.html')
+    iso_atlas_parser.add_argument('--device', default='auto',
+                                   choices=['auto', 'cpu', 'cuda'])
+
     # --- Motor subcommands ---
     gen_traj_parser = subparsers.add_parser('generate_trajectories')
     gen_traj_parser.add_argument('--output_dir', default='data/trajectories')
@@ -363,6 +375,10 @@ if __name__ == '__main__':
     elif args.command == 'word_atlas':
         generate_word_atlas(args.model_dir, args.test_data_dir, args.output,
                              device=args.device)
+
+    elif args.command == 'isolation_atlas':
+        generate_isolation_atlas(args.model_dir, args.test_data_dir, args.output,
+                                  device=args.device)
 
     # --- Motor commands ---
     elif args.command == 'generate_trajectories':

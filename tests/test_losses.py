@@ -63,13 +63,14 @@ class TestFixationDiversityLoss:
         assert loss_close.item() > loss_far.item()
 
     def test_vy_scaling(self):
-        """Higher vy should increase penalty for vertically close fixations."""
+        """Higher vy amplifies vertical distances, reducing repulsion for vertically-separated points."""
         locs = [torch.zeros(4, 2)]
         locs += [torch.tensor([[0.0, 0.05]]).expand(4, -1),
                  torch.tensor([[0.0, -0.05]]).expand(4, -1)]
         loss_vy1 = fixation_diversity_loss(locs, vy=1.0)
         loss_vy3 = fixation_diversity_loss(locs, vy=3.0)
-        assert loss_vy3.item() > loss_vy1.item()
+        # vy > 1 scales vertical diff, making points appear further apart -> less repulsion
+        assert loss_vy3.item() < loss_vy1.item()
 
     def test_single_fixation_zero(self):
         """Single fixation -> no pairs -> diversity = 0."""

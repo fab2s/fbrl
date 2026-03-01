@@ -248,7 +248,8 @@ def fixation_hit_rate(image, locations, threshold=0.3):
 # --- Word Attention Loss (scan + read with N-position scaffold) ---
 
 def word_attention_loss(image, locations, n_scan, n_positions=4,
-                         blur_sigma_ratio=0.16, scaffold_weight=1.0):
+                         blur_sigma_ratio=0.16, scaffold_weight=1.0,
+                         read_group_boundaries=None):
     """Separate attention guides for scan and read phases of word reading.
 
     Scan phase (locations[1:n_scan+1]): full-image guide — pulls y onto strokes.
@@ -256,6 +257,9 @@ def word_attention_loss(image, locations, n_scan, n_positions=4,
     Read phase (locations[n_scan+1:]): divide into n_positions equal temporal
       segments. Segment k gets guide from horizontal stripe
       [k*W/n_positions, (k+1)*W/n_positions] of the image.
+
+    When read_group_boundaries is provided, group assignment is structural
+    (from boundaries list) rather than temporal (t * n_positions // n_read).
 
     Generalizes two_phase_attention_loss from halves (bigram) to quarters (word)
     or any n_positions.
@@ -304,14 +308,25 @@ def word_attention_loss(image, locations, n_scan, n_positions=4,
                 stripe_img[:, :, :, (p + 1) * stripe_w:] = 0
             stripe_guides.append(_blur(stripe_img))
 
-    # Divide read glimpses into n_positions equal temporal segments
-    # Segment k: read glimpses [k*n_read//n_positions, (k+1)*n_read//n_positions)
+    # Divide read glimpses into n_positions segments.
+    # When read_group_boundaries provided: structural assignment from boundaries.
+    # Otherwise: equal temporal segments (t * n_positions // n_read).
+    if read_group_boundaries is not None:
+        # Build per-timestep group mapping from boundaries
+        _seg_map = {}
+        for gi, start in enumerate(read_group_boundaries):
+            end = read_group_boundaries[gi + 1] if gi + 1 < len(read_group_boundaries) else n_read
+            for tt in range(start, end):
+                _seg_map[tt] = gi
+
     read_total = 0
     for t, loc in enumerate(read_locs):
         grid = loc.view(B, 1, 1, 2)
         if scaffold_weight > 0:
-            # Determine which position segment this timestep belongs to
-            seg = min(t * n_positions // n_read, n_positions - 1)
+            if read_group_boundaries is not None:
+                seg = _seg_map.get(t, n_positions - 1)
+            else:
+                seg = min(t * n_positions // n_read, n_positions - 1)
             guide = scaffold_weight * stripe_guides[seg] + (1 - scaffold_weight) * guide_full
         else:
             guide = guide_full
