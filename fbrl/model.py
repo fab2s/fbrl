@@ -351,9 +351,12 @@ class VisionModel(nn.Module):
     """
     def __init__(self, n_classes=26, latent_dim=256, n_glimpses=10,
                  patch_size=12, n_scales=1,
-                 n_scan_glimpses=0, scan_patch_size=(12, 18)):
+                 n_scan_glimpses=0, scan_patch_size=(12, 18),
+                 read_anchor_scan_indices=None, n_read_per_group=None):
         super().__init__()
         self.n_scan_glimpses = n_scan_glimpses
+        self.read_anchor_scan_indices = read_anchor_scan_indices
+        self.n_read_per_group = n_read_per_group
         self.encoder = VisualAttentionEncoder(
             n_glimpses=n_glimpses, patch_size=patch_size,
             n_scales=n_scales, latent_dim=latent_dim,
@@ -370,6 +373,13 @@ class VisionModel(nn.Module):
             )
             self.content_head = nn.Linear(latent_dim, 1)
 
+        # Learnable scan x positions (when anchored read enabled)
+        if read_anchor_scan_indices is not None and n_scan_glimpses > 0:
+            init_xs = torch.linspace(-0.75, 0.75, n_scan_glimpses)
+            self.scan_xs = nn.Parameter(torch.atanh(init_xs))
+        else:
+            self.scan_xs = None
+
     def _encode(self, img):
         """Run encode loop — shared scan/read or legacy encoder."""
         if self.n_scan_glimpses > 0:
@@ -379,7 +389,10 @@ class VisionModel(nn.Module):
                 n_scan=self.n_scan_glimpses,
                 n_read=self.encoder.n_glimpses,
                 content_head=self.content_head,
-                prescribed_x=True,
+                prescribed_x=(self.scan_xs is None),
+                scan_xs=self.scan_xs,
+                read_group_anchors=list(self.read_anchor_scan_indices) if self.read_anchor_scan_indices else None,
+                n_read_per_group=self.n_read_per_group,
             )
         else:
             enc = encode_scan_read(
@@ -427,9 +440,12 @@ class MotorVisionModel(nn.Module):
     def __init__(self, n_classes=26, latent_dim=256, n_glimpses=10,
                  patch_size=12, n_scales=1,
                  n_scan_glimpses=0, scan_patch_size=(12, 18),
-                 n_trajectory_points=32, render_sigma=1.5):
+                 n_trajectory_points=32, render_sigma=1.5,
+                 read_anchor_scan_indices=None, n_read_per_group=None):
         super().__init__()
         self.n_scan_glimpses = n_scan_glimpses
+        self.read_anchor_scan_indices = read_anchor_scan_indices
+        self.n_read_per_group = n_read_per_group
         self.encoder = VisualAttentionEncoder(
             n_glimpses=n_glimpses, patch_size=patch_size,
             n_scales=n_scales, latent_dim=latent_dim,
@@ -443,6 +459,13 @@ class MotorVisionModel(nn.Module):
                 patch_size=scan_patch_size, n_scales=n_scales, latent_dim=latent_dim,
             )
             self.content_head = nn.Linear(latent_dim, 1)
+
+        # Learnable scan x positions (when anchored read enabled)
+        if read_anchor_scan_indices is not None and n_scan_glimpses > 0:
+            init_xs = torch.linspace(-0.75, 0.75, n_scan_glimpses)
+            self.scan_xs = nn.Parameter(torch.atanh(init_xs))
+        else:
+            self.scan_xs = None
 
         # Motor pathway
         from fbrl.motor import MotorTraceDecoder, soft_render
@@ -459,7 +482,10 @@ class MotorVisionModel(nn.Module):
                 n_scan=self.n_scan_glimpses,
                 n_read=self.encoder.n_glimpses,
                 content_head=self.content_head,
-                prescribed_x=True,
+                prescribed_x=(self.scan_xs is None),
+                scan_xs=self.scan_xs,
+                read_group_anchors=list(self.read_anchor_scan_indices) if self.read_anchor_scan_indices else None,
+                n_read_per_group=self.n_read_per_group,
             )
         else:
             return encode_scan_read(

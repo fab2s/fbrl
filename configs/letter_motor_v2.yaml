@@ -39,7 +39,7 @@ trajectory_data_dir: data/trajectories
 
 # Enhanced motor losses (v2)
 latent_match_weight: 2.0
-frozen_rr_weight: 0.5
+frozen_rr_weight: 0.0
 render_match_weight: 0.25
 
 data_dir: data/letters

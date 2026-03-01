@@ -103,6 +103,8 @@ def train_motor_model(cfg):
         n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
         n_scan_glimpses=n_scan_glimpses, scan_patch_size=scan_patch_size,
         n_trajectory_points=n_trajectory_points, render_sigma=render_sigma,
+        read_anchor_scan_indices=cfg.read_anchor_scan_indices,
+        n_read_per_group=cfg.n_read_per_group,
     ).to(device)
 
     # Transfer learning from pretrained vision model
@@ -136,6 +138,8 @@ def train_motor_model(cfg):
         if n_scan_glimpses > 0:
             frozen_modules['scan_sensor'] = copy.deepcopy(model.scan_sensor)
             frozen_modules['content_head'] = copy.deepcopy(model.content_head)
+        if model.scan_xs is not None:
+            frozen_modules['scan_xs'] = copy.deepcopy(model.scan_xs)
         for m in frozen_modules.values():
             for p in m.parameters():
                 p.requires_grad_(False)
@@ -152,7 +156,10 @@ def train_motor_model(cfg):
             n_scan=n_scan_glimpses,
             n_read=model.encoder.n_glimpses,
             content_head=frozen_modules.get('content_head'),
-            prescribed_x=(n_scan_glimpses > 0),
+            prescribed_x=(model.scan_xs is None and n_scan_glimpses > 0),
+            scan_xs=frozen_modules.get('scan_xs'),
+            read_group_anchors=list(cfg.read_anchor_scan_indices) if cfg.read_anchor_scan_indices else None,
+            n_read_per_group=cfg.n_read_per_group,
         )
 
     # Loss tracking
@@ -183,6 +190,8 @@ def train_motor_model(cfg):
     if n_scan_glimpses > 0:
         attn_params += (list(model.scan_sensor.parameters()) +
                         list(model.content_head.parameters()))
+    if model.scan_xs is not None:
+        attn_params += [model.scan_xs]
 
     cls_params = (list(model.letter_classifier.parameters()) +
                   list(model.case_classifier.parameters()))

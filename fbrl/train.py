@@ -68,6 +68,8 @@ def train_model(cfg):
     model = VisionModel(
         n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
         n_scan_glimpses=n_scan_glimpses, scan_patch_size=scan_patch_size,
+        read_anchor_scan_indices=cfg.read_anchor_scan_indices,
+        n_read_per_group=cfg.n_read_per_group,
     ).to(device)
 
     # Loss tracking
