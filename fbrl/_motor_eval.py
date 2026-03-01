@@ -46,6 +46,7 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
     total = 0
     mse_scores = []
     traj_mse_scores = []
+    latent_mse_scores = []
     pen_tp, pen_fp, pen_fn = 0, 0, 0  # for pen F1
 
     font_stats = {}
@@ -71,6 +72,10 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
             rr_enc = model._encode(rendered)
             rr_letter_logits = model.letter_classifier(rr_enc.latent)
             rr_case_logits = model.case_classifier(rr_enc.latent)
+
+            # Latent MSE: how close is re-read latent to original?
+            latent_mse = F.mse_loss(rr_enc.latent, latent).item()
+            latent_mse_scores.append(latent_mse)
 
         # Standard accuracy
         letter_pred = letter_logits.argmax(dim=1).item()
@@ -170,6 +175,7 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
     rr_case_acc = rr_case_correct / total if total > 0 else 0
     avg_mse = np.mean(mse_scores) if mse_scores else 0
     avg_traj_mse = np.mean(traj_mse_scores) if traj_mse_scores else 0
+    avg_latent_mse = np.mean(latent_mse_scores) if latent_mse_scores else 0
     pen_precision = pen_tp / max(pen_tp + pen_fp, 1)
     pen_recall = pen_tp / max(pen_tp + pen_fn, 1)
     pen_f1 = 2 * pen_precision * pen_recall / max(pen_precision + pen_recall, 1e-8)
@@ -181,6 +187,7 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
     print(f"Avg recon MSE:      {avg_mse:.4f}")
     print(f"Avg traj MSE:       {avg_traj_mse:.4f}")
     print(f"Pen F1:             {pen_f1:.3f} (P={pen_precision:.3f} R={pen_recall:.3f})")
+    print(f"Avg latent MSE:     {avg_latent_mse:.4f}")
 
     if len(font_stats) > 1:
         print(f"\nPer-font breakdown:")
@@ -235,6 +242,7 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
         f.write(f"Re-read Letter: {rr_letter_correct}/{total} ({rr_letter_acc:.1%})\n")
         f.write(f"Re-read Case:   {rr_case_correct}/{total} ({rr_case_acc:.1%})\n")
         f.write(f"Avg Traj MSE:   {avg_traj_mse:.4f}\n")
+        f.write(f"Avg Latent MSE: {avg_latent_mse:.4f}\n")
         f.write(f"Pen F1:         {pen_f1:.3f} (P={pen_precision:.3f} R={pen_recall:.3f})\n")
 
         if len(font_stats) > 1:

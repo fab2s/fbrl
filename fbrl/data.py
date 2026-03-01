@@ -202,9 +202,17 @@ def generate_test(letters, output_dir, font_spec='all'):
 # --- Dataset ---
 
 class LetterDataset(Dataset):
-    def __init__(self, data_dir):
+    def __init__(self, data_dir, case_filter=None):
         with open(os.path.join(data_dir, 'metadata.json'), 'r') as f:
             metadata = json.load(f)
+
+        # Filter by case if requested
+        if case_filter == 'upper':
+            metadata = {k: v for k, v in metadata.items()
+                        if v.get('case', 'upper') == 'upper'}
+        elif case_filter == 'lower':
+            metadata = {k: v for k, v in metadata.items()
+                        if v.get('case', 'upper') == 'lower'}
 
         print(f"Loading {len(metadata)} samples into memory...", end=' ', flush=True)
         t0 = time.time()

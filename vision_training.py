@@ -72,6 +72,12 @@ def _add_train_overrides(parser):
     # Grouped read
     parser.add_argument('--read_anchor_scan_indices', type=int, nargs='+', default=None)
     parser.add_argument('--n_read_per_group', type=int, default=None)
+    # Motor v2 enhanced losses
+    parser.add_argument('--case_filter', default=None)
+    parser.add_argument('--render_sigma', type=float, default=None)
+    parser.add_argument('--latent_match_weight', type=float, default=None)
+    parser.add_argument('--frozen_rr_weight', type=float, default=None)
+    parser.add_argument('--render_match_weight', type=float, default=None)
 
 
 def _build_overrides(args):

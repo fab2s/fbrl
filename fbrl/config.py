@@ -70,6 +70,12 @@ class ExperimentConfig:
     trajectory_data_dir: Optional[str] = None
     canonical_font: str = 'dejavu-sans'
 
+    # Enhanced motor losses (v2)
+    case_filter: Optional[str] = None          # 'upper', 'lower', or None (both)
+    latent_match_weight: float = 0.0           # 0 = disabled (backward compat)
+    frozen_rr_weight: float = 0.0              # 0 = disabled
+    render_match_weight: float = 0.0           # 0 = disabled
+
     # Paths
     data_dir: str = ''
     save_dir: str = ''

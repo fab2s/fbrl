@@ -1,4 +1,5 @@
 """Motor training functions -- imported by train.py."""
+import copy
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -10,7 +11,7 @@ import time
 
 from fbrl import _resolve_device
 from fbrl.data import LetterDataset
-from fbrl.model import MotorVisionModel
+from fbrl.model import MotorVisionModel, encode_scan_read
 from fbrl.motor import load_trajectory_data, batch_gt_trajectories
 from fbrl.losses import (attention_content_loss, fixation_diversity_loss,
                           fixation_hit_rate)
@@ -58,6 +59,9 @@ def train_motor_model(cfg):
     traj_scaffold_floor = cfg.traj_scaffold_floor
     rr_cls_weight = cfg.rr_cls_weight
     trajectory_data_dir = cfg.trajectory_data_dir
+    latent_match_weight = cfg.latent_match_weight
+    frozen_rr_weight = cfg.frozen_rr_weight
+    render_match_weight = cfg.render_match_weight
 
     device = _resolve_device(cfg.device)
     print(f"Motor training on: {device}")
@@ -71,13 +75,18 @@ def train_motor_model(cfg):
           f"diversity_vy={diversity_vy}  recode_weight={recode_weight}  "
           f"batch_size={batch_size}{scan_str}")
     traj_scaffold_epochs = int(traj_scaffold_ratio * epochs)
+    v2_str = ""
+    if latent_match_weight > 0 or frozen_rr_weight > 0 or render_match_weight > 0:
+        v2_str = (f"\nMotor v2: latent_match={latent_match_weight}  "
+                  f"frozen_rr={frozen_rr_weight}  render_match={render_match_weight}")
     print(f"Motor: n_points={n_trajectory_points}  render_sigma={render_sigma}  "
           f"traj_weight={traj_weight}  rr_cls_weight={rr_cls_weight}  "
-          f"traj_scaffold={traj_scaffold_epochs}ep (floor={traj_scaffold_floor})")
+          f"traj_scaffold={traj_scaffold_epochs}ep (floor={traj_scaffold_floor})"
+          f"{v2_str}")
 
     os.makedirs(save_dir, exist_ok=True)
     save_run_info(save_dir, cfg)
-    dataset = LetterDataset(data_dir)
+    dataset = LetterDataset(data_dir, case_filter=cfg.case_filter)
     use_cuda = device.type == 'cuda'
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=use_cuda)
 
@@ -115,10 +124,47 @@ def train_motor_model(cfg):
     elif cfg.transfer and resume:
         print("Warning: --transfer ignored when --resume is used")
 
+    # Frozen encoder for honest readability check (plain dict, not model attribute)
+    frozen_modules = None
+    if frozen_rr_weight > 0:
+        frozen_modules = {
+            'controller': copy.deepcopy(model.encoder.attention_controller),
+            'read_sensor': copy.deepcopy(model.encoder.glimpse_sensor),
+            'letter_classifier': copy.deepcopy(model.letter_classifier),
+            'case_classifier': copy.deepcopy(model.case_classifier),
+        }
+        if n_scan_glimpses > 0:
+            frozen_modules['scan_sensor'] = copy.deepcopy(model.scan_sensor)
+            frozen_modules['content_head'] = copy.deepcopy(model.content_head)
+        for m in frozen_modules.values():
+            for p in m.parameters():
+                p.requires_grad_(False)
+            m.to(device)
+        n_frozen = sum(p.numel() for m in frozen_modules.values() for p in m.parameters())
+        print(f"Created frozen encoder ({n_frozen} params)")
+
+    def _frozen_encode(rendered):
+        """Re-read through frozen encoder — no co-adaptation."""
+        return encode_scan_read(
+            rendered, frozen_modules['controller'],
+            frozen_modules.get('scan_sensor', frozen_modules['read_sensor']),
+            frozen_modules['read_sensor'],
+            n_scan=n_scan_glimpses,
+            n_read=model.encoder.n_glimpses,
+            content_head=frozen_modules.get('content_head'),
+            prescribed_x=(n_scan_glimpses > 0),
+        )
+
     # Loss tracking
     loss_names = ['recon', 'letter_cls', 'case_cls', 'attn', 'div',
                   'recode', 'content', 'hit_rate', 'hit_intensity',
                   'traj_mse', 'pen_bce', 'rr_cls', 'rr_letter_acc', 'rr_case_acc']
+    if latent_match_weight > 0:
+        loss_names.append('latent_match')
+    if frozen_rr_weight > 0:
+        loss_names.append('frozen_rr')
+    if render_match_weight > 0:
+        loss_names.append('render_match')
     tracker = LossTracker(loss_names)
 
     start_epoch = 0
@@ -162,10 +208,18 @@ def train_motor_model(cfg):
     train_start = time.time()
 
     content_hdr = f"  {'content':>7s}" if n_scan_glimpses > 0 else ""
+    v2_hdr = ""
+    if latent_match_weight > 0:
+        v2_hdr += f"  {'lat_m':>6s}"
+    if frozen_rr_weight > 0:
+        v2_hdr += f"  {'frz_rr':>6s}"
+    if render_match_weight > 0:
+        v2_hdr += f"  {'rnd_m':>6s}"
     header = (f"{'epoch':>5s}  {'recon':>6s}  {'ltr':>6s}  {'case':>6s}  {'attn':>7s}  {'div':>6s}  "
               f"{'hit':>6s}  {'recode':>6s}{content_hdr}  "
               f"{'traj':>6s}  {'pen':>6s}  {'rr_cls':>6s}  "
-              f"{'rr_ltr':>6s}  {'rr_cas':>6s}  "
+              f"{'rr_ltr':>6s}  {'rr_cas':>6s}"
+              f"{v2_hdr}  "
               f"{'lr_attn':>8s}  {'lr_mot':>8s}  {'scaff':>6s}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
 
@@ -280,9 +334,38 @@ def train_motor_model(cfg):
             rr_cls_loss = (F.cross_entropy(rr_letter_logits, letter_idx) +
                            F.cross_entropy(rr_case_logits, case_idx))
 
+            # === Enhanced motor losses (v2) ===
+            # Latent matching: rendered -> encoder -> latent2 must match original latent1
+            latent_match_val = 0.0
+            if latent_match_weight > 0:
+                latent_match = F.mse_loss(reread_enc.latent, latent_d)
+                latent_match_val = latent_match.item()
+
+            # Frozen re-reader: static encoder, no co-adaptation
+            frozen_rr_val = 0.0
+            if frozen_rr_weight > 0:
+                frozen_enc = _frozen_encode(rendered)
+                frozen_ltr = frozen_modules['letter_classifier'](frozen_enc.latent)
+                frozen_cls = frozen_modules['case_classifier'](frozen_enc.latent)
+                frozen_rr_loss = (F.cross_entropy(frozen_ltr, letter_idx) +
+                                  F.cross_entropy(frozen_cls, case_idx))
+                frozen_rr_val = frozen_rr_loss.item()
+
+            # Render matching: MSE between rendered trace and clean source image
+            render_match_val = 0.0
+            if render_match_weight > 0:
+                render_match = F.mse_loss(rendered, clean)
+                render_match_val = render_match.item()
+
             # Motor backward -- restrict to motor_decoder params
             motor_total = (traj_weight * traj_scaff_w * (traj_mse + pen_bce_loss) +
                            rr_cls_weight * rr_cls_loss)
+            if latent_match_weight > 0:
+                motor_total = motor_total + latent_match_weight * latent_match
+            if frozen_rr_weight > 0:
+                motor_total = motor_total + frozen_rr_weight * frozen_rr_loss
+            if render_match_weight > 0:
+                motor_total = motor_total + render_match_weight * render_match
             motor_total.backward(inputs=motor_params)
             clip_grad_norm_(motor_params, 5.0)
             motor_opt.step()
@@ -293,12 +376,21 @@ def train_motor_model(cfg):
                 rr_letter_acc = (rr_letter_logits.argmax(1) == letter_idx).float().mean().item()
                 rr_case_acc = (rr_case_logits.argmax(1) == case_idx).float().mean().item()
 
+            extra_metrics = {}
+            if latent_match_weight > 0:
+                extra_metrics['latent_match'] = latent_match_val
+            if frozen_rr_weight > 0:
+                extra_metrics['frozen_rr'] = frozen_rr_val
+            if render_match_weight > 0:
+                extra_metrics['render_match'] = render_match_val
+
             tracker.update(
                 recon=recon_loss, letter_cls=letter_cls_loss, case_cls=case_cls_loss,
                 attn=attn_loss, div=div_loss, content=content_loss,
                 recode=recode_loss_val, hit_rate=hr, hit_intensity=hi,
                 traj_mse=traj_mse, pen_bce=pen_bce_loss, rr_cls=rr_cls_loss,
                 rr_letter_acc=rr_letter_acc, rr_case_acc=rr_case_acc,
+                **extra_metrics,
             )
 
         avgs = tracker.end_epoch()
@@ -310,6 +402,13 @@ def train_motor_model(cfg):
         lr_motor = motor_sched.get_last_lr()[0]
 
         content_str = f"  Cont {avgs['content']:.4f}" if n_scan_glimpses > 0 else ""
+        v2_str = ""
+        if latent_match_weight > 0:
+            v2_str += f"  LatM {avgs['latent_match']:.4f}"
+        if frozen_rr_weight > 0:
+            v2_str += f"  FrzRR {avgs['frozen_rr']:.4f}"
+        if render_match_weight > 0:
+            v2_str += f"  RndM {avgs['render_match']:.4f}"
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avgs['recon']:.4f}  Ltr {avgs['letter_cls']:.4f}  "
               f"Case {avgs['case_cls']:.4f}  Attn {avgs['attn']:.4f}  "
@@ -317,17 +416,25 @@ def train_motor_model(cfg):
               f"Recode {avgs['recode']:.4f}  "
               f"TrajMSE {avgs['traj_mse']:.4f}  PenBCE {avgs['pen_bce']:.4f}  "
               f"RR_cls {avgs['rr_cls']:.4f}  RR_ltr {avgs['rr_letter_acc']:.0%}  "
-              f"RR_case {avgs['rr_case_acc']:.0%}  "
+              f"RR_case {avgs['rr_case_acc']:.0%}{v2_str}  "
               f"lr {lr_attn:.6f}/{lr_motor:.6f}  scaff {traj_scaff_w:.2f}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
         content_log = f"  {avgs['content']:>7.4f}" if n_scan_glimpses > 0 else ""
+        v2_log = ""
+        if latent_match_weight > 0:
+            v2_log += f"  {avgs['latent_match']:>6.4f}"
+        if frozen_rr_weight > 0:
+            v2_log += f"  {avgs['frozen_rr']:>6.4f}"
+        if render_match_weight > 0:
+            v2_log += f"  {avgs['render_match']:>6.4f}"
         logger.write_line(
             f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {avgs['letter_cls']:>6.4f}  "
             f"{avgs['case_cls']:>6.4f}  {avgs['attn']:>7.4f}  {avgs['div']:>6.4f}  "
             f"{avgs['hit_rate']:>6.4f}  {avgs['recode']:>6.4f}{content_log}  "
             f"{avgs['traj_mse']:>6.4f}  {avgs['pen_bce']:>6.4f}  {avgs['rr_cls']:>6.4f}  "
-            f"{avgs['rr_letter_acc']:>6.4f}  {avgs['rr_case_acc']:>6.4f}  "
+            f"{avgs['rr_letter_acc']:>6.4f}  {avgs['rr_case_acc']:>6.4f}"
+            f"{v2_log}  "
             f"{lr_attn:>8.6f}  {lr_motor:>8.6f}  {traj_scaff_w:>6.4f}  {epoch_time:.1f}s")
 
         attn_sched.step()
@@ -404,6 +511,20 @@ def train_motor_model(cfg):
          'title': 'Fixation hit rate (on sharp letter pixels)',
          'ylabel': 'Rate / Intensity', 'ylim': (0, 1)},
     ])
+    # v2 motor loss panels
+    if latent_match_weight > 0:
+        specs.append({'keys': ['latent_match'], 'labels': ['Latent Match'],
+                      'colors': ['tab:red'], 'title': 'Latent matching MSE',
+                      'ylabel': 'MSE'})
+    if frozen_rr_weight > 0:
+        specs.append({'keys': ['frozen_rr'], 'labels': ['Frozen RR'],
+                      'colors': ['tab:orange'], 'title': 'Frozen re-read CE',
+                      'ylabel': 'Cross-Entropy',
+                      'hlines': [(np.log(26), f'Random ({np.log(26):.1f})', 'gray')]})
+    if render_match_weight > 0:
+        specs.append({'keys': ['render_match'], 'labels': ['Render Match'],
+                      'colors': ['tab:green'], 'title': 'Render matching MSE',
+                      'ylabel': 'MSE'})
     plot_training_metrics(tracker, os.path.join(save_dir, 'training_metrics.png'), specs)
 
     total_time = time.time() - train_start
