@@ -322,6 +322,7 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; 
 .detail-cell.wrong { border-color: #e74c3c; }
 .detail-cell .detail-row { display: flex; gap: 4px; justify-content: center; }
 .detail-cell canvas { width: 128px; height: 128px; display: block; }
+.detail-cell .img-label { font-size: 9px; color: #606080; text-align: center; }
 .detail-cell .font-name { font-size: 11px; color: #a0a0c0; margin-top: 2px; }
 .detail-cell .pred-info { font-size: 10px; color: #888; }
 </style>
@@ -332,6 +333,8 @@ body { background: #1a1a2e; color: #e0e0e0; font-family: system-ui, sans-serif; 
   <div>
     <label>View:</label>
     <button id="btn-input" class="active" onclick="setView('input')">Input</button>
+    <button id="btn-recon" onclick="setView('recon')">Recon</button>
+    <button id="btn-recode" onclick="setView('recode')">Recode</button>
     <button id="btn-rendered" onclick="setView('rendered')">Rendered</button>
     <button id="btn-traj" onclick="setView('traj')">Trajectory</button>
   </div>
@@ -414,6 +417,10 @@ function buildGrid() {
     if (fd) {
       if (viewMode === 'rendered') {
         drawImg(canvas, fd.rendered_b64, SZ, SZ);
+      } else if (viewMode === 'recon') {
+        drawImg(canvas, fd.recon_b64, SZ, SZ);
+      } else if (viewMode === 'recode') {
+        drawImg(canvas, fd.recode_b64, SZ, SZ);
       } else if (viewMode === 'traj') {
         drawTrajectory(canvas, fd.trajectory, SZ, SZ);
       } else {
@@ -462,20 +469,23 @@ function showDetail(entry) {
     const row = document.createElement('div');
     row.className = 'detail-row';
 
-    // Input image
-    const c1 = document.createElement('canvas');
-    drawImg(c1, fd.clean_b64, 128, 128);
-    row.appendChild(c1);
+    function addPanel(label, drawFn) {
+      const wrap = document.createElement('div');
+      const cv = document.createElement('canvas');
+      drawFn(cv);
+      wrap.appendChild(cv);
+      const lbl = document.createElement('div');
+      lbl.className = 'img-label';
+      lbl.textContent = label;
+      wrap.appendChild(lbl);
+      row.appendChild(wrap);
+    }
 
-    // Trajectory
-    const c2 = document.createElement('canvas');
-    drawTrajectory(c2, fd.trajectory, 128, 128);
-    row.appendChild(c2);
-
-    // Rendered
-    const c3 = document.createElement('canvas');
-    drawImg(c3, fd.rendered_b64, 128, 128);
-    row.appendChild(c3);
+    addPanel('input', c => drawImg(c, fd.clean_b64, 128, 128));
+    addPanel('recon', c => drawImg(c, fd.recon_b64, 128, 128));
+    addPanel('recode', c => drawImg(c, fd.recode_b64, 128, 128));
+    addPanel('trajectory', c => drawTrajectory(c, fd.trajectory, 128, 128));
+    addPanel('rendered', c => drawImg(c, fd.rendered_b64, 128, 128));
 
     cell.appendChild(row);
 
@@ -545,6 +555,9 @@ def generate_motor_atlas(model_dir, test_data_dir, output_path='data/motor_atlas
             rr_enc = model._encode(rendered)
             rr_letter_logits = model.letter_classifier(rr_enc.latent)
 
+            recode_case = torch.tensor([[1.0 - case_float.item()]], device=device)
+            recode_img, _ = model.recode(img_dev, recode_case)
+
         letter_pred = letter_logits.argmax(dim=1).item()
         letter_ok = letter_pred == letter_idx
         rr_letter_pred = rr_letter_logits.argmax(dim=1).item()
@@ -565,6 +578,8 @@ def generate_motor_atlas(model_dir, test_data_dir, output_path='data/motor_atlas
 
         entries[original_char]['fonts'][font] = {
             'clean_b64': _tensor_to_base64_png(clean),
+            'recon_b64': _tensor_to_base64_png(recon.squeeze(0).cpu()),
+            'recode_b64': _tensor_to_base64_png(recode_img.squeeze(0).cpu()),
             'rendered_b64': _tensor_to_base64_png(rendered.squeeze(0).cpu()),
             'trajectory': traj_list,
             'letter_ok': letter_ok,

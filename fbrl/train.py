@@ -13,7 +13,8 @@ from fbrl.losses import (attention_content_loss, two_phase_attention_loss,
                           fixation_diversity_loss, fixation_edge_loss,
                           fixation_hit_rate)
 from fbrl.training_utils import (LossTracker, TrainingLogger, save_checkpoint,
-                                  apply_transfer, plot_training_metrics, format_eta)
+                                  apply_transfer, plot_training_metrics, format_eta,
+                                  save_run_info)
 from fbrl._word_train import train_word_model  # noqa: F401
 from fbrl._motor_train import train_motor_model  # noqa: F401
 
@@ -54,6 +55,7 @@ def train_model(cfg):
           f"recode_weight={recode_weight}  batch_size={batch_size}{scan_str}")
 
     os.makedirs(save_dir, exist_ok=True)
+    save_run_info(save_dir, cfg)
     dataset = LetterDataset(data_dir)
     use_cuda = device.type == 'cuda'
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=use_cuda)
@@ -394,6 +396,7 @@ def train_bigram_model(cfg):
           f"({'disabled' if scaffold_epochs == 0 else 'left→right→holistic'}){floor_str}")
 
     os.makedirs(save_dir, exist_ok=True)
+    save_run_info(save_dir, cfg)
     dataset = BigramDataset(data_dir)
     use_cuda = device.type == 'cuda'
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=use_cuda)

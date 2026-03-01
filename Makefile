@@ -191,7 +191,7 @@ generate-trajectories:
 
 train-motor:
 	@$(CLEAN_MOTOR_MODELS)
-	$(RUN) train_motor --config $(MOTOR_CONFIG) --device $(DEVICE) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH)) $(if $(CKPT),--checkpoint_interval $(CKPT))
+	$(RUN) train_motor --config $(MOTOR_CONFIG) --device $(DEVICE) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH)) $(if $(TRANSFER),--transfer $(TRANSFER)) $(if $(CKPT),--checkpoint_interval $(CKPT))
 
 resume-motor:
 	$(RUN) train_motor --config $(MOTOR_CONFIG) --device $(DEVICE) --resume data/motor_models/$(RESUME_FROM) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH))

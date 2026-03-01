@@ -419,7 +419,7 @@ class MotorVisionModel(nn.Module):
 
     Identical vision components to VisionModel (encoder, decoder, classifiers,
     optional scan phase). Adds MotorTraceDecoder for the motor pathway.
-    Trained from scratch -- no transfer.
+    Supports transfer from pretrained VisionModel (e.g. v5-scan).
 
     The motor pathway is called separately via motor_forward() so the main
     graph can be freed before allocating the motor+re-read graph (VRAM-safe).

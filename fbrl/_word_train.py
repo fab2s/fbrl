@@ -17,7 +17,8 @@ from fbrl.model import WordVisionModel
 from fbrl.losses import (word_attention_loss, fixation_diversity_loss,
                           fixation_hit_rate)
 from fbrl.training_utils import (LossTracker, TrainingLogger, save_checkpoint,
-                                  apply_transfer, plot_training_metrics, format_eta)
+                                  apply_transfer, plot_training_metrics, format_eta,
+                                  save_run_info)
 
 
 def train_word_model(cfg):
@@ -72,6 +73,7 @@ def train_word_model(cfg):
           f"({'disabled' if scaffold_epochs == 0 else f'{n_positions}-stripe L->R'}){floor_str}")
 
     os.makedirs(save_dir, exist_ok=True)
+    save_run_info(save_dir, cfg)
     dataset = WordDataset(data_dir)
     use_cuda = device.type == 'cuda'
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=use_cuda)

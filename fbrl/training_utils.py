@@ -3,12 +3,103 @@ import torch
 import gzip
 import io
 import os
+import subprocess
+import sys
 import time
+import yaml
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
 
 from fbrl.config import config_to_dict
+
+
+def _build_make_command(cfg):
+    """Reconstruct the make command equivalent from config and sys.argv."""
+    # subcommand -> (make target, config var)
+    _TARGETS = {
+        'train': ('train', 'CONFIG'),
+        'train_bigrams': ('train-bigrams', 'BIGRAM_CONFIG'),
+        'train_words': ('train-words', 'WORD_CONFIG'),
+        'train_motor': ('train-motor', 'MOTOR_CONFIG'),
+    }
+    # Find subcommand in argv
+    subcmd = None
+    for arg in sys.argv[1:]:
+        if arg in _TARGETS:
+            subcmd = arg
+            break
+    if subcmd is None:
+        return None
+
+    target, config_var = _TARGETS[subcmd]
+
+    # Extract CLI overrides (non-default values passed via --flag)
+    parts = [f'make {target}']
+    argv = sys.argv[1:]
+    # Map CLI flags to Makefile vars
+    _FLAG_MAP = {
+        '--device': 'DEVICE', '--epochs': 'EPOCHS', '--batch_size': 'BATCH',
+        '--transfer': 'TRANSFER', '--checkpoint_interval': 'CKPT',
+    }
+    # Check if a non-default config was used
+    config_path = None
+    i = 0
+    while i < len(argv):
+        if argv[i] == '--config' and i + 1 < len(argv):
+            config_path = argv[i + 1]
+            i += 2
+        elif argv[i] in _FLAG_MAP and i + 1 < len(argv):
+            parts.append(f'{_FLAG_MAP[argv[i]]}={argv[i + 1]}')
+            i += 2
+        else:
+            i += 1
+
+    # Only include config var if non-default path was used
+    defaults = {
+        'CONFIG': 'configs/letter.yaml', 'BIGRAM_CONFIG': 'configs/bigram.yaml',
+        'WORD_CONFIG': 'configs/word.yaml', 'MOTOR_CONFIG': 'configs/letter_motor.yaml',
+    }
+    if config_path and config_path != defaults.get(config_var):
+        parts.insert(1, f'{config_var}={config_path}')
+
+    return ' '.join(parts)
+
+
+def save_run_info(save_dir, cfg):
+    """Write config.yaml and info.txt into save_dir at training start.
+
+    config.yaml: resolved config (includes CLI overrides).
+    info.txt: git hash, date, make command, CLI command, transfer source.
+    """
+    # config.yaml — resolved (not the source file)
+    cfg_dict = config_to_dict(cfg)
+    with open(os.path.join(save_dir, 'config.yaml'), 'w') as f:
+        yaml.dump(cfg_dict, f, default_flow_style=False, sort_keys=False)
+
+    # info.txt
+    try:
+        git_hash = subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            stderr=subprocess.DEVNULL).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        git_hash = 'n/a'
+
+    lines = [
+        f'git: {git_hash}',
+        f'date: {datetime.now().astimezone().isoformat()}',
+    ]
+    make_cmd = _build_make_command(cfg)
+    if make_cmd:
+        lines.append(f'make: {make_cmd}')
+    lines.append(f'cli: {" ".join(sys.argv)}')
+    if cfg.transfer:
+        lines.append(f'transfer: {cfg.transfer}')
+    if cfg.resume:
+        lines.append(f'resume: {cfg.resume}')
+
+    with open(os.path.join(save_dir, 'info.txt'), 'w') as f:
+        f.write('\n'.join(lines) + '\n')
 
 
 class LossTracker:

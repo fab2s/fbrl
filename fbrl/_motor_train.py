@@ -15,7 +15,8 @@ from fbrl.motor import load_trajectory_data, batch_gt_trajectories
 from fbrl.losses import (attention_content_loss, fixation_diversity_loss,
                           fixation_hit_rate)
 from fbrl.training_utils import (LossTracker, TrainingLogger, save_checkpoint,
-                                  plot_training_metrics, format_eta)
+                                  plot_training_metrics, format_eta,
+                                  apply_transfer, save_run_info)
 
 
 def train_motor_model(cfg):
@@ -75,6 +76,7 @@ def train_motor_model(cfg):
           f"traj_scaffold={traj_scaffold_epochs}ep (floor={traj_scaffold_floor})")
 
     os.makedirs(save_dir, exist_ok=True)
+    save_run_info(save_dir, cfg)
     dataset = LetterDataset(data_dir)
     use_cuda = device.type == 'cuda'
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=use_cuda)
@@ -93,6 +95,25 @@ def train_motor_model(cfg):
         n_scan_glimpses=n_scan_glimpses, scan_patch_size=scan_patch_size,
         n_trajectory_points=n_trajectory_points, render_sigma=render_sigma,
     ).to(device)
+
+    # Transfer learning from pretrained vision model
+    if cfg.transfer and not resume:
+        # MotorVisionModel has same key structure as VisionModel --
+        # identity mappings transfer all vision weights directly.
+        # motor_decoder.* has no match in source, stays randomly initialized.
+        n_transferred = apply_transfer(model, cfg.transfer,
+                                        key_mappings=[
+                                            ('encoder.', 'encoder.'),
+                                            ('decoder.', 'decoder.'),
+                                            ('letter_classifier.', 'letter_classifier.'),
+                                            ('case_classifier.', 'case_classifier.'),
+                                            ('scan_sensor.', 'scan_sensor.'),
+                                            ('content_head.', 'content_head.'),
+                                        ],
+                                        device=device)
+        print(f"Transferred {n_transferred} tensors from {cfg.transfer}")
+    elif cfg.transfer and resume:
+        print("Warning: --transfer ignored when --resume is used")
 
     # Loss tracking
     loss_names = ['recon', 'letter_cls', 'case_cls', 'attn', 'div',
