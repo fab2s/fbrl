@@ -10,7 +10,7 @@ n_scales: 1
 # Uppercase only
 case_filter: upper
 
-epochs: 100
+epochs: 500
 batch_size: 64
 checkpoint_interval: 10
 multi_head: true
