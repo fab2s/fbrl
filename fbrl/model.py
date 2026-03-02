@@ -255,11 +255,14 @@ def encode_scan_read(image, controller, scan_sensor, read_sensor,
     read_group_boundaries = None
 
     if read_group_anchors is not None and n_read_per_group is not None:
-        # Grouped read: each group resets location to its scan anchor
+        # Grouped read: each group resets x to scan anchor, y starts at center (0)
         read_group_boundaries = []
         for anchor_idx in read_group_anchors:
             read_group_boundaries.append(len(read_states))
-            location = scan_locs_by_step[anchor_idx]
+            anchor_loc = scan_locs_by_step[anchor_idx]
+            # x from scan anchor (hint, not constraint — GRU can move freely after)
+            # y starts at 0 (center) — full vertical freedom
+            location = torch.stack([anchor_loc[:, 0], torch.zeros(B, device=image.device)], dim=1)
             for _g in range(n_read_per_group):
                 glimpse = read_sensor(image, location)
                 h = controller.gru(glimpse, h)
@@ -352,7 +355,8 @@ class VisionModel(nn.Module):
     def __init__(self, n_classes=26, latent_dim=256, n_glimpses=10,
                  patch_size=12, n_scales=1,
                  n_scan_glimpses=0, scan_patch_size=(12, 18),
-                 read_anchor_scan_indices=None, n_read_per_group=None):
+                 read_anchor_scan_indices=None, n_read_per_group=None,
+                 learnable_scan_x=False):
         super().__init__()
         self.n_scan_glimpses = n_scan_glimpses
         self.read_anchor_scan_indices = read_anchor_scan_indices
@@ -373,8 +377,8 @@ class VisionModel(nn.Module):
             )
             self.content_head = nn.Linear(latent_dim, 1)
 
-        # Learnable scan x positions (when anchored read enabled)
-        if read_anchor_scan_indices is not None and n_scan_glimpses > 0:
+        # Learnable scan x positions
+        if learnable_scan_x and n_scan_glimpses > 0:
             init_xs = torch.linspace(-0.75, 0.75, n_scan_glimpses)
             self.scan_xs = nn.Parameter(torch.atanh(init_xs))
         else:

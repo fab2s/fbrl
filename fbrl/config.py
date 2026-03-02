@@ -58,6 +58,7 @@ class ExperimentConfig:
     # Grouped read (word only)
     read_anchor_scan_indices: Optional[tuple] = None  # e.g. (1,2,3,4)
     n_read_per_group: Optional[int] = None            # glimpses per group
+    learnable_scan_x: bool = False                    # learn optimal scan x positions
 
     # Motor trace
     motor_enabled: bool = False

@@ -70,6 +70,7 @@ def train_model(cfg):
         n_scan_glimpses=n_scan_glimpses, scan_patch_size=scan_patch_size,
         read_anchor_scan_indices=cfg.read_anchor_scan_indices,
         n_read_per_group=cfg.n_read_per_group,
+        learnable_scan_x=cfg.learnable_scan_x,
     ).to(device)
 
     # Loss tracking
@@ -216,6 +217,7 @@ def train_model(cfg):
                                 'n_scales': n_scales,
                                 'n_scan_glimpses': n_scan_glimpses,
                                 'scan_patch_size': scan_patch_size,
+                                'learnable_scan_x': cfg.learnable_scan_x,
                                 'image_size': 128, 'has_case': True,
                             })
 
@@ -229,6 +231,7 @@ def train_model(cfg):
                         'n_scales': n_scales,
                         'n_scan_glimpses': n_scan_glimpses,
                         'scan_patch_size': scan_patch_size,
+                        'learnable_scan_x': cfg.learnable_scan_x,
                         'image_size': 128, 'has_case': True,
                     })
 

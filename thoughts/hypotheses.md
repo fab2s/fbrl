@@ -71,12 +71,28 @@ Motor trace decoding is implemented and tested. Key findings from v1-transfer (2
 
 **Implication**: When scaling to sentences or paragraphs, the canvas-to-fovea ratio will naturally enforce increasingly sophisticated reading strategies. The model won't need explicit loss engineering to read sequentially — the geometry will force it. This is analogous to how human reading develops: the visual system doesn't change, but the task demands (longer words, more complex layouts) force more efficient eye movement strategies.
 
-## Hypothesis 4: Constraint Count Drives Representation Quality
+## Hypothesis 4: Attention Budget Efficiency — Less Is More
+
+**Confirmed experimentally (v6)**: Reducing glimpses from 13 (v5-scan) to 8 (1 scan + 7 read) maintains 100% accuracy on all 11 fonts. The model compensates by developing more efficient attention strategies.
+
+**Key findings**:
+- Anchoring (resetting read position to scan location) is harmful — breaks GRU spatial continuity and causes catastrophic overfitting (48.6% test accuracy with 0.0000 train CE).
+- Flat read (continuing from last scan position) preserves GRU momentum and generalizes well.
+- Learnable scan x positions drift to more informative locations than prescribed linspace.
+- v5-scan's 3 prescribed scan positions at [-0.75, 0, 0.75] wasted the edge scans on empty space.
+- Recode quality (case-flipped reconstruction) is the honest measure of latent richness — classification saturates before reconstruction.
+- At 1+7 = 8 glimpses, the model is at the compression edge: perfect classification but measurably degraded recode.
+
+**Implication for scaling**: The atomic unit for word architecture is 1 scan + N reads per letter position. For OCR (classification only), N=7 may suffice. For motor (needs spatial detail), N=8-9 may be needed.
+
+**Design insight**: For practical OCR, the encoder IS the product. Decoder, recode, and motor are all training scaffolding that gets discarded at inference time. The entire inference pipeline is: scan/read → latent → linear head → UTF-8 character code. All the training complexity exists to build the best possible encoder.
+
+## Hypothesis 5: Constraint Count Drives Representation Quality
 
 **Claim**: There's a relationship between the number of simultaneous constraints on a latent space and the abstractness/robustness of the resulting representation. More constraints → fewer "cheating" solutions → more genuinely abstract encoding.
 
 Current constraint progression:
-- Single letter: recon + letter_cls + case_cls + recode = 4 constraints → font-invariant, case-invariant identity
+- Single letter: recon + letter_cls + case_cls + recode = 4 constraints → font-invariant, case-invariant identity (100% with just 8 glimpses)
 - Bigram: recon + 2x pos_cls + mask_cls + attention + diversity = 7 constraints → per-position reading
 - Word: recon + 4x pos_cls + attention + content + isolation = 9 constraints → sequential scanning
 
@@ -87,9 +103,11 @@ Each stage added constraints because the previous stage found a shortcut. The pa
 ## Future Directions
 
 ### Near-term (single GPU feasible)
-- **Centerline scaffold + latent matching convergence**: Current experiment — does correct stroke guidance + fast annealing + dense latent signal produce readable motor traces? If yes, scale to full alphabet and multi-font.
+- **Interleaved scan-read on letters**: Instead of all scans then all reads, alternate: scan → read group → scan → read group. For letters: scan1 (edge) → scan2 (center) → reads → scan3 (end). For words: scan position → read letter → next position. Test on letters first (cheap ~50s/epoch). Hypothesis: immediate context beats delayed context.
+- **Interleaved scan-read on words**: If interleaved works on letters, apply to word architecture. Each letter position gets 1 scan + N reads. Natural left-to-right reading. Could replace the current all-scans-then-all-reads architecture.
+- **Latent dim scaling for motor**: 256 is at the compression edge (recode quality degrades with fewer glimpses). Test 384 for motor — more spatial detail for trajectory generation. Orthogonal to other motor improvements.
+- **Centerline scaffold + latent matching convergence**: Does correct stroke guidance + fast annealing + dense latent signal produce readable motor traces? Current best: 57.7% re-read (500ep, uppercase).
 - **Lowercase motor training**: Test if single-stroke lowercase letters converge faster than multi-stroke uppercase. Same architecture, just `case_filter: lower`.
-- **Scan-anchored grouped read for letters**: Already wired up. 3 scan glimpses with learnable x → middle scan anchors read group. Tests whether anchoring improves attention efficiency. Could enable fewer total glimpses (10 instead of 13) with no accuracy loss.
 - **Longer simultaneous training (400-1000 epochs)**: The from-scratch co-evolution thesis — more time for vision+motor to find a truly shared latent space. Impractical on current hardware for rapid iteration but could be a definitive test.
 - **Variable-length words**: Language model prior, test if model skips predictable letters (human-like)
 - **Mixed case**: Uppercase + lowercase in same word, test if scan y adapts

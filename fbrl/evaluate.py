@@ -87,9 +87,11 @@ def _load_model(model_dir, device):
         patch_size = ckpt.get('patch_size', 12)
         n_scan = ckpt.get('n_scan_glimpses', 0)
         scan_ps = ckpt.get('scan_patch_size', (12, 18))
+        learnable_scan_x = ckpt.get('learnable_scan_x', False)
         model = VisionModel(
             n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
             n_scan_glimpses=n_scan, scan_patch_size=scan_ps,
+            learnable_scan_x=learnable_scan_x,
         ).to(device)
 
     model.load_state_dict(state_dict, strict=False)

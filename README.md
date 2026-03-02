@@ -14,7 +14,7 @@ This extends naturally as the project scales. At word level, the feedback loop b
 
 ## Key Results
 
-**Single letters** — 100% letter and case accuracy across 52 classes (Aa-Zz) and 11 fonts, with pixel-perfect case recoding (encode 'a', decode as 'A').
+**Single letters** — 100% letter and case accuracy across 52 classes (Aa-Zz) and 11 fonts, with pixel-perfect case recoding (encode 'a', decode as 'A'). Achieves this with only **8 glimpses** (1 learnable scan + 7 read) — a 38% reduction from the initial 13-glimpse architecture with zero accuracy loss.
 
 **Bigrams** — Two-phase scan/read architecture on 128x128 canvas. 98-99% both-correct on 200 common English bigrams with transfer learning.
 
@@ -60,6 +60,12 @@ The single-letter model already knows how to read letterforms. Naively unfreezin
 
 The prescribed x-scan (fixed left-to-right sweep with learned y) develops a slight diagonal trajectory: upper-left to lower-right. This isn't emergent intelligence — it's the model learning that lowercase letter bodies sit below the vertical center of the canvas. The y-component adapts to where the content actually is. This suggests that for mixed-case training, initializing scan y above center could accelerate convergence.
 
+### Fewer glimpses force better attention — but anchoring kills
+
+The model achieves 100% accuracy with only 8 glimpses (1 learnable scan + 7 read) — a 38% reduction from the original 13 (3 scan + 10 read). Learnable scan x positions drift closer to letter content than prescribed evenly-spaced positions, and the v5 edge scans were largely wasted on empty space.
+
+But *anchoring* read positions to scan locations (resetting the GRU's position at the start of each read group) causes catastrophic overfitting: 0% train error, 48.6% test accuracy. The GRU's spatial continuity — carrying momentum from one glimpse to the next — is essential. Flat read (continuing from where the last scan landed) works; position reset breaks it. Recode quality (case-flipped reconstruction) degrades slightly with fewer glimpses, revealing the compression edge: classification saturates before spatial detail does.
+
 ### Interior positions learn faster than edges
 
 In 4-letter word training, P2 and P3 (interior letters) converge before P1 and P4 (edges). Likely because interior positions have richer context from neighboring letters during cross-attention readout, and the prescribed scan passes through their region more centrally.
@@ -81,7 +87,7 @@ It's modeled on how your eye actually works.
 | Fovea (tiny sharp patch) | `GlimpseSensor` — 12x12 pixel window (0.9% of 128x128; 0.4% of 256x128) |
 | Peripheral vision | Nothing — the model is *even more constrained* than biology, it sees zero outside the patch |
 | Saccades (eye movements) | `AttentionController` — GRU decides the next (x,y) fixation |
-| Sequence of fixations | 10 glimpses (single letter), 11 (bigrams: 5 scan + 6 read), or 20 (words: 8 scan + 12 read) |
+| Sequence of fixations | 8 glimpses (single letter: 1 scan + 7 read), 11 (bigrams: 5 scan + 6 read), or 20 (words: 8 scan + 12 read) |
 | Brain integrating across fixations | GRU hidden state accumulating information |
 | Conscious perception | Latent vector (256-dim) — the final representation |
 
@@ -291,6 +297,7 @@ Detailed analysis for each training run:
 - [v3: 11 fonts, CosineAnnealingLR, 100 epochs](runs/letters/v3-cosine/results.md) — 100% letter, 100% case, all 11 fonts
 - [v4: vertical diversity (VY=1.5), 100 epochs](runs/letters/v4-vertical-diversity/results.md) — 100% with better attention spread
 - [v5: scan phase, 100 epochs](runs/letters/v5-scan/results.md) — 100%, pretrained scan_sensor + content_head
+- [v6: fewer glimpses, learnable scan x](runs/letters/v6-fewer-glimpses/results.md) — 100% with only 8 glimpses (1 scan + 7 read), 38% fewer than v5
 
 **Bigrams** (`runs/bigrams/`):
 - [v1: transfer learning, 300 epochs](runs/bigrams/v1-transfer/results.md) — 97% both-correct
@@ -387,7 +394,7 @@ fbrl/
 +-- Makefile                # Pipeline shortcuts (all targets accept variable overrides)
 +-- thoughts/               # Research notes (non-run-specific)
 +-- runs/                   # Archived models + results, organized by type
-|   +-- letters/            #   Single-letter experiments (v1-v5)
+|   +-- letters/            #   Single-letter experiments (v1-v6)
 |   +-- bigrams/            #   Bigram experiments (v1)
 |   +-- words/              #   Word experiments (v1-v2)
 |   +-- motor/              #   Motor trace experiments (v1)
@@ -405,7 +412,7 @@ The research goal is to scale foveal attention from character recognition toward
 2. **Bigrams** — 200 common English bigrams with two-phase scan/read. Tests sequential reading and per-position classification. *Done — 98-99% with transfer learning. Key finding: 128px canvas is too small for 2 letters to force genuine sequential reading.*
 3. **4-letter words** — 200 common words on 256x128 canvas with prescribed x-scan, content detection, and isolation testing. *Done — 100% all 4 positions (v1, single optimizer). v2 (multi-head optimization + 128px isolation) in progress.*
 4. **Motor traces** — Read-Write-Render-Re-Read loop on single letters. Motor decoder learns to write by re-reading its own output. *Done — v1 with curriculum learning (transfer from v5-scan) achieves 64% re-read accuracy. Vision preserved at 98%. Key insight: the re-read classification signal is too coarse — next iteration will add latent matching, frozen re-reader, and sharper rendering.*
-5. **Scan-anchored grouped read** — Learnable scan x positions that anchor read groups, forcing systematic spatial examination. Planned for both word model (4 groups) and single-letter model (left/center/right strokes). See [word read phase notes](thoughts/word_read_phase.md).
+5. **Interleaved scan-read** — Instead of all scans then all reads, alternate: scan → read group → scan → read group. Each read gets fresh spatial context from the preceding scan. For words: scan position 1 → read letter → scan position 2 → read letter. The atomic unit (1 scan + 7 read per position) is validated on single letters. Test on letters first, then scale to words.
 6. **Multi-font words** — Can the word model generalize across fonts?
 7. **Variable-length words** — Mixed word lengths with a language model prior. Tests whether the model skips predictable letters, fixates word centers, and spends more glimpses on rare words (all human reading behaviors).
 8. **Meta-attention** — A coarse controller that finds word boundaries (whitespace, line breaks) and deploys the fine letter-reader within each region. Hierarchical saccade planning.

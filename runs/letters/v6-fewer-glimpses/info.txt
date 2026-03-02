@@ -1,0 +1,4 @@
+git: n/a
+date: 2026-03-02T13:08:11.832656+00:00
+make: make train CONFIG=configs/letter_anchored.yaml DEVICE=cuda
+cli: vision_training.py train --config configs/letter_anchored.yaml --device cuda

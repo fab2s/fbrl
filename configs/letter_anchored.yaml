@@ -1,15 +1,14 @@
 model_type: letter
 n_positions: 1
-n_scan_glimpses: 3
+n_scan_glimpses: 1
 n_read_glimpses: 7
 scan_patch_size: [12, 18]
 read_patch_size: 12
 latent_dim: 256
 n_scales: 1
 
-# Anchored read: reset read position to middle scan glimpse
-read_anchor_scan_indices: [1]
-n_read_per_group: 7
+# Learnable scan x, flat read (no anchoring)
+learnable_scan_x: true
 
 epochs: 100
 batch_size: 52
