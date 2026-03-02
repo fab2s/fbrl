@@ -182,7 +182,7 @@ CLEAN_MOTOR_MODELS = find data/motor_models -type f ! -name .gitignore ! -name '
 CLEAN_MOTOR_RESULTS = find data/motor_results -type f ! -name .gitignore -delete 2>/dev/null; true
 
 generate-trajectories:
-	$(RUN) generate_trajectories --output_dir data/trajectories --font dejavu-sans --letters $(LETTERS) --n_points 32
+	$(RUN) generate_trajectories --output_dir data/trajectories --font dejavu-sans --letters $(LETTERS) --n_points 48
 
 train-motor:
 	@$(CLEAN_MOTOR_MODELS)

@@ -59,11 +59,13 @@ def _load_model(model_dir, device):
         if isinstance(read_anchor, list):
             read_anchor = tuple(read_anchor)
         n_rpg = ckpt.get('n_read_per_group', None)
+        interleaved = ckpt.get('interleaved', False)
         model = WordVisionModel(
             n_scan_glimpses=n_scan, n_read_glimpses=n_read,
             scan_patch_size=scan_ps, read_patch_size=read_ps,
             n_scales=n_scales, n_positions=n_positions,
             read_anchor_scan_indices=read_anchor, n_read_per_group=n_rpg,
+            interleaved=interleaved,
         ).to(device)
     elif model_type == 'bigram':
         # Two-phase checkpoint (has n_scan_glimpses)

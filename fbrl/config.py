@@ -59,10 +59,11 @@ class ExperimentConfig:
     read_anchor_scan_indices: Optional[tuple] = None  # e.g. (1,2,3,4)
     n_read_per_group: Optional[int] = None            # glimpses per group
     learnable_scan_x: bool = False                    # learn optimal scan x positions
+    interleaved: bool = False                        # interleaved scan-read (1 scan + N reads per position)
 
     # Motor trace
     motor_enabled: bool = False
-    n_trajectory_points: int = 32
+    n_trajectory_points: int = 48
     render_sigma: float = 1.5
     traj_weight: float = 1.0
     traj_scaffold_ratio: float = 0.67

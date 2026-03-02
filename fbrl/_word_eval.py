@@ -48,7 +48,7 @@ def test_word_model(model_dir, test_data_dir, output_dir='word_results', device=
         idx = [ord(l) - ord('a') for l in letters[:n_positions]]
 
         with torch.no_grad():
-            recon, logits_list, locations, _, _, _ = model(img)
+            recon, logits_list, locations, _, _, _, _ = model(img)
 
         preds = [logits_list[p].argmax(dim=1).item() for p in range(n_positions)]
         oks = [preds[p] == idx[p] for p in range(n_positions)]
@@ -545,7 +545,7 @@ def generate_word_atlas(model_dir, test_data_dir, output_path='data/word_atlas.h
         idx = [ord(l) - ord('a') for l in letters[:n_positions]]
 
         with torch.no_grad():
-            recon, logits_list, locations, _, _, _ = model(img_dev)
+            recon, logits_list, locations, _, _, _, _ = model(img_dev)
 
         # Collect fixation coordinates
         fixations = []
@@ -660,7 +660,7 @@ def test_word_isolation(model_dir, test_data_dir, output_dir='word_results', dev
         letter_idx = ord(letter) - ord('a')
 
         with torch.no_grad():
-            _, logits_list, locations, _, _, _ = model(tensor)
+            _, logits_list, locations, _, _, _, _ = model(tensor)
 
         preds = [logits_list[p].argmax(dim=1).item() for p in range(n_positions)]
         oks = [preds[p] == letter_idx for p in range(n_positions)]
@@ -1138,7 +1138,7 @@ def generate_isolation_atlas(model_dir, test_data_dir,
         letter_idx = ord(letter) - ord('a')
 
         with torch.no_grad():
-            _, logits_list, locations, _, _, _ = model(tensor)
+            _, logits_list, locations, _, _, _, _ = model(tensor)
 
         fixations = []
         for loc in locations:

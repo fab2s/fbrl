@@ -69,9 +69,10 @@ def _add_train_overrides(parser):
     parser.add_argument('--isolation_random_prob', type=float, default=None)
     parser.add_argument('--multi_head', action='store_true', default=None)
     parser.add_argument('--amp', action='store_true', default=None)
-    # Grouped read
+    # Grouped read / interleaved
     parser.add_argument('--read_anchor_scan_indices', type=int, nargs='+', default=None)
     parser.add_argument('--n_read_per_group', type=int, default=None)
+    parser.add_argument('--interleaved', action='store_true', default=None)
     # Motor v2 enhanced losses
     parser.add_argument('--case_filter', default=None)
     parser.add_argument('--render_sigma', type=float, default=None)
@@ -252,7 +253,7 @@ if __name__ == '__main__':
     gen_traj_parser = subparsers.add_parser('generate_trajectories')
     gen_traj_parser.add_argument('--output_dir', default='data/trajectories')
     gen_traj_parser.add_argument('--font', default='dejavu-sans')
-    gen_traj_parser.add_argument('--n_points', type=int, default=32)
+    gen_traj_parser.add_argument('--n_points', type=int, default=48)
     gen_traj_parser.add_argument('--letters', default='Aa-Zz')
     gen_traj_parser.add_argument('--mode', choices=['outline', 'centerline'], default='outline')
 

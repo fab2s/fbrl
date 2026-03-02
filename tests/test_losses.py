@@ -119,8 +119,9 @@ class TestTwoPhaseAttentionLoss:
 
 class TestWordAttentionLoss:
     def test_returns_two_scalars(self, bright_image):
-        locs = [torch.zeros(4, 2)] + [torch.randn(4, 2) for _ in range(12)]
-        scan_loss, read_loss = word_attention_loss(bright_image, locs, n_scan=4)
+        scan_locs = [torch.randn(4, 2) for _ in range(4)]
+        read_locs = [torch.randn(4, 2) for _ in range(8)]
+        scan_loss, read_loss = word_attention_loss(bright_image, scan_locs, read_locs)
         assert scan_loss.shape == ()
         assert read_loss.shape == ()
         assert torch.isfinite(scan_loss)

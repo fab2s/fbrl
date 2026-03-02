@@ -222,13 +222,17 @@ def apply_transfer(model, source_path, key_mappings, device,
     dst = model.state_dict()
     n_transferred = 0
 
+    n_skipped = 0
     for key in src:
         for src_prefix, dst_prefix in key_mappings:
             if key.startswith(src_prefix):
                 new_key = key.replace(src_prefix, dst_prefix, 1)
                 if new_key in dst:
-                    dst[new_key] = src[key].float()
-                    n_transferred += 1
+                    if dst[new_key].shape == src[key].shape:
+                        dst[new_key] = src[key].float()
+                        n_transferred += 1
+                    else:
+                        n_skipped += 1
                 break
 
     if broadcast_keys:
@@ -237,11 +241,15 @@ def apply_transfer(model, source_path, key_mappings, device,
                 for pattern in dst_patterns:
                     dk = pattern
                     if dk in dst:
-                        dst[dk] = src[src_suffix].float()
-                        n_transferred += 1
+                        if dst[dk].shape == src[src_suffix].shape:
+                            dst[dk] = src[src_suffix].float()
+                            n_transferred += 1
+                        else:
+                            n_skipped += 1
 
     model.load_state_dict(dst)
-    print(f"Transfer: {n_transferred} tensors from {source_path}")
+    skipped_str = f" ({n_skipped} skipped: shape mismatch)" if n_skipped else ""
+    print(f"Transfer: {n_transferred} tensors from {source_path}{skipped_str}")
 
     if freeze_keys:
         for name, p in model.named_parameters():

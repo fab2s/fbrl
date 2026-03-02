@@ -56,11 +56,16 @@ def train_word_model(cfg):
     device = _resolve_device(cfg.device)
     n_glimpses = n_scan_glimpses + n_read_glimpses
     print(f"Word training on: {device}")
-    grouped_str = ""
-    if cfg.read_anchor_scan_indices:
-        grouped_str = f" [grouped: {len(cfg.read_anchor_scan_indices)} groups × {cfg.n_read_per_group}, anchors={cfg.read_anchor_scan_indices}]"
-    print(f"Two-phase: scan={n_scan_glimpses} (prescribed x, {scan_patch_size}) + "
-          f"read={n_read_glimpses} ({read_patch_size}) = {n_glimpses} glimpses{grouped_str}")
+    if cfg.interleaved:
+        total_glimpses = n_scan_glimpses * (1 + cfg.n_read_per_group)
+        print(f"Interleaved: {n_scan_glimpses} positions × (1 scan + {cfg.n_read_per_group} reads) = "
+              f"{total_glimpses} glimpses  scan={scan_patch_size} read={read_patch_size}")
+    else:
+        grouped_str = ""
+        if cfg.read_anchor_scan_indices:
+            grouped_str = f" [grouped: {len(cfg.read_anchor_scan_indices)} groups × {cfg.n_read_per_group}, anchors={cfg.read_anchor_scan_indices}]"
+        print(f"Two-phase: scan={n_scan_glimpses} (prescribed x, {scan_patch_size}) + "
+              f"read={n_read_glimpses} ({read_patch_size}) = {n_glimpses} glimpses{grouped_str}")
     iso_mode = f"128px ({isolation_data_dir})" if isolation_data_dir else "mask"
     print(f"Attention: guide_weight={guide_weight}  scan_guide={scan_guide_weight}  "
           f"blur_sigma_ratio={blur_sigma_ratio}  "
@@ -92,6 +97,7 @@ def train_word_model(cfg):
         n_scales=n_scales, n_positions=n_positions,
         read_anchor_scan_indices=read_anchor_scan_indices,
         n_read_per_group=n_read_per_group,
+        interleaved=cfg.interleaved,
     ).to(device)
 
     # Transfer learning
@@ -296,43 +302,42 @@ def train_word_model(cfg):
             ]
 
             with autocast('cuda', enabled=use_amp):
-                recon, logits_list, locations, _readout_states, scan_content_logits, read_group_boundaries = model(img)
-                actual_n_scan = len(scan_content_logits)
+                recon, logits_list, locations, _readout_states, scan_content_logits, read_group_boundaries, phase_tags = model(img)
 
                 recon_loss = criterion(recon, img)
                 cls_losses = [F.cross_entropy(logits_list[p], idx_list[p])
                               for p in range(n_positions)]
 
+                # Extract scan/read locations using phase_tags
+                scan_locs = [loc for loc, tag in zip(locations, phase_tags) if tag == 'scan']
+                read_locs = [loc for loc, tag in zip(locations, phase_tags) if tag == 'read']
+
                 scan_attn, read_attn = word_attention_loss(
-                    clean, locations, actual_n_scan,
+                    clean, scan_locs, read_locs,
                     n_positions=n_positions,
                     blur_sigma_ratio=blur_sigma_ratio,
                     scaffold_weight=scaffold_weight,
                     read_group_boundaries=read_group_boundaries,
                 )
 
-                scan_locations = locations[:actual_n_scan + 1]
-                scan_div = fixation_diversity_loss(scan_locations, sigma=diversity_sigma,
-                                                   vy=scan_vy)
+                scan_div = fixation_diversity_loss([locations[0]] + scan_locs,
+                                                   sigma=diversity_sigma, vy=scan_vy)
                 if read_group_boundaries is not None:
                     # Per-group read diversity
-                    read_offset = actual_n_scan + 1
                     group_divs = []
                     for gi, start in enumerate(read_group_boundaries):
-                        end = read_group_boundaries[gi + 1] if gi + 1 < len(read_group_boundaries) else len(locations) - read_offset
-                        group_locs = [locations[0]] + locations[read_offset + start:read_offset + end]
+                        end = read_group_boundaries[gi + 1] if gi + 1 < len(read_group_boundaries) else len(read_locs)
+                        group_locs = [locations[0]] + read_locs[start:end]
                         group_divs.append(fixation_diversity_loss(group_locs, sigma=diversity_sigma, vy=read_vy))
                     read_div = sum(group_divs) / len(group_divs)
                 else:
-                    read_locations = locations[actual_n_scan:]
-                    read_div = fixation_diversity_loss(read_locations, sigma=diversity_sigma,
-                                                       vy=read_vy)
+                    read_div = fixation_diversity_loss([locations[0]] + read_locs,
+                                                       sigma=diversity_sigma, vy=read_vy)
                 div_loss = scan_div + read_div
 
                 content_loss = torch.tensor(0.0, device=device)
                 if content_weight > 0 and len(scan_content_logits) > 0:
-                    scan_locs = locations[1:actual_n_scan + 1]
-                    for t, (loc, logit) in enumerate(zip(scan_locs, scan_content_logits)):
+                    for loc, logit in zip(scan_locs, scan_content_logits):
                         grid = loc.view(B, 1, 1, 2)
                         sampled = F.grid_sample(clean, grid, align_corners=True,
                                                 padding_mode='zeros')
@@ -360,7 +365,7 @@ def train_word_model(cfg):
                 iso_targets_t = torch.tensor(iso_targets, device=device)
                 if not multi_head:
                     with autocast('cuda', enabled=use_amp):
-                        _, iso_logits, _, _, _, _ = model(iso_batch)
+                        _, iso_logits, _, _, _, _, _ = model(iso_batch)
                         isolation_loss = F.cross_entropy(iso_logits[iso_k], iso_targets_t)
             elif isolation_weight > 0:
                 iso_k = torch.randint(0, n_positions, (1,)).item()
@@ -371,7 +376,7 @@ def train_word_model(cfg):
                 masked_img = img * mask
                 if not multi_head:
                     with autocast('cuda', enabled=use_amp):
-                        _, iso_logits, _, _, _, _ = model(masked_img)
+                        _, iso_logits, _, _, _, _, _ = model(masked_img)
                         isolation_loss = F.cross_entropy(iso_logits[iso_k], idx_list[iso_k])
                 else:
                     iso_batch = masked_img
@@ -401,7 +406,7 @@ def train_word_model(cfg):
 
                 if isolation_weight > 0 and iso_batch is not None and active_cls:
                     with autocast('cuda', enabled=use_amp):
-                        _, iso_logits, _, _, _, _ = model(iso_batch)
+                        _, iso_logits, _, _, _, _, _ = model(iso_batch)
                         isolation_loss = F.cross_entropy(iso_logits[iso_k], iso_targets_t)
                     scaler.scale(isolation_weight * isolation_loss).backward(inputs=active_cls)
 
@@ -485,6 +490,9 @@ def train_word_model(cfg):
         else:
             scheduler.step()
 
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+
         if (epoch + 1 - start_epoch) % checkpoint_interval == 0:
             opt_states = None
             if multi_head:
@@ -510,6 +518,7 @@ def train_word_model(cfg):
                 'scaffold_epochs': scaffold_epochs,
                 'read_anchor_scan_indices': read_anchor_scan_indices,
                 'n_read_per_group': n_read_per_group,
+                'interleaved': cfg.interleaved,
             }
             if opt_states:
                 extra.update(opt_states)
@@ -562,6 +571,7 @@ def train_word_model(cfg):
         'n_scales': n_scales, 'n_positions': n_positions,
         'read_anchor_scan_indices': read_anchor_scan_indices,
         'n_read_per_group': n_read_per_group,
+        'interleaved': cfg.interleaved,
     }, weights_path)
     import pathlib
     full_sz = pathlib.Path(final_path).stat().st_size / (1024 * 1024)

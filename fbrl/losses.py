@@ -247,22 +247,21 @@ def fixation_hit_rate(image, locations, threshold=0.3):
 
 # --- Word Attention Loss (scan + read with N-position scaffold) ---
 
-def word_attention_loss(image, locations, n_scan, n_positions=4,
+def word_attention_loss(image, scan_locations, read_locations, n_positions=4,
                          blur_sigma_ratio=0.16, scaffold_weight=1.0,
                          read_group_boundaries=None):
     """Separate attention guides for scan and read phases of word reading.
 
-    Scan phase (locations[1:n_scan+1]): full-image guide — pulls y onto strokes.
-      (x is prescribed, so guide only affects y learning.)
-    Read phase (locations[n_scan+1:]): divide into n_positions equal temporal
-      segments. Segment k gets guide from horizontal stripe
+    Scan phase: full-image guide — pulls y onto strokes.
+    Read phase: divide into n_positions equal temporal segments.
+      Segment k gets guide from horizontal stripe
       [k*W/n_positions, (k+1)*W/n_positions] of the image.
+
+    Callers extract scan/read locations using phase_tags (works for both
+    interleaved and non-interleaved modes).
 
     When read_group_boundaries is provided, group assignment is structural
     (from boundaries list) rather than temporal (t * n_positions // n_read).
-
-    Generalizes two_phase_attention_loss from halves (bigram) to quarters (word)
-    or any n_positions.
 
     Returns (scan_attn_loss, read_attn_loss) separately for independent weighting.
     """
@@ -281,17 +280,15 @@ def word_attention_loss(image, locations, n_scan, n_positions=4,
     guide_full = _blur(image)
 
     # --- Scan loss: full-image guide for all scan locations ---
-    scan_locs = locations[1:n_scan + 1]
     scan_total = 0
-    for loc in scan_locs:
+    for loc in scan_locations:
         grid = loc.view(B, 1, 1, 2)
         sampled = F.grid_sample(guide_full, grid, align_corners=True, padding_mode='zeros')
         scan_total = scan_total + sampled.mean()
-    scan_loss = -scan_total / max(len(scan_locs), 1)
+    scan_loss = -scan_total / max(len(scan_locations), 1)
 
     # --- Read loss: n_positions horizontal stripe scaffold ---
-    read_locs = locations[n_scan + 1:]
-    n_read = len(read_locs)
+    n_read = len(read_locations)
     if n_read == 0:
         return scan_loss, torch.tensor(0.0, device=image.device)
 
@@ -320,7 +317,7 @@ def word_attention_loss(image, locations, n_scan, n_positions=4,
                 _seg_map[tt] = gi
 
     read_total = 0
-    for t, loc in enumerate(read_locs):
+    for t, loc in enumerate(read_locations):
         grid = loc.view(B, 1, 1, 2)
         if scaffold_weight > 0:
             if read_group_boundaries is not None:

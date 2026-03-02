@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import os
 import math
+import numpy as np
 
 
 # --- Trajectory Extraction (fonttools) ---
@@ -101,13 +102,13 @@ def _render_letter_binary(font_path, char, img_size=128, font_size=60):
     x = (img_size - bbox[2] - bbox[0]) / 2
     y = (img_size - bbox[3] - bbox[1]) / 2
     draw.text((x, y), char, fill=255, font=font)
-    import numpy as np
+
     return (np.array(img) > 127).astype(np.uint8)
 
 
 def _skeletonize(binary):
     """Zhang-Suen morphological thinning — produces clean, connected 1px skeleton."""
-    import numpy as np
+
 
     img = binary.copy().astype(np.uint8)
     rows, cols = img.shape
@@ -174,7 +175,7 @@ def _order_skeleton_pixels(skel):
 
     Returns list of (x, y, pen_down) tuples.
     """
-    import numpy as np
+
 
     ys, xs = np.where(skel > 0)
     if len(xs) == 0:
@@ -280,9 +281,10 @@ def extract_centerline_trajectory(font_path, char, n_points=32, img_size=128):
 
     Returns: (n_points, 3) tensor of (x, y, pen_down) in [-1, 1].
     """
-    import numpy as np
+    import scipy.ndimage as ndi
 
     binary = _render_letter_binary(font_path, char, img_size=img_size)
+    binary = ndi.binary_closing(binary, structure=np.ones((3, 3))).astype(np.uint8)
     skel = _skeletonize(binary)
 
     ordered = _order_skeleton_pixels(skel)

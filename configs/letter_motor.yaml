@@ -4,8 +4,9 @@ n_scan_glimpses: 3
 n_read_glimpses: 10
 scan_patch_size: [12, 18]
 read_patch_size: 12
-latent_dim: 256
+latent_dim: 384
 n_scales: 1
+case_filter: lower
 
 epochs: 200
 batch_size: 52
@@ -25,8 +26,8 @@ recode_weight: 1.0
 
 # Motor
 motor_enabled: true
-n_trajectory_points: 32
-render_sigma: 1.5
+n_trajectory_points: 48
+render_sigma: 0.75
 traj_weight: 1.0
 traj_scaffold_ratio: 0.67
 traj_scaffold_floor: 0.1
