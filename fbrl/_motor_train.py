@@ -91,6 +91,8 @@ def train_motor_model(cfg):
               f"traj_scaffold=OFF  rr_cls_weight={rr_cls_weight}"
               f"{v2_str}")
 
+    single_case = cfg.case_filter in ('upper', 'lower')
+
     os.makedirs(save_dir, exist_ok=True)
     save_run_info(save_dir, cfg)
     dataset = LetterDataset(data_dir, case_filter=cfg.case_filter)
@@ -458,13 +460,16 @@ def train_motor_model(cfg):
             v2_str += f"  FrzRR {avgs['frozen_rr']:.4f}"
         if render_match_weight > 0:
             v2_str += f"  RndM {avgs['render_match']:.4f}"
+        case_disp = 'xxxxx' if single_case else f"{avgs['case_cls']:.4f}"
+        recode_disp = 'xxxxx' if single_case else f"{avgs['recode']:.4f}"
+        rr_case_disp = 'xxxxx' if single_case else f"{avgs['rr_case_acc']:.0%}"
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avgs['recon']:.4f}  Ltr {avgs['letter_cls']:.4f}  "
-              f"Case {avgs['case_cls']:.4f}  Attn {avgs['attn']:.4f}  "
+              f"Case {case_disp}  Attn {avgs['attn']:.4f}  "
               f"Div {avgs['div']:.4f}{content_str}{void_str}  Hit {avgs['hit_rate']:.0%}  "
-              f"Recode {avgs['recode']:.4f}{traj_str}  "
+              f"Recode {recode_disp}{traj_str}  "
               f"RR_cls {avgs['rr_cls']:.4f}  RR_ltr {avgs['rr_letter_acc']:.0%}  "
-              f"RR_case {avgs['rr_case_acc']:.0%}{v2_str}  "
+              f"RR_case {rr_case_disp}{v2_str}  "
               f"lr {lr_attn:.6f}/{lr_motor:.6f}{scaff_str}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
@@ -480,12 +485,15 @@ def train_motor_model(cfg):
             v2_log += f"  {avgs['frozen_rr']:>6.4f}"
         if render_match_weight > 0:
             v2_log += f"  {avgs['render_match']:>6.4f}"
+        case_log = ' xxxxx' if single_case else f"{avgs['case_cls']:>6.4f}"
+        recode_log = ' xxxxx' if single_case else f"{avgs['recode']:>6.4f}"
+        rr_case_log = ' xxxxx' if single_case else f"{avgs['rr_case_acc']:>6.4f}"
         logger.write_line(
             f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {avgs['letter_cls']:>6.4f}  "
-            f"{avgs['case_cls']:>6.4f}  {avgs['attn']:>7.4f}  {avgs['div']:>6.4f}  "
-            f"{avgs['hit_rate']:>6.4f}  {avgs['recode']:>6.4f}{content_log}{void_log}"
+            f"{case_log}  {avgs['attn']:>7.4f}  {avgs['div']:>6.4f}  "
+            f"{avgs['hit_rate']:>6.4f}  {recode_log}{content_log}{void_log}"
             f"{traj_log}  {avgs['rr_cls']:>6.4f}  "
-            f"{avgs['rr_letter_acc']:>6.4f}  {avgs['rr_case_acc']:>6.4f}"
+            f"{avgs['rr_letter_acc']:>6.4f}  {rr_case_log}"
             f"{v2_log}  "
             f"{lr_attn:>8.6f}  {lr_motor:>8.6f}{scaff_log}  {epoch_time:.1f}s")
 
