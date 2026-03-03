@@ -14,7 +14,7 @@ This extends naturally as the project scales. At word level, the feedback loop b
 
 ## Key Results
 
-**Single letters** — 100% letter and case accuracy across 52 classes (Aa-Zz) and 11 fonts, with pixel-perfect case recoding (encode 'a', decode as 'A'). Achieves this with only **8 glimpses** (1 learnable scan + 7 read) — a 38% reduction from the initial 13-glimpse architecture with zero accuracy loss.
+**Single letters** — 100% letter and case accuracy across 52 classes (Aa-Zz) and 11 fonts, with pixel-perfect case recoding (encode 'a', decode as 'A'). Achieves this with only **7 glimpses** (1 scan + 6 read) — 46% fewer than the initial 13-glimpse architecture with zero accuracy loss. Blurred guide steers the scan onto ink; void repulsion keeps reads from staring at empty space; no attention guide needed for reads.
 
 **Bigrams** — Two-phase scan/read architecture on 128x128 canvas. 98-99% both-correct on 200 common English bigrams with transfer learning.
 
@@ -65,6 +65,18 @@ The prescribed x-scan (fixed left-to-right sweep with learned y) develops a slig
 The model achieves 100% accuracy with only 8 glimpses (1 learnable scan + 7 read) — a 38% reduction from the original 13 (3 scan + 10 read). Learnable scan x positions drift closer to letter content than prescribed evenly-spaced positions, and the v5 edge scans were largely wasted on empty space.
 
 But *anchoring* read positions to scan locations (resetting the GRU's position at the start of each read group) causes catastrophic overfitting: 0% train error, 48.6% test accuracy. The GRU's spatial continuity — carrying momentum from one glimpse to the next — is essential. Flat read (continuing from where the last scan landed) works; position reset breaks it. Recode quality (case-flipped reconstruction) degrades slightly with fewer glimpses, revealing the compression edge: classification saturates before spatial detail does.
+
+### Self-scaffolding: loss terms sequence by difficulty
+
+During v7 training (1 scan + 6 read, void repulsion), classification (letter + case) converges to 0.000 by ~epoch 57, while recode is still at 0.0014 and actively dropping. No curriculum learning, no staged training, no frozen weights — all losses are active from epoch 1 with fixed weights. The difficulty ordering emerges from the signal structure itself:
+
+1. **Classification** (easiest — 26 discrete bins, strong CE gradient) → converges first, locks in useful attention patterns
+2. **Reconstruction** (pixel-level fidelity) → converges alongside classification
+3. **Recode** (hardest — requires the latent to factorize letter identity from case) → takes over as the dominant gradient signal once classification saturates
+
+The easy tasks bootstrap the representations that hard tasks need. Classification forces the attention controller to find diagnostic fixations; those fixations then provide the spatial detail that recode needs to achieve clean case-flipped reconstruction. The encode-decode-recode loop acts as a self-scaffolding system — analogous to how brains learn from the same sensory stream, with edges consolidating before objects before reading, without an external scheduler.
+
+**Practical implication**: when designing multi-task losses, intrinsic task difficulty can replace explicit curriculum design. The requirements are: (1) shared representations, (2) natural difficulty ordering, and (3) easy tasks that constrain the representation space in ways that help the hard tasks.
 
 ### Interior positions learn faster than edges
 
@@ -298,6 +310,7 @@ Detailed analysis for each training run:
 - [v4: vertical diversity (VY=1.5), 100 epochs](runs/letters/v4-vertical-diversity/results.md) — 100% with better attention spread
 - [v5: scan phase, 100 epochs](runs/letters/v5-scan/results.md) — 100%, pretrained scan_sensor + content_head
 - [v6: fewer glimpses, learnable scan x](runs/letters/v6-fewer-glimpses/results.md) — 100% with only 8 glimpses (1 scan + 7 read), 38% fewer than v5
+- [v7: void repulsion](runs/letters/v7-void-repulsion/results.md) — 100% with 7 glimpses (1 scan + 6 read), 46% fewer than v5. Blurred guide for scan only, void repulsion for reads, isotropic diversity. Self-scaffolding discovery.
 
 **Bigrams** (`runs/bigrams/`):
 - [v1: transfer learning, 300 epochs](runs/bigrams/v1-transfer/results.md) — 97% both-correct

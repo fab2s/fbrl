@@ -100,6 +100,32 @@ Each stage added constraints because the previous stage found a shortcut. The pa
 
 **Extension**: Adding motor trace and phoneme decoding would bring the word model to ~11+ constraints. The hypothesis predicts that this would not just add capabilities but would *improve existing capabilities* (better letter recognition, more efficient scanning) because the latent has to be more abstract to satisfy all constraints simultaneously.
 
+## Hypothesis 6: Emergent Curriculum — Multi-Task Losses Self-Scaffold
+
+**Confirmed experimentally (v7)**: When multiple loss terms of different intrinsic difficulty share the same latent bottleneck, they naturally sequence their convergence without any explicit curriculum, staged training, or weight annealing.
+
+**Observation**: In v7 training (1 scan + 6 read, all losses active from epoch 1 with fixed weights):
+- Classification (26 bins, strong CE gradient) → converges to 0.000 by ~epoch 57
+- Reconstruction (pixel-level MSE) → converges alongside
+- Recode (requires latent to factorize identity from case) → still at 0.0014 at epoch 57, takes over as dominant gradient signal
+
+**Mechanism**: The difficulty gradient is intrinsic to the signal structure, not the loss weights. Classification is fundamentally easier (26 discrete bins vs pixel-level reconstruction vs abstract factorization). Easy tasks lock in attention patterns early, bootstrapping the representations that hard tasks need. Classification forces diagnostic fixations → those fixations provide spatial detail for recode → recode refines the latent factorization that classification doesn't care about. Each level scaffolds the next.
+
+**Why this is distinct from known techniques**:
+- **Curriculum learning**: requires an external scheduler that controls task ordering
+- **Progressive training**: explicitly freezes/unfreezes components in stages
+- **Loss weighting schedules**: manually anneal loss weights over time
+- **Self-scaffolding**: none of the above — all losses active, all weights fixed, ordering emerges from the loss landscape geometry
+
+**Testable predictions**:
+1. **Motor loss sequencing**: Adding motor trace decoding (trajectory scaffold + latent matching + re-read classification) should converge in difficulty order: trajectory scaffold (easy geometry) → re-read classification (medium, 26 bins on rendered image) → latent matching (hard, full representational identity). Already partially confirmed: trajectory MSE drops fastest in motor v1/v2 training.
+2. **New constraint slot**: Adding a constraint of known intermediate difficulty (e.g., font classification) should slot into the convergence timeline between classification and recode, without disrupting the existing ordering.
+3. **Disruption test**: Making the "easy" task artificially hard (e.g., 1000-class fine-grained classification instead of 26) should delay its convergence and consequently slow recode — because the scaffold is missing.
+
+**Relation to Hypothesis 5 (Constraint Count)**: Hypothesis 5 says more constraints → more abstract representations. Hypothesis 6 adds: the constraints don't just co-exist, they *sequence* — each one scaffolding the next in difficulty order. The count matters, but so does the difficulty spectrum. Optimal multi-task design would spread constraints across the difficulty range to create a smooth self-scaffolding gradient.
+
+**Biological analogy**: The brain learns from the same sensory stream at all levels simultaneously. Edge detectors consolidate before object recognition before reading — not because of an external curriculum, but because edges are intrinsically easier to extract. The difficulty gradient IS the curriculum. The encode-decode-recode loop may be capturing the same principle: the right architecture + the right loss landscape = emergent curriculum for free.
+
 ## Future Directions
 
 ### Near-term (single GPU feasible)
