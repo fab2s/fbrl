@@ -789,8 +789,8 @@ class WordVisionModel(nn.Module):
 
         # Learnable scan x positions
         if interleaved:
-            # Interleaved: one scan per letter center, no boundary scans
-            init_xs = torch.linspace(-0.75, 0.75, n_positions)
+            # Interleaved: one scan per letter center, tighter init to land on content
+            init_xs = torch.linspace(-0.5, 0.5, n_positions)
             self.scan_xs = nn.Parameter(torch.atanh(init_xs))
         elif read_anchor_scan_indices is not None:
             # Grouped read: boundary scans at ±0.99, inner at letter centers

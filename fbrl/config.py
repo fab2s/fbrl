@@ -36,6 +36,8 @@ class ExperimentConfig:
     read_vy: float = 1.5
     content_weight: float = 0.5
     edge_weight: float = 0.0
+    void_weight: float = 0.0             # void repulsion (reads)
+    scan_void_weight: float = 0.0       # void repulsion (scans)
 
     # Scaffold & transfer
     scaffold_ratio: float = 0.67

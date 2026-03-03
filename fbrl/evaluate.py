@@ -104,16 +104,23 @@ def _load_model(model_dir, device):
 # --- Attention Visualization ---
 
 def visualize_attention(img_tensor, locations, save_path):
-    """Overlay fixation points and saccade arrows on image."""
+    """Overlay fixation points and saccade arrows on image.
+
+    Drops the last location (vestigial GRU "next" prediction that is
+    never sampled) so only actually-used fixation points are shown.
+    """
     img = img_tensor.squeeze(0).cpu().detach().numpy()
     H, W = img.shape
+
+    # Drop vestigial last location (predicted but never sampled)
+    locs = locations[:-1]
 
     fig, ax = plt.subplots(1, 1, figsize=(4, 4))
     ax.imshow(img, cmap='gray', vmin=0, vmax=1)
 
-    colors = plt.cm.hot(np.linspace(0.2, 0.9, len(locations)))
+    colors = plt.cm.hot(np.linspace(0.2, 0.9, len(locs)))
 
-    for i, loc in enumerate(locations):
+    for i, loc in enumerate(locs):
         loc_np = loc[0].cpu().detach().numpy()
         px = (loc_np[0] + 1) / 2 * W
         py = (loc_np[1] + 1) / 2 * H
@@ -124,13 +131,13 @@ def visualize_attention(img_tensor, locations, save_path):
                     ha='center', va='center')
 
         if i > 0:
-            prev_np = locations[i - 1][0].cpu().detach().numpy()
+            prev_np = locs[i - 1][0].cpu().detach().numpy()
             prev_px = (prev_np[0] + 1) / 2 * W
             prev_py = (prev_np[1] + 1) / 2 * H
             ax.annotate('', xy=(px, py), xytext=(prev_px, prev_py),
                         arrowprops=dict(arrowstyle='->', color=colors[i], lw=1.5))
 
-    ax.set_title(f'{len(locations)} fixations')
+    ax.set_title(f'{len(locs)} fixations')
     ax.axis('off')
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
@@ -742,8 +749,9 @@ def generate_atlas(model_dir, test_data_dir, output_path='data/letter_atlas.html
             _, letter_logits, case_logits, locations, _, _ = model(img_dev, case_float)
 
         # Collect fixation coordinates as [[x, y], ...] in normalized [-1, 1]
+        # Drop last location (vestigial GRU prediction, never sampled)
         fixations = []
-        for loc in locations:
+        for loc in locations[:-1]:
             loc_np = loc[0].cpu().detach().tolist()
             fixations.append([round(loc_np[0], 4), round(loc_np[1], 4)])
 
@@ -1331,8 +1339,9 @@ def generate_bigram_atlas(model_dir, test_data_dir, output_path='data/bigram_atl
             recon, logits_list, locations, _ = model(img_dev)
 
         # Collect fixation coordinates as [[x, y], ...] in normalized [-1, 1]
+        # Drop last location (vestigial GRU prediction, never sampled)
         fixations = []
-        for loc in locations:
+        for loc in locations[:-1]:
             loc_np = loc[0].cpu().detach().tolist()
             fixations.append([round(loc_np[0], 4), round(loc_np[1], 4)])
 

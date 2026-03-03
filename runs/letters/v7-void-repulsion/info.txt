@@ -1,0 +1,4 @@
+git: n/a
+date: 2026-03-03T16:05:30.068234+00:00
+make: make train CONFIG=configs/letter_scan_guided.yaml DEVICE=auto
+cli: vision_training.py train --config configs/letter_scan_guided.yaml --device auto

@@ -15,7 +15,8 @@ checkpoint_interval: 50
 multi_head: true
 amp: true
 
-guide_weight: 8.0
+scan_guide_weight: 8.0
+guide_weight: 0.0
 blur_sigma_ratio: 0.16
 diversity_weight: 1.0
 diversity_sigma: 0.1

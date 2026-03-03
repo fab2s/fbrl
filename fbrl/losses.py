@@ -247,6 +247,46 @@ def fixation_hit_rate(image, locations, threshold=0.3):
 
 # --- Word Attention Loss (scan + read with N-position scaffold) ---
 
+def void_repulsion(image, locations, patch_h, patch_w, threshold=0.1):
+    """Penalize glimpses that see no ink in their full patch.
+
+    Samples the full patch_h x patch_w area at each location (matching
+    GlimpseSensor native resolution). Penalty is active only when the
+    patch maximum is below threshold — once any ink pixel is detected,
+    gradient saturates to zero.
+
+    Returns loss (negative, to be minimized): -1.0 when all patches
+    contain ink, 0.0 when all patches are pure void.
+    """
+    if len(locations) == 0:
+        return torch.tensor(0.0, device=image.device)
+
+    B, C, H, W = image.shape
+    device = image.device
+
+    # Build base grid at native patch resolution
+    # Same math as GlimpseSensor._make_grid with scale=1
+    delta_h = patch_h / H
+    delta_w = patch_w / W
+    grid_y = torch.linspace(-delta_h, delta_h, patch_h, device=device)
+    grid_x = torch.linspace(-delta_w, delta_w, patch_w, device=device)
+    grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing='ij')
+    base_grid = torch.stack([grid_x, grid_y], dim=-1)  # (patch_h, patch_w, 2)
+
+    total = 0
+    for loc in locations:
+        # Offset grid by location: (B, patch_h, patch_w, 2)
+        grid = base_grid.unsqueeze(0) + loc.view(B, 1, 1, 2)
+        sampled = F.grid_sample(image, grid, align_corners=True, padding_mode='zeros')
+        # Max across entire patch per sample: (B,)
+        patch_max = sampled.view(B, -1).max(dim=1).values
+        # Saturating penalty: 0 when void, 1 when ink found
+        saturation = (patch_max / threshold).clamp(max=1.0)
+        total = total + saturation.mean()
+
+    return -total / len(locations)
+
+
 def word_attention_loss(image, scan_locations, read_locations, n_positions=4,
                          blur_sigma_ratio=0.16, scaffold_weight=1.0,
                          read_group_boundaries=None):

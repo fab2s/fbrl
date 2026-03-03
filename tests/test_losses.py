@@ -9,6 +9,7 @@ from fbrl.losses import (
     fixation_hit_rate,
     two_phase_attention_loss,
     word_attention_loss,
+    void_repulsion,
 )
 
 
@@ -126,3 +127,46 @@ class TestWordAttentionLoss:
         assert read_loss.shape == ()
         assert torch.isfinite(scan_loss)
         assert torch.isfinite(read_loss)
+
+
+class TestVoidRepulsion:
+    def test_bright_saturates(self, bright_image):
+        """All-ink image: every patch saturates, loss = -1.0."""
+        locs = [torch.zeros(4, 2) for _ in range(3)]
+        loss = void_repulsion(bright_image, locs, patch_h=12, patch_w=12)
+        assert abs(loss.item() - (-1.0)) < 1e-5
+
+    def test_dark_zero(self, dark_image):
+        """All-void image: no ink anywhere, loss = 0.0."""
+        locs = [torch.zeros(4, 2) for _ in range(3)]
+        loss = void_repulsion(dark_image, locs, patch_h=12, patch_w=12)
+        assert abs(loss.item()) < 1e-5
+
+    def test_gradient_flows_near_ink(self):
+        """Patch over spatially-varying sub-threshold ink gets nonzero gradient."""
+        # Horizontal ramp 0→0.09 (all below threshold=0.1)
+        # Max in any patch is at rightmost edge → grid_sample spatial gradient exists
+        img = torch.linspace(0, 0.09, 128).view(1, 1, 1, 128).expand(1, 1, 128, 128).clone()
+        loc = torch.tensor([[0.0, 0.0]], requires_grad=True)
+        loss = void_repulsion(img, [loc], patch_h=12, patch_w=12)
+        loss.backward()
+        assert loc.grad[0, 0].abs().item() > 0
+
+    def test_saturation_kills_gradient(self):
+        """When patch contains ink, gradient should be zero (clamped)."""
+        img = torch.ones(1, 1, 128, 128)
+        loc = torch.tensor([[0.0, 0.0]], requires_grad=True)
+        loss = void_repulsion(img, [loc], patch_h=12, patch_w=12)
+        loss.backward()
+        assert loc.grad.abs().max().item() < 1e-6
+
+    def test_rectangular_patch(self, bright_image):
+        """12x18 scan patch should work the same as square."""
+        locs = [torch.zeros(4, 2) for _ in range(2)]
+        loss = void_repulsion(bright_image, locs, patch_h=12, patch_w=18)
+        assert abs(loss.item() - (-1.0)) < 1e-5
+
+    def test_empty_locations(self, bright_image):
+        """No locations -> zero loss."""
+        loss = void_repulsion(bright_image, [], patch_h=12, patch_w=12)
+        assert loss.item() == 0.0

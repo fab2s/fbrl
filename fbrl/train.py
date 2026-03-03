@@ -11,7 +11,7 @@ from fbrl.data import LetterDataset, BigramDataset
 from fbrl.model import VisionModel, BigramVisionModel
 from fbrl.losses import (attention_content_loss, two_phase_attention_loss,
                           fixation_diversity_loss, fixation_edge_loss,
-                          fixation_hit_rate)
+                          fixation_hit_rate, void_repulsion)
 from fbrl.training_utils import (LossTracker, TrainingLogger, save_checkpoint,
                                   apply_transfer, plot_training_metrics, format_eta,
                                   save_run_info)
@@ -37,6 +37,8 @@ def train_model(cfg):
     diversity_sigma = cfg.diversity_sigma
     diversity_vy = cfg.diversity_vy
     recode_weight = cfg.recode_weight
+    void_weight = cfg.void_weight
+    scan_void_weight = cfg.scan_void_weight
     batch_size = cfg.batch_size
     epochs = cfg.epochs
     resume = cfg.resume
@@ -75,7 +77,7 @@ def train_model(cfg):
 
     # Loss tracking
     loss_names = ['recon', 'letter_cls', 'case_cls', 'attn', 'div',
-                  'recode', 'content', 'hit_rate', 'hit_intensity']
+                  'recode', 'content', 'void', 'hit_rate', 'hit_intensity']
     tracker = LossTracker(loss_names)
 
     start_epoch = 0
@@ -160,9 +162,20 @@ def train_model(cfg):
                     content_loss = content_loss + bce(logit, label)
                 content_loss = content_loss / actual_n_scan
 
+            void_loss = torch.tensor(0.0, device=device)
+            if scan_void_weight > 0 and actual_n_scan > 0:
+                scan_sample_locs = locations[1:actual_n_scan + 1]
+                scan_ph, scan_pw = scan_patch_size
+                void_loss = void_loss + scan_void_weight * void_repulsion(
+                    clean, scan_sample_locs, scan_ph, scan_pw)
+            if void_weight > 0:
+                read_sample_locs = locations[actual_n_scan + 1:-1]
+                void_loss = void_loss + void_weight * void_repulsion(
+                    clean, read_sample_locs, patch_size, patch_size)
+
             total_loss = (recon_loss + letter_cls_loss + case_cls_loss
                           + attn_loss + diversity_weight * div_loss
-                          + content_weight * content_loss)
+                          + content_weight * content_loss + void_loss)
 
             recode_loss_val = 0.0
             if dataset.has_partners and recode_weight > 0:
@@ -183,6 +196,7 @@ def train_model(cfg):
             tracker.update(recon=recon_loss, letter_cls=letter_cls_loss,
                            case_cls=case_cls_loss, attn=attn_loss,
                            div=div_loss, content=content_loss,
+                           void=void_loss,
                            recode=recode_loss_val, hit_rate=hr, hit_intensity=hi)
 
         avgs = tracker.end_epoch()
@@ -193,10 +207,11 @@ def train_model(cfg):
         current_lr = scheduler.get_last_lr()[0]
 
         content_str = f"  Cont {avgs['content']:.4f}" if n_scan_glimpses > 0 else ""
+        void_str = f"  Void {avgs['void']:.4f}" if (void_weight > 0 or scan_void_weight > 0) else ""
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avgs['recon']:.4f}  Ltr {avgs['letter_cls']:.4f}  "
               f"Case {avgs['case_cls']:.4f}  Attn {avgs['attn']:.4f}  "
-              f"Div {avgs['div']:.4f}{content_str}  Hit {avgs['hit_rate']:.0%}  "
+              f"Div {avgs['div']:.4f}{content_str}{void_str}  Hit {avgs['hit_rate']:.0%}  "
               f"Recode {avgs['recode']:.4f}  "
               f"lr {current_lr:.6f}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")

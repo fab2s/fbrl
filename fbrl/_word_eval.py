@@ -547,9 +547,9 @@ def generate_word_atlas(model_dir, test_data_dir, output_path='data/word_atlas.h
         with torch.no_grad():
             recon, logits_list, locations, _, _, _, _ = model(img_dev)
 
-        # Collect fixation coordinates
+        # Collect fixation coordinates (drop vestigial last GRU prediction)
         fixations = []
-        for loc in locations:
+        for loc in locations[:-1]:
             loc_np = loc[0].cpu().detach().tolist()
             fixations.append([round(loc_np[0], 4), round(loc_np[1], 4)])
 
@@ -1140,8 +1140,9 @@ def generate_isolation_atlas(model_dir, test_data_dir,
         with torch.no_grad():
             _, logits_list, locations, _, _, _, _ = model(tensor)
 
+        # Drop vestigial last GRU prediction
         fixations = []
-        for loc in locations:
+        for loc in locations[:-1]:
             loc_np = loc[0].cpu().detach().tolist()
             fixations.append([round(loc_np[0], 4), round(loc_np[1], 4)])
 
