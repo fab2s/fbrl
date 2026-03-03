@@ -1,12 +1,13 @@
 model_type: letter_motor
 n_positions: 1
-n_scan_glimpses: 3
-n_read_glimpses: 10
+n_scan_glimpses: 1
+n_read_glimpses: 6
 scan_patch_size: [12, 18]
 read_patch_size: 12
 latent_dim: 384
 n_scales: 1
 case_filter: lower
+learnable_scan_x: true
 
 epochs: 200
 batch_size: 52
@@ -14,26 +15,32 @@ checkpoint_interval: 10
 multi_head: true
 amp: false
 
-guide_weight: 8.0
+# Attention — v7 pattern
+scan_guide_weight: 8.0
+guide_weight: 0.0
 blur_sigma_ratio: 0.16
 diversity_weight: 1.0
 diversity_sigma: 0.1
 scan_vy: 0.3
-read_vy: 1.5
-diversity_vy: 1.5
+read_vy: 1.0
+diversity_vy: 1.0
 content_weight: 0.5
 recode_weight: 1.0
+void_weight: 0.5
+scan_void_weight: 1.5
 
-# Motor
+# Motor — enhanced v2 loss stack
 motor_enabled: true
 n_trajectory_points: 48
 render_sigma: 0.75
-traj_weight: 1.0
-traj_scaffold_ratio: 0.67
-traj_scaffold_floor: 0.1
+traj_weight: 0.5
+traj_scaffold_ratio: 0.25
+traj_scaffold_floor: 0.05
 rr_cls_weight: 1.0
+latent_match_weight: 2.0
+render_match_weight: 0.25
 canonical_font: dejavu-sans
-trajectory_data_dir: data/trajectories
+trajectory_data_dir: data/trajectories_centerline
 
 data_dir: data/letters
 save_dir: data/motor_models

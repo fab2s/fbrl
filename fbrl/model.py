@@ -508,7 +508,8 @@ class MotorVisionModel(nn.Module):
                  patch_size=12, n_scales=1,
                  n_scan_glimpses=0, scan_patch_size=(12, 18),
                  n_trajectory_points=32, render_sigma=1.5,
-                 read_anchor_scan_indices=None, n_read_per_group=None):
+                 read_anchor_scan_indices=None, n_read_per_group=None,
+                 learnable_scan_x=False):
         super().__init__()
         self.n_scan_glimpses = n_scan_glimpses
         self.read_anchor_scan_indices = read_anchor_scan_indices
@@ -527,8 +528,8 @@ class MotorVisionModel(nn.Module):
             )
             self.content_head = nn.Linear(latent_dim, 1)
 
-        # Learnable scan x positions (when anchored read enabled)
-        if read_anchor_scan_indices is not None and n_scan_glimpses > 0:
+        # Learnable scan x positions
+        if learnable_scan_x and n_scan_glimpses > 0:
             init_xs = torch.linspace(-0.75, 0.75, n_scan_glimpses)
             self.scan_xs = nn.Parameter(torch.atanh(init_xs))
         else:

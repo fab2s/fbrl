@@ -14,7 +14,7 @@ from fbrl.data import LetterDataset
 from fbrl.model import MotorVisionModel, encode_scan_read
 from fbrl.motor import load_trajectory_data, batch_gt_trajectories
 from fbrl.losses import (attention_content_loss, fixation_diversity_loss,
-                          fixation_hit_rate)
+                          fixation_hit_rate, void_repulsion)
 from fbrl.training_utils import (LossTracker, TrainingLogger, save_checkpoint,
                                   plot_training_metrics, format_eta,
                                   apply_transfer, save_run_info)
@@ -62,6 +62,8 @@ def train_motor_model(cfg):
     latent_match_weight = cfg.latent_match_weight
     frozen_rr_weight = cfg.frozen_rr_weight
     render_match_weight = cfg.render_match_weight
+    void_weight = cfg.void_weight
+    scan_void_weight = cfg.scan_void_weight
 
     device = _resolve_device(cfg.device)
     print(f"Motor training on: {device}")
@@ -114,6 +116,7 @@ def train_motor_model(cfg):
         n_trajectory_points=n_trajectory_points, render_sigma=render_sigma,
         read_anchor_scan_indices=cfg.read_anchor_scan_indices,
         n_read_per_group=cfg.n_read_per_group,
+        learnable_scan_x=cfg.learnable_scan_x,
     ).to(device)
 
     # Transfer learning from pretrained vision model
@@ -173,7 +176,7 @@ def train_motor_model(cfg):
 
     # Loss tracking
     loss_names = ['recon', 'letter_cls', 'case_cls', 'attn', 'div',
-                  'recode', 'content', 'hit_rate', 'hit_intensity',
+                  'recode', 'content', 'void', 'hit_rate', 'hit_intensity',
                   'rr_cls', 'rr_letter_acc', 'rr_case_acc']
     if traj_weight > 0:
         loss_names[len(loss_names):len(loss_names)] = ['traj_mse', 'pen_bce']
@@ -237,8 +240,9 @@ def train_motor_model(cfg):
         v2_hdr += f"  {'rnd_m':>6s}"
     traj_hdr = f"  {'traj':>6s}  {'pen':>6s}" if traj_weight > 0 else ""
     scaff_hdr = f"  {'scaff':>6s}" if traj_weight > 0 else ""
+    void_hdr = f"  {'void':>6s}" if (void_weight > 0 or scan_void_weight > 0) else ""
     header = (f"{'epoch':>5s}  {'recon':>6s}  {'ltr':>6s}  {'case':>6s}  {'attn':>7s}  {'div':>6s}  "
-              f"{'hit':>6s}  {'recode':>6s}{content_hdr}"
+              f"{'hit':>6s}  {'recode':>6s}{content_hdr}{void_hdr}"
               f"{traj_hdr}  {'rr_cls':>6s}  "
               f"{'rr_ltr':>6s}  {'rr_cas':>6s}"
               f"{v2_hdr}  "
@@ -305,6 +309,17 @@ def train_motor_model(cfg):
                     content_loss = content_loss + bce(logit, label)
                 content_loss = content_loss / actual_n_scan
 
+            void_loss = torch.tensor(0.0, device=device)
+            if scan_void_weight > 0 and actual_n_scan > 0:
+                scan_sample_locs = locations[1:actual_n_scan + 1]
+                scan_ph, scan_pw = scan_patch_size
+                void_loss = void_loss + scan_void_weight * void_repulsion(
+                    clean, scan_sample_locs, scan_ph, scan_pw)
+            if void_weight > 0:
+                read_sample_locs = locations[actual_n_scan + 1:-1]
+                void_loss = void_loss + void_weight * void_repulsion(
+                    clean, read_sample_locs, patch_size, patch_size)
+
             recode_loss_val = 0.0
             if dataset.has_partners and recode_weight > 0:
                 flipped_case = 1.0 - case_float
@@ -318,7 +333,7 @@ def train_motor_model(cfg):
             recon_opt.zero_grad()
 
             # Head 1: attention -> controller + sensors
-            attn_total = attn_loss + diversity_weight * div_loss + content_weight * content_loss
+            attn_total = attn_loss + diversity_weight * div_loss + content_weight * content_loss + void_loss
             attn_total.backward(retain_graph=True, inputs=attn_params)
 
             # Head 2: classification -> classifiers
@@ -416,6 +431,7 @@ def train_motor_model(cfg):
             tracker.update(
                 recon=recon_loss, letter_cls=letter_cls_loss, case_cls=case_cls_loss,
                 attn=attn_loss, div=div_loss, content=content_loss,
+                void=void_loss,
                 recode=recode_loss_val, hit_rate=hr, hit_intensity=hi,
                 rr_cls=rr_cls_loss,
                 rr_letter_acc=rr_letter_acc, rr_case_acc=rr_case_acc,
@@ -431,6 +447,7 @@ def train_motor_model(cfg):
         lr_motor = motor_sched.get_last_lr()[0]
 
         content_str = f"  Cont {avgs['content']:.4f}" if n_scan_glimpses > 0 else ""
+        void_str = f"  Void {avgs['void']:.4f}" if (void_weight > 0 or scan_void_weight > 0) else ""
         traj_str = (f"  TrajMSE {avgs['traj_mse']:.4f}  PenBCE {avgs['pen_bce']:.4f}"
                     if traj_weight > 0 else "")
         scaff_str = f"  scaff {traj_scaff_w:.2f}" if traj_weight > 0 else ""
@@ -444,7 +461,7 @@ def train_motor_model(cfg):
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avgs['recon']:.4f}  Ltr {avgs['letter_cls']:.4f}  "
               f"Case {avgs['case_cls']:.4f}  Attn {avgs['attn']:.4f}  "
-              f"Div {avgs['div']:.4f}{content_str}  Hit {avgs['hit_rate']:.0%}  "
+              f"Div {avgs['div']:.4f}{content_str}{void_str}  Hit {avgs['hit_rate']:.0%}  "
               f"Recode {avgs['recode']:.4f}{traj_str}  "
               f"RR_cls {avgs['rr_cls']:.4f}  RR_ltr {avgs['rr_letter_acc']:.0%}  "
               f"RR_case {avgs['rr_case_acc']:.0%}{v2_str}  "
@@ -452,6 +469,7 @@ def train_motor_model(cfg):
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
         content_log = f"  {avgs['content']:>7.4f}" if n_scan_glimpses > 0 else ""
+        void_log = f"  {avgs['void']:>6.4f}" if (void_weight > 0 or scan_void_weight > 0) else ""
         traj_log = (f"  {avgs['traj_mse']:>6.4f}  {avgs['pen_bce']:>6.4f}"
                     if traj_weight > 0 else "")
         scaff_log = f"  {traj_scaff_w:>6.4f}" if traj_weight > 0 else ""
@@ -465,7 +483,7 @@ def train_motor_model(cfg):
         logger.write_line(
             f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {avgs['letter_cls']:>6.4f}  "
             f"{avgs['case_cls']:>6.4f}  {avgs['attn']:>7.4f}  {avgs['div']:>6.4f}  "
-            f"{avgs['hit_rate']:>6.4f}  {avgs['recode']:>6.4f}{content_log}"
+            f"{avgs['hit_rate']:>6.4f}  {avgs['recode']:>6.4f}{content_log}{void_log}"
             f"{traj_log}  {avgs['rr_cls']:>6.4f}  "
             f"{avgs['rr_letter_acc']:>6.4f}  {avgs['rr_case_acc']:>6.4f}"
             f"{v2_log}  "
