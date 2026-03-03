@@ -64,6 +64,11 @@ def train_motor_model(cfg):
     render_match_weight = cfg.render_match_weight
     void_weight = cfg.void_weight
     scan_void_weight = cfg.scan_void_weight
+    tmax_attn_ratio = cfg.tmax_attn_ratio
+    tmax_cls_ratio = cfg.tmax_cls_ratio
+    tmax_recon_ratio = cfg.tmax_recon_ratio
+    tmax_motor_ratio = cfg.tmax_motor_ratio
+    lr_floor = cfg.lr_floor
 
     device = _resolve_device(cfg.device)
     print(f"Motor training on: {device}")
@@ -95,7 +100,8 @@ def train_motor_model(cfg):
 
     os.makedirs(save_dir, exist_ok=True)
     save_run_info(save_dir, cfg)
-    dataset = LetterDataset(data_dir, case_filter=cfg.case_filter)
+    dataset = LetterDataset(data_dir, case_filter=cfg.case_filter,
+                            font_filter=cfg.train_fonts)
     use_cuda = device.type == 'cuda'
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=use_cuda)
 
@@ -221,10 +227,20 @@ def train_motor_model(cfg):
     recon_opt = optim.Adam(recon_params, lr=0.001)
     motor_opt = optim.Adam(motor_params, lr=0.001)
 
-    attn_sched = optim.lr_scheduler.CosineAnnealingLR(attn_opt, T_max=epochs)
-    cls_sched = optim.lr_scheduler.CosineAnnealingLR(cls_opt, T_max=epochs)
-    recon_sched = optim.lr_scheduler.CosineAnnealingLR(recon_opt, T_max=epochs)
-    motor_sched = optim.lr_scheduler.CosineAnnealingLR(motor_opt, T_max=epochs)
+    tmax_attn = max(1, int(epochs * tmax_attn_ratio))
+    tmax_cls = max(1, int(epochs * tmax_cls_ratio))
+    tmax_recon = max(1, int(epochs * tmax_recon_ratio))
+    tmax_motor = max(1, int(epochs * tmax_motor_ratio))
+
+    attn_sched = optim.lr_scheduler.CosineAnnealingLR(attn_opt, T_max=tmax_attn, eta_min=lr_floor)
+    cls_sched = optim.lr_scheduler.CosineAnnealingLR(cls_opt, T_max=tmax_cls, eta_min=lr_floor)
+    recon_sched = optim.lr_scheduler.CosineAnnealingLR(recon_opt, T_max=tmax_recon, eta_min=lr_floor)
+    motor_sched = optim.lr_scheduler.CosineAnnealingLR(motor_opt, T_max=tmax_motor, eta_min=lr_floor)
+
+    if any(r != 1.0 for r in [tmax_attn_ratio, tmax_cls_ratio, tmax_recon_ratio, tmax_motor_ratio]):
+        print(f"Differential T_max: attn={tmax_attn}  cls={tmax_cls}  recon={tmax_recon}  motor={tmax_motor}  floor={lr_floor}")
+    elif lr_floor > 0:
+        print(f"LR floor: {lr_floor}")
 
     criterion = torch.nn.MSELoss()
     bce_logits = torch.nn.BCEWithLogitsLoss()
@@ -248,7 +264,7 @@ def train_motor_model(cfg):
               f"{traj_hdr}  {'rr_cls':>6s}  "
               f"{'rr_ltr':>6s}  {'rr_cas':>6s}"
               f"{v2_hdr}  "
-              f"{'lr_attn':>8s}  {'lr_mot':>8s}{scaff_hdr}  time")
+              f"{'lr_attn':>8s}  {'lr_cls':>8s}  {'lr_rec':>8s}  {'lr_mot':>8s}{scaff_hdr}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
 
     for epoch in range(start_epoch, end_epoch):
@@ -446,6 +462,8 @@ def train_motor_model(cfg):
         done = epoch - start_epoch + 1
         eta = format_eta(elapsed, done, epochs - done)
         lr_attn = attn_sched.get_last_lr()[0]
+        lr_cls = cls_sched.get_last_lr()[0]
+        lr_recon = recon_sched.get_last_lr()[0]
         lr_motor = motor_sched.get_last_lr()[0]
 
         content_str = f"  Cont {avgs['content']:.4f}" if n_scan_glimpses > 0 else ""
@@ -470,7 +488,7 @@ def train_motor_model(cfg):
               f"Recode {recode_disp}{traj_str}  "
               f"RR_cls {avgs['rr_cls']:.4f}  RR_ltr {avgs['rr_letter_acc']:.0%}  "
               f"RR_case {rr_case_disp}{v2_str}  "
-              f"lr {lr_attn:.6f}/{lr_motor:.6f}{scaff_str}  "
+              f"lr {lr_attn:.6f}/{lr_cls:.6f}/{lr_recon:.6f}/{lr_motor:.6f}{scaff_str}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
         content_log = f"  {avgs['content']:>7.4f}" if n_scan_glimpses > 0 else ""
@@ -495,12 +513,16 @@ def train_motor_model(cfg):
             f"{traj_log}  {avgs['rr_cls']:>6.4f}  "
             f"{avgs['rr_letter_acc']:>6.4f}  {rr_case_log}"
             f"{v2_log}  "
-            f"{lr_attn:>8.6f}  {lr_motor:>8.6f}{scaff_log}  {epoch_time:.1f}s")
+            f"{lr_attn:>8.6f}  {lr_cls:>8.6f}  {lr_recon:>8.6f}  {lr_motor:>8.6f}{scaff_log}  {epoch_time:.1f}s")
 
-        attn_sched.step()
-        cls_sched.step()
-        recon_sched.step()
-        motor_sched.step()
+        if epoch - start_epoch < tmax_attn:
+            attn_sched.step()
+        if epoch - start_epoch < tmax_cls:
+            cls_sched.step()
+        if epoch - start_epoch < tmax_recon:
+            recon_sched.step()
+        if epoch - start_epoch < tmax_motor:
+            motor_sched.step()
 
         if (epoch + 1 - start_epoch) % checkpoint_interval == 0:
             save_checkpoint(model, epoch,

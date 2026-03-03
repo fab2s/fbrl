@@ -442,7 +442,10 @@ class VisionModel(nn.Module):
 
         # Learnable scan x positions
         if learnable_scan_x and n_scan_glimpses > 0:
-            init_xs = torch.linspace(-0.75, 0.75, n_scan_glimpses)
+            if n_scan_glimpses == 1:
+                init_xs = torch.zeros(1)
+            else:
+                init_xs = torch.linspace(-0.75, 0.75, n_scan_glimpses)
             self.scan_xs = nn.Parameter(torch.atanh(init_xs))
         else:
             self.scan_xs = None
@@ -530,7 +533,10 @@ class MotorVisionModel(nn.Module):
 
         # Learnable scan x positions
         if learnable_scan_x and n_scan_glimpses > 0:
-            init_xs = torch.linspace(-0.75, 0.75, n_scan_glimpses)
+            if n_scan_glimpses == 1:
+                init_xs = torch.zeros(1)
+            else:
+                init_xs = torch.linspace(-0.75, 0.75, n_scan_glimpses)
             self.scan_xs = nn.Parameter(torch.atanh(init_xs))
         else:
             self.scan_xs = None

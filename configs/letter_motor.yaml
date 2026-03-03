@@ -42,5 +42,12 @@ render_match_weight: 0.25
 canonical_font: dejavu-sans
 trajectory_data_dir: data/trajectories_centerline
 
+# Differential cosine decay
+tmax_attn_ratio: 0.5      # saturates by epoch 10, decay fast
+tmax_cls_ratio: 1.5       # needs most runway — the bottleneck
+tmax_recon_ratio: 1.0     # middle ground, supports cls
+tmax_motor_ratio: 1.2     # needs runway after scaffold fades
+lr_floor: 0.00005         # prevent total LR death
+
 data_dir: data/letters
 save_dir: data/motor_models

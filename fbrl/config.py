@@ -80,6 +80,16 @@ class ExperimentConfig:
     frozen_rr_weight: float = 0.0              # 0 = disabled
     render_match_weight: float = 0.0           # 0 = disabled
 
+    # Differential cosine decay (per-head T_max ratios, multiply epochs)
+    tmax_attn_ratio: float = 1.0
+    tmax_cls_ratio: float = 1.0
+    tmax_recon_ratio: float = 1.0
+    tmax_motor_ratio: float = 1.0
+    lr_floor: float = 0.0               # eta_min for all schedulers
+
+    # Data filtering
+    train_fonts: Optional[str] = None    # None = all fonts; comma-separated names to filter
+
     # Paths
     data_dir: str = ''
     save_dir: str = ''
