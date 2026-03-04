@@ -890,3 +890,47 @@ class WordVisionModel(nn.Module):
         recon = self.decoder(readout_states.view(B, -1))
 
         return recon, logits_list, enc.locations, readout_states, enc.scan_content_logits, enc.read_group_boundaries, enc.phase_tags
+
+
+# --- Counting Model (1-3 letters on variable-width canvas) ---
+
+class CountingModel(nn.Module):
+    """Scan-only model for counting letters (1-3) on variable-width canvas.
+
+    No read phase, no decoder. Just scan + count + content detection.
+    Canvas widths: 96 (1 letter), 128 (2 letters), 192 (3 letters).
+    """
+    def __init__(self, n_scan_glimpses=6, scan_patch_size=(12, 18),
+                 latent_dim=256, n_scales=1, max_count=3):
+        super().__init__()
+        self.n_scan_glimpses = n_scan_glimpses
+        self.max_count = max_count
+        self.scan_sensor = GlimpseSensor(
+            patch_size=scan_patch_size, n_scales=n_scales, latent_dim=latent_dim,
+        )
+        self.controller = AttentionController(
+            glimpse_dim=latent_dim, hidden_dim=latent_dim, latent_dim=latent_dim,
+        )
+        self.content_head = nn.Linear(latent_dim, 1)
+        self.count_head = nn.Linear(latent_dim, max_count)  # 3 classes: 1/2/3
+
+    def forward(self, img):
+        """Forward pass: scan only, predict count.
+
+        Args:
+            img: (B, 1, H, W) input image (variable width)
+        Returns:
+            count_logits: (B, max_count) class logits
+            scan_content_logits: list of (B, 1) per scan step
+            locations: list of (B, 2) fixation coords
+            latent: (B, latent_dim)
+        """
+        enc = encode_scan_read(
+            img, self.controller,
+            self.scan_sensor, self.scan_sensor,  # read_sensor unused
+            n_scan=self.n_scan_glimpses, n_read=0,
+            content_head=self.content_head,
+            prescribed_x=True,
+        )
+        count_logits = self.count_head(enc.latent)
+        return count_logits, enc.scan_content_logits, enc.locations, enc.latent

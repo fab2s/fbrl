@@ -10,7 +10,7 @@ from PIL import Image
 
 from fbrl import _resolve_device
 from fbrl.data import LetterDataset, BigramDataset, WordDataset
-from fbrl.model import VisionModel, BigramVisionModel, WordVisionModel, MotorVisionModel
+from fbrl.model import VisionModel, BigramVisionModel, WordVisionModel, MotorVisionModel, CountingModel
 from fbrl.losses import fixation_hit_rate
 
 
@@ -72,6 +72,15 @@ def _load_model(model_dir, device):
             n_scales=n_scales, n_positions=n_positions,
             read_anchor_scan_indices=read_anchor, n_read_per_group=n_rpg,
             interleaved=interleaved,
+        ).to(device)
+    elif model_type == 'counting':
+        n_scan = ckpt.get('n_scan_glimpses', 6)
+        scan_ps = ckpt.get('scan_patch_size', (12, 18))
+        latent_dim = ckpt.get('latent_dim', 256)
+        max_count = ckpt.get('max_count', 3)
+        model = CountingModel(
+            n_scan_glimpses=n_scan, scan_patch_size=scan_ps,
+            latent_dim=latent_dim, n_scales=n_scales, max_count=max_count,
         ).to(device)
     elif model_type == 'bigram':
         # Two-phase checkpoint (has n_scan_glimpses)

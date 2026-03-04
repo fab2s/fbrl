@@ -1,0 +1,19 @@
+model_type: counting
+n_scan_glimpses: 6
+scan_patch_size: [12, 18]
+latent_dim: 256
+n_scales: 1
+
+epochs: 50
+batch_size: 52
+checkpoint_interval: 10
+
+scan_guide_weight: 8.0
+blur_sigma_ratio: 0.16
+diversity_weight: 1.0
+diversity_sigma: 0.1
+scan_vy: 0.3
+content_weight: 0.5
+
+data_dir: data/counting
+save_dir: data/counting_models

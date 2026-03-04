@@ -213,6 +213,46 @@ endif
 	cp data/motor_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(MOTOR_CONFIG)" > runs/$(NAME)/info.txt; }
 	@echo "Archived to runs/$(NAME)/"
 
+# Counting pipeline
+COUNTING_CONFIG ?= configs/counting.yaml
+CLEAN_COUNTING_MODELS = find data/counting_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_COUNTING_RESULTS = find data/counting_results -type f ! -name .gitignore -delete 2>/dev/null; true
+
+generate-counting:
+	$(RUN) generate_counting --num_variants $(VARIANTS) --noise_level $(NOISE) --output_dir data/counting --fonts $(FONTS)
+
+generate-counting-test:
+	$(RUN) generate_counting_test --output_dir data/counting_test --fonts $(FONTS)
+
+train-counting:
+	@$(CLEAN_COUNTING_MODELS)
+	$(RUN) train_counting --config $(COUNTING_CONFIG) --device $(DEVICE) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH)) $(if $(CKPT),--checkpoint_interval $(CKPT))
+
+resume-counting:
+	$(RUN) train_counting --config $(COUNTING_CONFIG) --device $(DEVICE) --resume data/counting_models/$(RESUME_FROM) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH))
+
+test-counting:
+	@$(CLEAN_COUNTING_RESULTS)
+	$(RUN) test_counting --model_dir data/counting_models --test_data_dir data/counting_test --output_dir data/counting_results --device $(DEVICE)
+
+counting-atlas:
+	@rm -f data/counting_atlas.html
+	$(RUN) counting_atlas --model_dir data/counting_models --test_data_dir data/counting_test --output data/counting_atlas.html --device $(DEVICE)
+
+archive-counting:
+ifndef NAME
+	$(error Usage: make archive-counting NAME=v1-counting-baseline)
+endif
+	@mkdir -p runs/$(NAME)
+	$(RUN) compress_model --input data/counting_models/model_final.pth --output data/counting_models/_archive.pth.gz
+	mv data/counting_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
+	cp data/counting_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
+	cp data/counting_models/training.log runs/$(NAME)/ 2>/dev/null || true
+	cp data/counting_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
+	cp data/counting_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(COUNTING_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp data/counting_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(COUNTING_CONFIG)" > runs/$(NAME)/info.txt; }
+	@echo "Archived to runs/$(NAME)/"
+
 test-unit:
 	docker compose exec $(SERVICE) pytest tests/ -v
 
@@ -221,4 +261,5 @@ test-unit:
        bigram-atlas archive-bigrams \
        generate-words generate-words-test train-words resume-words test-words test-word-isolation word-atlas isolation-atlas archive-words \
        generate-trajectories train-motor resume-motor test-motor motor-atlas archive-motor \
+       generate-counting generate-counting-test train-counting resume-counting test-counting counting-atlas archive-counting \
        test-unit

@@ -17,6 +17,7 @@ from fbrl.training_utils import (LossTracker, TrainingLogger, save_checkpoint,
                                   save_run_info)
 from fbrl._word_train import train_word_model  # noqa: F401
 from fbrl._motor_train import train_motor_model  # noqa: F401
+from fbrl._counting_train import train_counting_model  # noqa: F401
 
 
 # --- Training ---

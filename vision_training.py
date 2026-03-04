@@ -1,13 +1,16 @@
 import argparse
 
 from fbrl.data import (generate_dataset, generate_test, generate_bigram_dataset,
-                       generate_bigram_test, generate_word_dataset, generate_word_test)
+                       generate_bigram_test, generate_word_dataset, generate_word_test,
+                       generate_counting_dataset, generate_counting_test)
 from fbrl.train import (train_model, check_attention, train_bigram_model,
-                         check_bigram_attention, train_word_model, train_motor_model)
+                         check_bigram_attention, train_word_model, train_motor_model,
+                         train_counting_model)
 from fbrl.evaluate import (test_model, visualize_model, generate_atlas, test_bigram_model,
                            generate_bigram_atlas, test_word_model, generate_word_atlas,
                            test_word_isolation, generate_isolation_atlas)
 from fbrl._motor_eval import test_motor_model, generate_motor_atlas
+from fbrl._counting_eval import test_counting_model, generate_counting_atlas
 from fbrl.config import load_config
 
 
@@ -276,6 +279,36 @@ if __name__ == '__main__':
     motor_atlas_parser.add_argument('--device', default='auto',
                                      choices=['auto', 'cpu', 'cuda'])
 
+    # --- Counting subcommands ---
+    gen_count_parser = subparsers.add_parser('generate_counting')
+    gen_count_parser.add_argument('--num_variants', type=int, default=20)
+    gen_count_parser.add_argument('--noise_level', type=float, default=0.1)
+    gen_count_parser.add_argument('--output_dir', default='data/counting')
+    gen_count_parser.add_argument('--fonts', default='all',
+                                  help='Font spec: "all", "default", or comma-separated names')
+
+    gen_count_test_parser = subparsers.add_parser('generate_counting_test')
+    gen_count_test_parser.add_argument('--output_dir', default='data/counting_test')
+    gen_count_test_parser.add_argument('--fonts', default='all',
+                                       help='Font spec: "all", "default", or comma-separated names')
+
+    train_count_parser = subparsers.add_parser('train_counting')
+    _add_train_overrides(train_count_parser)
+
+    test_count_parser = subparsers.add_parser('test_counting')
+    test_count_parser.add_argument('--model_dir', required=True)
+    test_count_parser.add_argument('--test_data_dir', required=True)
+    test_count_parser.add_argument('--output_dir', default='counting_results')
+    test_count_parser.add_argument('--device', default='auto',
+                                    choices=['auto', 'cpu', 'cuda'])
+
+    count_atlas_parser = subparsers.add_parser('counting_atlas')
+    count_atlas_parser.add_argument('--model_dir', required=True)
+    count_atlas_parser.add_argument('--test_data_dir', required=True)
+    count_atlas_parser.add_argument('--output', default='data/counting_atlas.html')
+    count_atlas_parser.add_argument('--device', default='auto',
+                                     choices=['auto', 'cpu', 'cuda'])
+
     args = parser.parse_args()
 
     if args.command == 'generate':
@@ -409,3 +442,23 @@ if __name__ == '__main__':
         generate_motor_atlas(args.model_dir, args.test_data_dir, args.output,
                               trajectory_data_dir=args.trajectory_data_dir,
                               device=args.device)
+
+    # --- Counting commands ---
+    elif args.command == 'generate_counting':
+        generate_counting_dataset(args.output_dir, args.noise_level, args.num_variants,
+                                   font_spec=args.fonts)
+
+    elif args.command == 'generate_counting_test':
+        generate_counting_test(args.output_dir, font_spec=args.fonts)
+
+    elif args.command == 'train_counting':
+        cfg = load_config(args.config, _build_overrides(args))
+        train_counting_model(cfg)
+
+    elif args.command == 'test_counting':
+        test_counting_model(args.model_dir, args.test_data_dir, args.output_dir,
+                             device=args.device)
+
+    elif args.command == 'counting_atlas':
+        generate_counting_atlas(args.model_dir, args.test_data_dir, args.output,
+                                 device=args.device)
