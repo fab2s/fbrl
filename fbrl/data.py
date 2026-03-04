@@ -598,7 +598,7 @@ def generate_word_test(output_dir, font_spec='default'):
 
 # --- Word Dataset ---
 
-# --- Counting Data Generation (1-3 letters on variable-width canvas) ---
+# --- Counting Data Generation (1-3 letters on fixed 192x128 canvas) ---
 
 # Seeded random letter combos for reproducibility
 _rng = np.random.RandomState(42)
@@ -611,108 +611,68 @@ COUNTING_TRIPLES_200 = [
     for _ in range(200)
 ]
 
+# Fixed canvas: all counting images are 192x128 regardless of letter count.
+# Prevents the model from cheating via canvas width / scan count metadata.
+COUNTING_CANVAS = (192, 128)
 
-def _counting_canvas_width(n_letters):
-    """Canvas width for a given letter count: max(96, n*64)."""
-    return max(96, n_letters * 64)
+
+def _render_counting_image(text, font, canvas_size=COUNTING_CANVAS):
+    """Render text centered on a fixed-size canvas. Returns PIL Image."""
+    w, h = canvas_size
+    img = Image.new('L', (w, h), color=0)
+    draw = ImageDraw.Draw(img)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    x = (w - bbox[2] - bbox[0]) / 2
+    y = (h - bbox[3] - bbox[1]) / 2
+    draw.text((x, y), text, fill=255, font=font)
+    return img
 
 
 def generate_counting_dataset(output_dir, noise_level=0.01, num_variants=1,
                                font_spec='all'):
-    """Render 1/2/3 letter images on variable-width canvases.
+    """Render 1/2/3 letter images on fixed 192x128 canvas.
 
     1-letter: all 52 letter/case combos per font
     2-letter: 200 random pairs per font (lowercase)
     3-letter: 200 random triples per font (lowercase)
-    Canvas: max(96, n_letters * 64) x 128
+    All on same canvas size — model must look to count.
     """
     os.makedirs(output_dir, exist_ok=True)
     fonts = discover_fonts(font_spec)
     print(f"Generating counting data with {len(fonts)} font(s): {', '.join(n for n, _ in fonts)}")
+    print(f"Fixed canvas: {COUNTING_CANVAS[0]}x{COUNTING_CANVAS[1]}")
 
     metadata = {}
     all_singles = [chr(i) for i in range(65, 91)] + [chr(i) for i in range(97, 123)]
 
+    items_by_count = {
+        1: [(letter,) for letter in all_singles],
+        2: [(pair,) for pair in COUNTING_PAIRS_200],
+        3: [(triple,) for triple in COUNTING_TRIPLES_200],
+    }
+
     for font_name, font_path in fonts:
         font = load_font(font_path, size=60)
 
-        # 1-letter: all 52 letters
-        for letter in all_singles:
-            w = _counting_canvas_width(1)
-            img = Image.new('L', (w, 128), color=0)
-            draw = ImageDraw.Draw(img)
-            bbox = draw.textbbox((0, 0), letter, font=font)
-            x = (w - bbox[2] - bbox[0]) / 2
-            y = (128 - bbox[3] - bbox[1]) / 2
-            draw.text((x, y), letter, fill=255, font=font)
+        for count, text_items in items_by_count.items():
+            for (text,) in text_items:
+                img = _render_counting_image(text, font)
 
-            clean_path = os.path.join(output_dir, f'clean_1_{letter}_{font_name}.png')
-            img.save(clean_path)
-            img_array = np.array(img) / 255.0
+                clean_path = os.path.join(output_dir, f'clean_{count}_{text}_{font_name}.png')
+                img.save(clean_path)
+                img_array = np.array(img) / 255.0
 
-            for v in range(num_variants):
-                noisy = img_array + np.random.normal(0, noise_level, img_array.shape)
-                noisy = np.clip(noisy, 0, 1)
-                noisy_img = Image.fromarray((noisy * 255).astype(np.uint8))
-                img_path = os.path.join(output_dir, f'img_1_{letter}_{font_name}_{v}.png')
-                noisy_img.save(img_path)
-                key = f'1_{letter}_{font_name}_{v}'
-                metadata[key] = {
-                    'image': img_path, 'clean': clean_path,
-                    'count': 1, 'letters': letter, 'width': w, 'font': font_name,
-                }
-
-        # 2-letter pairs
-        for pair in COUNTING_PAIRS_200:
-            w = _counting_canvas_width(2)
-            img = Image.new('L', (w, 128), color=0)
-            draw = ImageDraw.Draw(img)
-            bbox = draw.textbbox((0, 0), pair, font=font)
-            x = (w - bbox[2] - bbox[0]) / 2
-            y = (128 - bbox[3] - bbox[1]) / 2
-            draw.text((x, y), pair, fill=255, font=font)
-
-            clean_path = os.path.join(output_dir, f'clean_2_{pair}_{font_name}.png')
-            img.save(clean_path)
-            img_array = np.array(img) / 255.0
-
-            for v in range(num_variants):
-                noisy = img_array + np.random.normal(0, noise_level, img_array.shape)
-                noisy = np.clip(noisy, 0, 1)
-                noisy_img = Image.fromarray((noisy * 255).astype(np.uint8))
-                img_path = os.path.join(output_dir, f'img_2_{pair}_{font_name}_{v}.png')
-                noisy_img.save(img_path)
-                key = f'2_{pair}_{font_name}_{v}'
-                metadata[key] = {
-                    'image': img_path, 'clean': clean_path,
-                    'count': 2, 'letters': pair, 'width': w, 'font': font_name,
-                }
-
-        # 3-letter triples
-        for triple in COUNTING_TRIPLES_200:
-            w = _counting_canvas_width(3)
-            img = Image.new('L', (w, 128), color=0)
-            draw = ImageDraw.Draw(img)
-            bbox = draw.textbbox((0, 0), triple, font=font)
-            x = (w - bbox[2] - bbox[0]) / 2
-            y = (128 - bbox[3] - bbox[1]) / 2
-            draw.text((x, y), triple, fill=255, font=font)
-
-            clean_path = os.path.join(output_dir, f'clean_3_{triple}_{font_name}.png')
-            img.save(clean_path)
-            img_array = np.array(img) / 255.0
-
-            for v in range(num_variants):
-                noisy = img_array + np.random.normal(0, noise_level, img_array.shape)
-                noisy = np.clip(noisy, 0, 1)
-                noisy_img = Image.fromarray((noisy * 255).astype(np.uint8))
-                img_path = os.path.join(output_dir, f'img_3_{triple}_{font_name}_{v}.png')
-                noisy_img.save(img_path)
-                key = f'3_{triple}_{font_name}_{v}'
-                metadata[key] = {
-                    'image': img_path, 'clean': clean_path,
-                    'count': 3, 'letters': triple, 'width': w, 'font': font_name,
-                }
+                for v in range(num_variants):
+                    noisy = img_array + np.random.normal(0, noise_level, img_array.shape)
+                    noisy = np.clip(noisy, 0, 1)
+                    noisy_img = Image.fromarray((noisy * 255).astype(np.uint8))
+                    img_path = os.path.join(output_dir, f'img_{count}_{text}_{font_name}_{v}.png')
+                    noisy_img.save(img_path)
+                    key = f'{count}_{text}_{font_name}_{v}'
+                    metadata[key] = {
+                        'image': img_path, 'clean': clean_path,
+                        'count': count, 'letters': text, 'font': font_name,
+                    }
 
     with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
         json.dump(metadata, f)
@@ -723,11 +683,11 @@ def generate_counting_dataset(output_dir, noise_level=0.01, num_variants=1,
         counts[c] = counts.get(c, 0) + 1
     print(f"Counting dataset generated in {output_dir}: {len(metadata)} samples")
     for c in sorted(counts):
-        print(f"  count={c}: {counts[c]} samples (width={_counting_canvas_width(c)})")
+        print(f"  count={c}: {counts[c]} samples")
 
 
 def generate_counting_test(output_dir, font_spec='all'):
-    """Generate clean counting test set.
+    """Generate clean counting test set on fixed 192x128 canvas.
 
     52 singles + 50 pairs + 50 triples per font.
     """
@@ -738,53 +698,24 @@ def generate_counting_test(output_dir, font_spec='all'):
     metadata = {}
     all_singles = [chr(i) for i in range(65, 91)] + [chr(i) for i in range(97, 123)]
 
+    items_by_count = {
+        1: all_singles,
+        2: COUNTING_PAIRS_200[:50],
+        3: COUNTING_TRIPLES_200[:50],
+    }
+
     for font_name, font_path in fonts:
         font = load_font(font_path, size=60)
 
-        for letter in all_singles:
-            w = _counting_canvas_width(1)
-            img = Image.new('L', (w, 128), color=0)
-            draw = ImageDraw.Draw(img)
-            bbox = draw.textbbox((0, 0), letter, font=font)
-            x = (w - bbox[2] - bbox[0]) / 2
-            y = (128 - bbox[3] - bbox[1]) / 2
-            draw.text((x, y), letter, fill=255, font=font)
-            img_path = os.path.join(output_dir, f'img_1_{letter}_{font_name}.png')
-            img.save(img_path)
-            metadata[f'1_{letter}_{font_name}'] = {
-                'image': img_path, 'count': 1, 'letters': letter,
-                'width': w, 'font': font_name,
-            }
-
-        for pair in COUNTING_PAIRS_200[:50]:
-            w = _counting_canvas_width(2)
-            img = Image.new('L', (w, 128), color=0)
-            draw = ImageDraw.Draw(img)
-            bbox = draw.textbbox((0, 0), pair, font=font)
-            x = (w - bbox[2] - bbox[0]) / 2
-            y = (128 - bbox[3] - bbox[1]) / 2
-            draw.text((x, y), pair, fill=255, font=font)
-            img_path = os.path.join(output_dir, f'img_2_{pair}_{font_name}.png')
-            img.save(img_path)
-            metadata[f'2_{pair}_{font_name}'] = {
-                'image': img_path, 'count': 2, 'letters': pair,
-                'width': w, 'font': font_name,
-            }
-
-        for triple in COUNTING_TRIPLES_200[:50]:
-            w = _counting_canvas_width(3)
-            img = Image.new('L', (w, 128), color=0)
-            draw = ImageDraw.Draw(img)
-            bbox = draw.textbbox((0, 0), triple, font=font)
-            x = (w - bbox[2] - bbox[0]) / 2
-            y = (128 - bbox[3] - bbox[1]) / 2
-            draw.text((x, y), triple, fill=255, font=font)
-            img_path = os.path.join(output_dir, f'img_3_{triple}_{font_name}.png')
-            img.save(img_path)
-            metadata[f'3_{triple}_{font_name}'] = {
-                'image': img_path, 'count': 3, 'letters': triple,
-                'width': w, 'font': font_name,
-            }
+        for count, texts in items_by_count.items():
+            for text in texts:
+                img = _render_counting_image(text, font)
+                img_path = os.path.join(output_dir, f'img_{count}_{text}_{font_name}.png')
+                img.save(img_path)
+                metadata[f'{count}_{text}_{font_name}'] = {
+                    'image': img_path, 'count': count, 'letters': text,
+                    'font': font_name,
+                }
 
     with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
         json.dump(metadata, f)
@@ -799,7 +730,7 @@ def generate_counting_test(output_dir, font_spec='all'):
 
 
 class CountingDataset(Dataset):
-    """Loads counting images into memory. Builds count_indices for per-count filtering."""
+    """Loads counting images (fixed 192x128) into memory. All counts mixed."""
     def __init__(self, data_dir):
         with open(os.path.join(data_dir, 'metadata.json'), 'r') as f:
             metadata = json.load(f)
@@ -810,21 +741,20 @@ class CountingDataset(Dataset):
         self.clean_images = []
         self.counts = []
         self.letters = []
-        self.widths = []
         self.fonts = []
 
         clean_cache = {}
+        count_tally = {}
 
         for key in metadata:
             entry = metadata[key]
             img = Image.open(entry['image']).convert('L')
             img_tensor = torch.tensor(
                 np.array(img) / 255.0, dtype=torch.float32,
-            ).unsqueeze(0)  # (1, H, W)
+            ).unsqueeze(0)  # (1, 128, 192)
             self.images.append(img_tensor)
             self.counts.append(entry['count'])
             self.letters.append(entry['letters'])
-            self.widths.append(entry['width'])
             self.fonts.append(entry.get('font', 'default'))
 
             clean_path = entry.get('clean')
@@ -838,16 +768,12 @@ class CountingDataset(Dataset):
             else:
                 self.clean_images.append(img_tensor)
 
-        # Build per-count index for filtering
-        self.count_indices = {}
-        for i, c in enumerate(self.counts):
-            if c not in self.count_indices:
-                self.count_indices[c] = []
-            self.count_indices[c].append(i)
+            c = entry['count']
+            count_tally[c] = count_tally.get(c, 0) + 1
 
         print(f"done ({time.time() - t0:.1f}s)")
-        for c in sorted(self.count_indices):
-            print(f"  count={c}: {len(self.count_indices[c])} samples")
+        for c in sorted(count_tally):
+            print(f"  count={c}: {count_tally[c]} samples")
 
     def __len__(self):
         return len(self.counts)
@@ -855,23 +781,7 @@ class CountingDataset(Dataset):
     def __getitem__(self, idx):
         return (self.images[idx], self.clean_images[idx],
                 self.counts[idx], self.letters[idx],
-                self.widths[idx], self.fonts[idx])
-
-
-class CountingSubset(Dataset):
-    """Filtered view of CountingDataset for one count value.
-
-    All items have the same canvas width, enabling simple batching.
-    """
-    def __init__(self, parent, count):
-        self.parent = parent
-        self.indices = parent.count_indices[count]
-
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        return self.parent[self.indices[idx]]
+                self.fonts[idx])
 
 
 class WordDataset(Dataset):

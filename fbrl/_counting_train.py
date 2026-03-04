@@ -8,7 +8,7 @@ import os
 import time
 
 from fbrl import _resolve_device
-from fbrl.data import CountingDataset, CountingSubset
+from fbrl.data import CountingDataset
 from fbrl.model import CountingModel
 from fbrl.losses import attention_content_loss, fixation_diversity_loss, fixation_hit_rate
 from fbrl.training_utils import (LossTracker, TrainingLogger, save_checkpoint,
@@ -18,8 +18,8 @@ from fbrl.training_utils import (LossTracker, TrainingLogger, save_checkpoint,
 def train_counting_model(cfg):
     """Train a CountingModel from an ExperimentConfig.
 
-    Three sub-dataloaders (one per count 1/2/3), cycled each epoch.
-    All items in a batch share the same count (= same canvas width).
+    Fixed 192x128 canvas for all counts. Single shuffled dataloader —
+    all counts mixed, no cheating via batch structure.
     """
     n_scan_glimpses = cfg.n_scan_glimpses
     scan_patch_size = cfg.scan_patch_size
@@ -41,7 +41,7 @@ def train_counting_model(cfg):
     device = _resolve_device(cfg.device)
     print(f"Counting training on: {device}")
     print(f"Scan-only: {n_scan_glimpses} glimpses ({scan_patch_size}), "
-          f"latent_dim={latent_dim}")
+          f"latent_dim={latent_dim}, fixed 192x128 canvas")
     print(f"Attention: scan_guide_weight={scan_guide_weight}  "
           f"blur_sigma_ratio={blur_sigma_ratio}  "
           f"diversity_weight={diversity_weight}  diversity_sigma={diversity_sigma}  "
@@ -53,19 +53,12 @@ def train_counting_model(cfg):
 
     dataset = CountingDataset(data_dir)
     use_cuda = device.type == 'cuda'
-
-    # Per-count sub-dataloaders
-    count_values = sorted(dataset.count_indices.keys())
-    sub_loaders = {}
-    for c in count_values:
-        subset = CountingSubset(dataset, c)
-        sub_loaders[c] = DataLoader(subset, batch_size=batch_size, shuffle=True,
-                                     pin_memory=use_cuda, drop_last=False)
-    print(f"Sub-loaders: {', '.join(f'count={c} ({len(sub_loaders[c])} batches)' for c in count_values)}")
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                             pin_memory=use_cuda)
 
     model = CountingModel(
         n_scan_glimpses=n_scan_glimpses, scan_patch_size=scan_patch_size,
-        latent_dim=latent_dim, n_scales=n_scales, max_count=len(count_values),
+        latent_dim=latent_dim, n_scales=n_scales, max_count=3,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
@@ -101,56 +94,54 @@ def train_counting_model(cfg):
         total_correct = 0
         total_samples = 0
 
-        # Cycle through counts each epoch
-        for count_val in count_values:
-            for img, clean, counts_batch, _letters, _widths, _fonts in sub_loaders[count_val]:
-                img = img.to(device)
-                clean = clean.to(device)
-                B = img.shape[0]
+        for img, clean, counts_batch, _letters, _fonts in dataloader:
+            img = img.to(device)
+            clean = clean.to(device)
+            B = img.shape[0]
 
-                # Count target: 0-indexed (count 1 -> class 0, count 2 -> class 1, etc.)
-                count_target = torch.tensor([c - 1 for c in counts_batch], device=device)
+            # Count target: 0-indexed (count 1 -> class 0, count 2 -> class 1, etc.)
+            count_target = torch.tensor([c - 1 for c in counts_batch], device=device)
 
-                count_logits, scan_content_logits, locations, latent = model(img)
+            count_logits, scan_content_logits, locations, latent = model(img)
 
-                count_cls_loss = F.cross_entropy(count_logits, count_target)
+            count_cls_loss = F.cross_entropy(count_logits, count_target)
 
-                attn_loss = scan_guide_weight * attention_content_loss(
-                    clean, locations, blur_sigma_ratio=blur_sigma_ratio)
+            attn_loss = scan_guide_weight * attention_content_loss(
+                clean, locations, blur_sigma_ratio=blur_sigma_ratio)
 
-                div_loss = fixation_diversity_loss(
-                    locations, sigma=diversity_sigma, vy=scan_vy)
+            div_loss = fixation_diversity_loss(
+                locations, sigma=diversity_sigma, vy=scan_vy)
 
-                content_loss = torch.tensor(0.0, device=device)
-                if content_weight > 0 and len(scan_content_logits) > 0:
-                    scan_locs = locations[1:len(scan_content_logits) + 1]
-                    for loc, logit in zip(scan_locs, scan_content_logits):
-                        grid = loc.view(B, 1, 1, 2)
-                        sampled = F.grid_sample(clean, grid, align_corners=True,
-                                                padding_mode='zeros')
-                        label = (sampled.view(-1, 1) > 0.1).float()
-                        content_loss = content_loss + bce(logit, label)
-                    content_loss = content_loss / len(scan_content_logits)
+            content_loss = torch.tensor(0.0, device=device)
+            if content_weight > 0 and len(scan_content_logits) > 0:
+                scan_locs = locations[1:len(scan_content_logits) + 1]
+                for loc, logit in zip(scan_locs, scan_content_logits):
+                    grid = loc.view(B, 1, 1, 2)
+                    sampled = F.grid_sample(clean, grid, align_corners=True,
+                                            padding_mode='zeros')
+                    label = (sampled.view(-1, 1) > 0.1).float()
+                    content_loss = content_loss + bce(logit, label)
+                content_loss = content_loss / len(scan_content_logits)
 
-                total_loss = (count_cls_loss
-                              + attn_loss
-                              + diversity_weight * div_loss
-                              + content_weight * content_loss)
+            total_loss = (count_cls_loss
+                          + attn_loss
+                          + diversity_weight * div_loss
+                          + content_weight * content_loss)
 
-                optimizer.zero_grad()
-                total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-                optimizer.step()
+            optimizer.zero_grad()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
 
-                with torch.no_grad():
-                    preds = count_logits.argmax(1)
-                    total_correct += (preds == count_target).sum().item()
-                    total_samples += B
-                    hr, hi = fixation_hit_rate(clean, locations)
+            with torch.no_grad():
+                preds = count_logits.argmax(1)
+                total_correct += (preds == count_target).sum().item()
+                total_samples += B
+                hr, hi = fixation_hit_rate(clean, locations)
 
-                tracker.update(count_cls=count_cls_loss, content=content_loss,
-                               attn=attn_loss, div=div_loss,
-                               count_acc=0, hit_rate=hr, hit_intensity=hi)
+            tracker.update(count_cls=count_cls_loss, content=content_loss,
+                           attn=attn_loss, div=div_loss,
+                           count_acc=0, hit_rate=hr, hit_intensity=hi)
 
         avgs = tracker.end_epoch()
         count_acc = total_correct / total_samples if total_samples > 0 else 0
@@ -186,7 +177,7 @@ def train_counting_model(cfg):
                                 'scan_patch_size': scan_patch_size,
                                 'latent_dim': latent_dim,
                                 'n_scales': n_scales,
-                                'max_count': len(count_values),
+                                'max_count': 3,
                             })
 
     logger.close()
@@ -200,7 +191,7 @@ def train_counting_model(cfg):
                         'scan_patch_size': scan_patch_size,
                         'latent_dim': latent_dim,
                         'n_scales': n_scales,
-                        'max_count': len(count_values),
+                        'max_count': 3,
                     })
 
     specs = [

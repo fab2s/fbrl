@@ -23,6 +23,7 @@ def _build_make_command(cfg):
         'train_words': ('train-words', 'WORD_CONFIG'),
         'train_motor': ('train-motor', 'MOTOR_CONFIG'),
         'train_counting': ('train-counting', 'COUNTING_CONFIG'),
+        'train_reading': ('train-reading', 'READING_CONFIG'),
     }
     # Find subcommand in argv
     subcmd = None
@@ -61,6 +62,7 @@ def _build_make_command(cfg):
         'CONFIG': 'configs/letter.yaml', 'BIGRAM_CONFIG': 'configs/bigram.yaml',
         'WORD_CONFIG': 'configs/word.yaml', 'MOTOR_CONFIG': 'configs/letter_motor.yaml',
         'COUNTING_CONFIG': 'configs/counting.yaml',
+        'READING_CONFIG': 'configs/reading.yaml',
     }
     if config_path and config_path != defaults.get(config_var):
         parts.insert(1, f'{config_var}={config_path}')

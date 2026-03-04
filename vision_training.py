@@ -5,12 +5,13 @@ from fbrl.data import (generate_dataset, generate_test, generate_bigram_dataset,
                        generate_counting_dataset, generate_counting_test)
 from fbrl.train import (train_model, check_attention, train_bigram_model,
                          check_bigram_attention, train_word_model, train_motor_model,
-                         train_counting_model)
+                         train_counting_model, train_reading_model)
 from fbrl.evaluate import (test_model, visualize_model, generate_atlas, test_bigram_model,
                            generate_bigram_atlas, test_word_model, generate_word_atlas,
                            test_word_isolation, generate_isolation_atlas)
 from fbrl._motor_eval import test_motor_model, generate_motor_atlas
 from fbrl._counting_eval import test_counting_model, generate_counting_atlas
+from fbrl._reading_eval import test_reading_model, generate_reading_atlas
 from fbrl.config import load_config
 
 
@@ -309,6 +310,24 @@ if __name__ == '__main__':
     count_atlas_parser.add_argument('--device', default='auto',
                                      choices=['auto', 'cpu', 'cuda'])
 
+    # --- Reading subcommands ---
+    train_read_parser = subparsers.add_parser('train_reading')
+    _add_train_overrides(train_read_parser)
+
+    test_read_parser = subparsers.add_parser('test_reading')
+    test_read_parser.add_argument('--model_dir', required=True)
+    test_read_parser.add_argument('--test_data_dir', required=True)
+    test_read_parser.add_argument('--output_dir', default='reading_results')
+    test_read_parser.add_argument('--device', default='auto',
+                                   choices=['auto', 'cpu', 'cuda'])
+
+    read_atlas_parser = subparsers.add_parser('reading_atlas')
+    read_atlas_parser.add_argument('--model_dir', required=True)
+    read_atlas_parser.add_argument('--test_data_dir', required=True)
+    read_atlas_parser.add_argument('--output', default='data/reading_atlas.html')
+    read_atlas_parser.add_argument('--device', default='auto',
+                                    choices=['auto', 'cpu', 'cuda'])
+
     args = parser.parse_args()
 
     if args.command == 'generate':
@@ -462,3 +481,16 @@ if __name__ == '__main__':
     elif args.command == 'counting_atlas':
         generate_counting_atlas(args.model_dir, args.test_data_dir, args.output,
                                  device=args.device)
+
+    # --- Reading commands ---
+    elif args.command == 'train_reading':
+        cfg = load_config(args.config, _build_overrides(args))
+        train_reading_model(cfg)
+
+    elif args.command == 'test_reading':
+        test_reading_model(args.model_dir, args.test_data_dir, args.output_dir,
+                            device=args.device)
+
+    elif args.command == 'reading_atlas':
+        generate_reading_atlas(args.model_dir, args.test_data_dir, args.output,
+                                device=args.device)

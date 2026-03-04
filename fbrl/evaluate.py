@@ -10,7 +10,7 @@ from PIL import Image
 
 from fbrl import _resolve_device
 from fbrl.data import LetterDataset, BigramDataset, WordDataset
-from fbrl.model import VisionModel, BigramVisionModel, WordVisionModel, MotorVisionModel, CountingModel
+from fbrl.model import VisionModel, BigramVisionModel, WordVisionModel, MotorVisionModel, CountingModel, ReadingModel
 from fbrl.losses import fixation_hit_rate
 
 

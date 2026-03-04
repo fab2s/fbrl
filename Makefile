@@ -253,6 +253,40 @@ endif
 	cp data/counting_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(COUNTING_CONFIG)" > runs/$(NAME)/info.txt; }
 	@echo "Archived to runs/$(NAME)/"
 
+# Reading pipeline (three-phase foveal)
+READING_CONFIG ?= configs/reading.yaml
+CLEAN_READING_MODELS = find data/reading_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_READING_RESULTS = find data/reading_results -type f ! -name .gitignore -delete 2>/dev/null; true
+
+train-reading:
+	@$(CLEAN_READING_MODELS)
+	$(RUN) train_reading --config $(READING_CONFIG) --device $(DEVICE) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH)) $(if $(CKPT),--checkpoint_interval $(CKPT))
+
+resume-reading:
+	$(RUN) train_reading --config $(READING_CONFIG) --device $(DEVICE) --resume data/reading_models/$(RESUME_FROM) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch_size $(BATCH))
+
+test-reading:
+	@$(CLEAN_READING_RESULTS)
+	$(RUN) test_reading --model_dir data/reading_models --test_data_dir data/counting_test --output_dir data/reading_results --device $(DEVICE)
+
+reading-atlas:
+	@rm -f data/reading_atlas.html
+	$(RUN) reading_atlas --model_dir data/reading_models --test_data_dir data/counting_test --output data/reading_atlas.html --device $(DEVICE)
+
+archive-reading:
+ifndef NAME
+	$(error Usage: make archive-reading NAME=v1-reading-baseline)
+endif
+	@mkdir -p runs/$(NAME)
+	$(RUN) compress_model --input data/reading_models/model_final.pth --output data/reading_models/_archive.pth.gz
+	mv data/reading_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
+	cp data/reading_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
+	cp data/reading_models/training.log runs/$(NAME)/ 2>/dev/null || true
+	cp data/reading_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
+	cp data/reading_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(READING_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp data/reading_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(READING_CONFIG)" > runs/$(NAME)/info.txt; }
+	@echo "Archived to runs/$(NAME)/"
+
 test-unit:
 	docker compose exec $(SERVICE) pytest tests/ -v
 
@@ -262,4 +296,5 @@ test-unit:
        generate-words generate-words-test train-words resume-words test-words test-word-isolation word-atlas isolation-atlas archive-words \
        generate-trajectories train-motor resume-motor test-motor motor-atlas archive-motor \
        generate-counting generate-counting-test train-counting resume-counting test-counting counting-atlas archive-counting \
+       train-reading resume-reading test-reading reading-atlas archive-reading \
        test-unit

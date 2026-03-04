@@ -103,6 +103,100 @@ class GlimpseSensor(nn.Module):
         return grid + loc
 
 
+# --- Peripheral Sensor (wide blurred lens for pre-scan) ---
+
+def _gaussian_kernel_2d(kernel_size, sigma):
+    """Create a fixed 2D Gaussian kernel (1, 1, ks, ks) for conv2d."""
+    x = torch.arange(kernel_size).float() - kernel_size // 2
+    g = torch.exp(-x ** 2 / (2 * sigma ** 2))
+    kernel = g.outer(g)
+    kernel = kernel / kernel.sum()
+    return kernel.view(1, 1, kernel_size, kernel_size)
+
+
+class PeripheralSensor(nn.Module):
+    """Wide blurred sensor for pre-scan / peripheral vision.
+
+    Extracts a wide-but-short patch at native resolution (1:1 pixel
+    sampling, no rescaling) then applies a fixed Gaussian blur that
+    destroys letter-level detail.  The output encodes only coarse
+    spatial structure: "ink here / gap there."
+
+    Default patch: 32 tall x 96 wide pixels.  On a 192x128 canvas,
+    96 px width = half the canvas ~= 1.5 letter widths.
+
+    Same output interface as GlimpseSensor: (B, latent_dim) vector
+    fusing "what I see" + "where I am".
+    """
+
+    def __init__(self, patch_pixels=(32, 96), blur_sigma=6.0, latent_dim=256):
+        super().__init__()
+        self.ph, self.pw = patch_pixels
+        self.blur_sigma = blur_sigma
+
+        # Fixed (non-trainable) Gaussian blur kernel
+        ks = int(6 * blur_sigma) | 1  # ensure odd — ~37 for sigma=6
+        self.register_buffer('_blur_k', _gaussian_kernel_2d(ks, blur_sigma))
+
+        # Feature extraction from blurred patch
+        self.patch_cnn = nn.Sequential(
+            nn.Conv2d(1, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1),   # ph/2 x pw/2
+            nn.ReLU(),
+            nn.Conv2d(64, 128, 3, stride=2, padding=1),  # ph/4 x pw/4
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),                      # 1x1
+            nn.Flatten(),                                 # (B, 128)
+        )
+        self.glimpse_fc = nn.Sequential(
+            nn.Linear(128, latent_dim),
+            nn.ReLU(),
+        )
+        # Encode fixation location so the model knows WHERE it looked
+        self.location_fc = nn.Sequential(
+            nn.Linear(2, 128),
+            nn.ReLU(),
+        )
+        # Fuse "what I see" + "where I am"
+        self.combine_fc = nn.Sequential(
+            nn.Linear(latent_dim + 128, latent_dim),
+            nn.ReLU(),
+        )
+
+    def forward(self, image, location):
+        """Extract wide blurred patch at location, encode it.
+
+        Returns: (B, latent_dim) feature vector.
+        """
+        B, C, H, W = image.shape
+        grid = self._make_grid(location, H, W)
+        patch = F.grid_sample(image, grid, align_corners=True,
+                              padding_mode='zeros')
+        # Apply fixed Gaussian blur — destroys letter-level detail
+        pad = self._blur_k.shape[-1] // 2
+        patch = F.conv2d(patch, self._blur_k, padding=pad)
+
+        feat = self.patch_cnn(patch)              # (B, 128)
+        glimpse_feat = self.glimpse_fc(feat)       # "what I see"
+        loc_feat = self.location_fc(location)      # "where I am"
+        return self.combine_fc(torch.cat([glimpse_feat, loc_feat], dim=1))
+
+    def _make_grid(self, location, H, W):
+        """Sampling grid covering ph x pw actual pixels, 1:1, no rescaling."""
+        B = location.shape[0]
+        delta_h = self.ph / H
+        delta_w = self.pw / W
+        grid_y = torch.linspace(-delta_h, delta_h, self.ph,
+                                device=location.device)
+        grid_x = torch.linspace(-delta_w, delta_w, self.pw,
+                                device=location.device)
+        grid_y, grid_x = torch.meshgrid(grid_y, grid_x, indexing='ij')
+        grid = torch.stack([grid_x, grid_y], dim=-1)
+        grid = grid.unsqueeze(0).expand(B, -1, -1, -1)
+        return grid + location.view(B, 1, 1, 2)
+
+
 # --- Attention Controller ---
 
 class AttentionController(nn.Module):
@@ -934,3 +1028,149 @@ class CountingModel(nn.Module):
         )
         count_logits = self.count_head(enc.latent)
         return count_logits, enc.scan_content_logits, enc.locations, enc.latent
+
+
+# --- Three-Phase Foveal Reading Pipeline ---
+
+@dataclass
+class ThreePhaseResult:
+    """Output of encode_three_phase — everything downstream needs."""
+    latent: torch.Tensor          # (B, D) from latent_head(h_final)
+    locations: list               # all phases concatenated, list of (B, 2)
+    phase_tags: list              # 'init'|'meta'|'sub'|'read' per location
+    meta_content_logits: list     # list of (B, 1) per meta step
+    sub_content_logits: list      # list of (B, 1) per sub step
+    meta_positions: list          # list of (B, 2) — meta landing coords
+    sub_positions: list           # list of (B, 2) — sub landing coords
+
+
+def encode_three_phase(image, controller,
+                       meta_sensor, sub_sensor, read_sensor,
+                       n_meta, n_sub_per_meta, n_read_per_sub,
+                       meta_content_head=None, sub_content_head=None):
+    """Three-phase hierarchical GRU attention loop.
+
+    Phase 1 — META-SCAN: n_meta steps with PeripheralSensor (heavy blur).
+      Prescribed linspace x, y learned. Builds coarse content map.
+    Phase 2 — SUB-SCAN: n_sub_per_meta steps per meta zone with PeripheralSensor (mild blur).
+      Anchored x from meta parent, y resets to 0. Free movement within zone.
+    Phase 3 — READ: n_read_per_sub steps per sub position with GlimpseSensor (sharp).
+      Anchored to sub positions. v7-style free movement.
+
+    h never resets across phases — one continuous GRU chain.
+    Only position resets at phase boundaries (x from parent anchor, y=0).
+    """
+    B = image.shape[0]
+    h = controller.h0.expand(B, -1).contiguous()
+    location = torch.zeros(B, 2, device=image.device)
+
+    locations = [location]
+    phase_tags = ['init']
+    meta_content_logits = []
+    sub_content_logits = []
+    meta_positions = []
+    sub_positions = []
+
+    # Phase 1 — META-SCAN (prescribed x, learned y)
+    meta_xs = torch.linspace(-0.75, 0.75, n_meta, device=image.device)
+    for t in range(n_meta):
+        glimpse = meta_sensor(image, location)
+        h = controller.gru(glimpse, h)
+        raw_loc = torch.tanh(controller.location_head(h))
+        # Prescribed x, learned y
+        location = torch.stack([meta_xs[t].expand(B), raw_loc[:, 1]], dim=1)
+        locations.append(location)
+        phase_tags.append('meta')
+        meta_positions.append(location)
+        if meta_content_head is not None:
+            meta_content_logits.append(meta_content_head(h))
+
+    # Phase 2 — SUB-SCAN (anchored to meta positions, free movement)
+    for meta_loc in meta_positions:
+        # Reset: x from meta anchor, y=0
+        location = torch.stack([meta_loc[:, 0].detach(), torch.zeros(B, device=image.device)], dim=1)
+        for _s in range(n_sub_per_meta):
+            glimpse = sub_sensor(image, location)
+            h = controller.gru(glimpse, h)
+            location = torch.tanh(controller.location_head(h))
+            locations.append(location)
+            phase_tags.append('sub')
+            sub_positions.append(location)
+            if sub_content_head is not None:
+                sub_content_logits.append(sub_content_head(h))
+
+    # Phase 3 — READ (anchored to sub positions, free movement)
+    for sub_loc in sub_positions:
+        # Reset: x from sub anchor, y=0
+        location = torch.stack([sub_loc[:, 0].detach(), torch.zeros(B, device=image.device)], dim=1)
+        for _r in range(n_read_per_sub):
+            glimpse = read_sensor(image, location)
+            h = controller.gru(glimpse, h)
+            location = torch.tanh(controller.location_head(h))
+            locations.append(location)
+            phase_tags.append('read')
+
+    latent = controller.latent_head(h)
+
+    return ThreePhaseResult(
+        latent=latent,
+        locations=locations,
+        phase_tags=phase_tags,
+        meta_content_logits=meta_content_logits,
+        sub_content_logits=sub_content_logits,
+        meta_positions=meta_positions,
+        sub_positions=sub_positions,
+    )
+
+
+class ReadingModel(nn.Module):
+    """Three-phase foveal reading: peripheral -> parafoveal -> foveal.
+
+    Meta-scan (PeripheralSensor, heavy blur) -> Sub-scan (PeripheralSensor,
+    mild blur) -> Read (GlimpseSensor, sharp). One GRU carries context
+    across all phases. Count head on final latent (3-class: 1-3 letters).
+    """
+    def __init__(self, n_meta=4, n_sub_per_meta=3, n_read_per_sub=3,
+                 meta_patch_pixels=(32, 96), meta_blur_sigma=6.0,
+                 sub_patch_pixels=(20, 28), sub_blur_sigma=2.0,
+                 read_patch_size=12, latent_dim=256, n_scales=1, max_count=3):
+        super().__init__()
+        self.n_meta = n_meta
+        self.n_sub_per_meta = n_sub_per_meta
+        self.n_read_per_sub = n_read_per_sub
+        self.max_count = max_count
+
+        # Three sensors — peripheral, parafoveal, foveal
+        self.meta_sensor = PeripheralSensor(meta_patch_pixels, meta_blur_sigma, latent_dim)
+        self.sub_sensor = PeripheralSensor(sub_patch_pixels, sub_blur_sigma, latent_dim)
+        self.read_sensor = GlimpseSensor(read_patch_size, n_scales, latent_dim)
+
+        # One GRU controller for all phases
+        self.controller = AttentionController(
+            glimpse_dim=latent_dim, hidden_dim=latent_dim, latent_dim=latent_dim,
+        )
+
+        # Separate content heads per phase
+        self.meta_content_head = nn.Linear(latent_dim, 1)
+        self.sub_content_head = nn.Linear(latent_dim, 1)
+
+        # Count head on final latent
+        self.count_head = nn.Linear(latent_dim, max_count)
+
+    def forward(self, img):
+        """Forward pass: three-phase attention, predict count.
+
+        Args:
+            img: (B, 1, H, W) input image (192x128 canvas)
+        Returns:
+            count_logits: (B, max_count) class logits
+            enc: ThreePhaseResult with all locations and diagnostics
+        """
+        enc = encode_three_phase(
+            img, self.controller,
+            self.meta_sensor, self.sub_sensor, self.read_sensor,
+            self.n_meta, self.n_sub_per_meta, self.n_read_per_sub,
+            self.meta_content_head, self.sub_content_head,
+        )
+        count_logits = self.count_head(enc.latent)
+        return count_logits, enc

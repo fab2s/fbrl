@@ -1,4 +1,4 @@
-"""Counting evaluation functions — imported by evaluate.py."""
+"""Three-phase reading evaluation functions — imported by evaluate.py."""
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -6,54 +6,60 @@ import os
 import json
 import base64
 import io
-from PIL import Image
 
 from fbrl import _resolve_device
 from fbrl.data import CountingDataset
-from fbrl.model import CountingModel
+from fbrl.model import ReadingModel
 from fbrl.losses import fixation_hit_rate
-from fbrl.evaluate import _tensor_to_base64_png
 
 
-def _load_counting_model(model_dir, device):
-    """Load a trained CountingModel from checkpoint."""
+def _load_reading_model(model_dir, device):
+    """Load a trained ReadingModel from checkpoint."""
     ckpt = torch.load(os.path.join(model_dir, 'model_final.pth'),
                       map_location=device, weights_only=False)
-    n_scan = ckpt.get('n_scan_glimpses', 6)
-    scan_ps = ckpt.get('scan_patch_size', (12, 18))
+    n_meta = ckpt.get('n_meta', 4)
+    n_sub_per_meta = ckpt.get('n_sub_per_meta', 3)
+    n_read_per_sub = ckpt.get('n_read_per_sub', 3)
+    meta_patch_pixels = tuple(ckpt.get('meta_patch_pixels', [32, 96]))
+    meta_blur_sigma = ckpt.get('meta_blur_sigma', 6.0)
+    sub_patch_pixels = tuple(ckpt.get('sub_patch_pixels', [20, 28]))
+    sub_blur_sigma = ckpt.get('sub_blur_sigma', 2.0)
+    read_patch_size = ckpt.get('read_patch_size', 12)
     latent_dim = ckpt.get('latent_dim', 256)
     n_scales = ckpt.get('n_scales', 1)
     max_count = ckpt.get('max_count', 3)
 
-    model = CountingModel(
-        n_scan_glimpses=n_scan, scan_patch_size=scan_ps,
-        latent_dim=latent_dim, n_scales=n_scales, max_count=max_count,
+    model = ReadingModel(
+        n_meta=n_meta, n_sub_per_meta=n_sub_per_meta,
+        n_read_per_sub=n_read_per_sub,
+        meta_patch_pixels=meta_patch_pixels, meta_blur_sigma=meta_blur_sigma,
+        sub_patch_pixels=sub_patch_pixels, sub_blur_sigma=sub_blur_sigma,
+        read_patch_size=read_patch_size, latent_dim=latent_dim,
+        n_scales=n_scales, max_count=max_count,
     ).to(device)
     model.load_state_dict(ckpt['model'], strict=False)
     model.eval()
     return model, max_count
 
 
-def test_counting_model(model_dir, test_data_dir, output_dir='counting_results',
-                         device='auto'):
-    """Test a trained CountingModel on counting test data.
+def test_reading_model(model_dir, test_data_dir, output_dir='reading_results',
+                        device='auto'):
+    """Test a trained ReadingModel on counting test data.
 
     Reports per-count accuracy, overall accuracy, confusion matrix,
     and per-font breakdown.
     """
     device = _resolve_device(device)
-    print(f"Counting testing on: {device}")
+    print(f"Reading testing on: {device}")
 
     os.makedirs(output_dir, exist_ok=True)
-    model, max_count = _load_counting_model(model_dir, device)
+    model, max_count = _load_reading_model(model_dir, device)
     dataset = CountingDataset(test_data_dir)
 
-    # Per-count stats
     per_count_correct = {c: 0 for c in range(1, max_count + 1)}
     per_count_total = {c: 0 for c in range(1, max_count + 1)}
     confusion = np.zeros((max_count, max_count), dtype=int)
 
-    # Per-font stats
     font_stats = {}
     errors = []
 
@@ -62,8 +68,8 @@ def test_counting_model(model_dir, test_data_dir, output_dir='counting_results',
         img = img.unsqueeze(0).to(device)
 
         with torch.no_grad():
-            count_logits, _, locations, _ = model(img)
-            pred = count_logits.argmax(1).item() + 1  # 0-indexed -> 1-indexed
+            count_logits, enc = model(img)
+            pred = count_logits.argmax(1).item() + 1
 
         per_count_total[count] = per_count_total.get(count, 0) + 1
         confusion[count - 1, pred - 1] += 1
@@ -76,14 +82,12 @@ def test_counting_model(model_dir, test_data_dir, output_dir='counting_results',
                 'true_count': count, 'predicted': pred,
             })
 
-        # Per-font
         if font not in font_stats:
             font_stats[font] = {'correct': 0, 'total': 0}
         font_stats[font]['total'] += 1
         if pred == count:
             font_stats[font]['correct'] += 1
 
-    # Summary
     total_correct = sum(per_count_correct.values())
     total = sum(per_count_total.values())
     overall_acc = total_correct / total if total > 0 else 0
@@ -132,21 +136,25 @@ def test_counting_model(model_dir, test_data_dir, output_dir='counting_results',
     print(f"\nResults saved to {os.path.join(output_dir, 'results.json')}")
 
 
-def generate_counting_atlas(model_dir, test_data_dir,
-                             output_path='data/counting_atlas.html',
-                             device='auto'):
-    """Generate HTML atlas with sample images per count, scan trajectories overlaid."""
+def generate_reading_atlas(model_dir, test_data_dir,
+                            output_path='data/reading_atlas.html',
+                            device='auto'):
+    """Generate HTML atlas with phase-colored trajectory overlay.
+
+    Blue circles: meta-scan positions
+    Green circles: sub-scan positions
+    Red/hot colormap: read positions
+    """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     device = _resolve_device(device)
-    print(f"Generating counting atlas on: {device}")
+    print(f"Generating reading atlas on: {device}")
 
-    model, max_count = _load_counting_model(model_dir, device)
+    model, max_count = _load_reading_model(model_dir, device)
     dataset = CountingDataset(test_data_dir)
 
-    # Group samples by count
     by_count = {c: [] for c in range(1, max_count + 1)}
     for i in range(len(dataset)):
         img, clean, count, letters, font = dataset[i]
@@ -154,11 +162,16 @@ def generate_counting_atlas(model_dir, test_data_dir,
 
     html_parts = ["""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<title>Counting Atlas</title>
+<title>Reading Atlas (Three-Phase)</title>
 <style>
 body { font-family: monospace; background: #1a1a1a; color: #ccc; padding: 20px; }
 h1 { color: #fff; }
 h2 { color: #aaa; margin-top: 30px; }
+.legend { margin: 10px 0; }
+.legend span { margin-right: 15px; }
+.meta { color: #4488ff; }
+.sub { color: #44cc44; }
+.read { color: #ff4444; }
 .grid { display: flex; flex-wrap: wrap; gap: 10px; }
 .card { background: #2a2a2a; padding: 8px; border-radius: 4px; text-align: center; }
 .card img { display: block; margin: 0 auto; }
@@ -166,10 +179,17 @@ h2 { color: #aaa; margin-top: 30px; }
 .wrong { border: 2px solid #a44; }
 .label { font-size: 12px; margin-top: 4px; }
 </style></head><body>
-<h1>Counting Atlas</h1>
+<h1>Reading Atlas (Three-Phase Foveal Pipeline)</h1>
+<div class="legend">
+  <span class="meta">&#9679; Meta-scan (peripheral)</span>
+  <span class="sub">&#9679; Sub-scan (parafoveal)</span>
+  <span class="read">&#9679; Read (foveal)</span>
+</div>
 """]
 
-    n_samples_per_count = 30  # show up to 30 per count
+    n_samples_per_count = 30
+    phase_colors = {'meta': '#4488ff', 'sub': '#44cc44', 'read': '#ff4444'}
+    phase_sizes = {'meta': 8, 'sub': 6, 'read': 4}
 
     for count_val in sorted(by_count):
         items = by_count[count_val][:n_samples_per_count]
@@ -183,34 +203,31 @@ h2 { color: #aaa; margin-top: 30px; }
             img_t = img.unsqueeze(0).to(device)
 
             with torch.no_grad():
-                count_logits, scan_content_logits, locations, _ = model(img_t)
+                count_logits, enc = model(img_t)
                 pred = count_logits.argmax(1).item() + 1
 
             is_correct = pred == count_val
             if is_correct:
                 correct += 1
 
-            # Render image with scan trajectory
             img_np = img.squeeze(0).cpu().numpy()
             H, W = img_np.shape
 
             fig, ax = plt.subplots(figsize=(max(2, W / 64), 2))
             ax.imshow(img_np, cmap='gray', vmin=0, vmax=1)
 
-            locs = locations[:-1]  # drop vestigial last
-            colors = plt.cm.hot(np.linspace(0.2, 0.9, len(locs)))
-            for si, loc in enumerate(locs):
+            # Plot phase-colored trajectory
+            for li, (loc, tag) in enumerate(zip(enc.locations, enc.phase_tags)):
+                if tag == 'init':
+                    continue
                 loc_np = loc[0].cpu().numpy()
                 px = (loc_np[0] + 1) / 2 * W
                 py = (loc_np[1] + 1) / 2 * H
-                ax.plot(px, py, 'o', color=colors[si], markersize=5,
-                        markeredgecolor='white', markeredgewidth=0.3)
-                if si > 0:
-                    prev_np = locs[si - 1][0].cpu().numpy()
-                    prev_px = (prev_np[0] + 1) / 2 * W
-                    prev_py = (prev_np[1] + 1) / 2 * H
-                    ax.annotate('', xy=(px, py), xytext=(prev_px, prev_py),
-                                arrowprops=dict(arrowstyle='->', color=colors[si], lw=1))
+                color = phase_colors.get(tag, 'white')
+                size = phase_sizes.get(tag, 4)
+                ax.plot(px, py, 'o', color=color, markersize=size,
+                        markeredgecolor='white', markeredgewidth=0.2)
+
             ax.axis('off')
             plt.tight_layout(pad=0)
 

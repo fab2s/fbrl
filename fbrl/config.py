@@ -93,6 +93,20 @@ class ExperimentConfig:
     ink_void_weight: float = 0.5
     vision_checkpoint: Optional[str] = None   # frozen backbone checkpoint path
 
+    # Three-phase reading
+    n_meta_glimpses: int = 4
+    n_sub_per_meta: int = 3
+    n_read_per_sub: int = 3
+    meta_patch_pixels: tuple = (32, 96)
+    meta_blur_sigma: float = 6.0
+    sub_patch_pixels: tuple = (20, 28)
+    sub_blur_sigma: float = 2.0
+    meta_guide_weight: float = 8.0
+    sub_guide_weight: float = 8.0
+    read_void_weight: float = 0.5
+    meta_content_weight: float = 0.5
+    sub_content_weight: float = 0.5
+
     # Differential cosine decay (per-head T_max ratios, multiply epochs)
     tmax_attn_ratio: float = 1.0
     tmax_cls_ratio: float = 1.0
@@ -122,10 +136,11 @@ def load_config(yaml_path, cli_overrides=None):
         data = yaml.safe_load(f) or {}
 
     # Convert list -> tuple for tuple fields
-    if 'scan_patch_size' in data and isinstance(data['scan_patch_size'], list):
-        data['scan_patch_size'] = tuple(data['scan_patch_size'])
-    if 'read_anchor_scan_indices' in data and isinstance(data['read_anchor_scan_indices'], list):
-        data['read_anchor_scan_indices'] = tuple(data['read_anchor_scan_indices'])
+    _tuple_fields = ['scan_patch_size', 'read_anchor_scan_indices',
+                     'meta_patch_pixels', 'sub_patch_pixels']
+    for tf in _tuple_fields:
+        if tf in data and isinstance(data[tf], list):
+            data[tf] = tuple(data[tf])
 
     # Apply CLI overrides
     if cli_overrides:
@@ -134,10 +149,9 @@ def load_config(yaml_path, cli_overrides=None):
                 data[k] = v
 
     # Convert from override too
-    if 'scan_patch_size' in data and isinstance(data['scan_patch_size'], list):
-        data['scan_patch_size'] = tuple(data['scan_patch_size'])
-    if 'read_anchor_scan_indices' in data and isinstance(data['read_anchor_scan_indices'], list):
-        data['read_anchor_scan_indices'] = tuple(data['read_anchor_scan_indices'])
+    for tf in _tuple_fields:
+        if tf in data and isinstance(data[tf], list):
+            data[tf] = tuple(data[tf])
 
     # Filter to valid fields only
     valid = {f.name for f in fields(ExperimentConfig)}
@@ -160,19 +174,19 @@ def config_to_dict(cfg):
     """Serialize config for checkpoint storage."""
     d = asdict(cfg)
     # Ensure tuples are lists for YAML/JSON compat
-    if isinstance(d.get('scan_patch_size'), tuple):
-        d['scan_patch_size'] = list(d['scan_patch_size'])
-    if isinstance(d.get('read_anchor_scan_indices'), tuple):
-        d['read_anchor_scan_indices'] = list(d['read_anchor_scan_indices'])
+    for tf in ('scan_patch_size', 'read_anchor_scan_indices',
+               'meta_patch_pixels', 'sub_patch_pixels'):
+        if isinstance(d.get(tf), tuple):
+            d[tf] = list(d[tf])
     return d
 
 
 def config_from_dict(d):
     """Restore config from checkpoint dict."""
-    if 'scan_patch_size' in d and isinstance(d['scan_patch_size'], list):
-        d['scan_patch_size'] = tuple(d['scan_patch_size'])
-    if 'read_anchor_scan_indices' in d and isinstance(d['read_anchor_scan_indices'], list):
-        d['read_anchor_scan_indices'] = tuple(d['read_anchor_scan_indices'])
+    for tf in ('scan_patch_size', 'read_anchor_scan_indices',
+               'meta_patch_pixels', 'sub_patch_pixels'):
+        if tf in d and isinstance(d[tf], list):
+            d[tf] = tuple(d[tf])
     valid = {f.name for f in fields(ExperimentConfig)}
     filtered = {k: v for k, v in d.items() if k in valid}
     return ExperimentConfig(**filtered)
