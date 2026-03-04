@@ -145,6 +145,32 @@ Vision converged exactly like v7 — the unified backward works. RR accuracy cli
 
 **Conclusion**: joint training of vision + motor doesn't work. Any motor→encoder gradient flow, regardless of LR scaling, causes co-adaptation that destroys generalization. The encoder must be completely frozen.
 
+### v5: frozen v8 backbone + self-supervised constrained motor
+
+**Hypothesis**: freeze the solved v8 backbone (100%/100%), train only a constrained motor decoder with self-supervised losses. No GT trajectory scaffold. Two signals: ink-on-target (spatial) and re-read through frozen classifier (semantic).
+
+**Architecture**:
+- Frozen v8 backbone (1 scan + 8 reads, latent_dim=256, learnable_scan_x)
+- ConstrainedMotorDecoder: GRU-based, 4 gated strokes × 20 points, latent-predicted starts, sigmoid gates, 269K trainable params
+- Gated rendering: per-stroke sigmoid gates control ink, Gaussian blob rendering (sigma=0.75)
+- Ink-on-target: `rendered * blur(canonical)` — spatial gradient toward canonical font pixels
+- Re-read: rendered → frozen encoder → frozen classifier → CE — semantic signal
+
+**Key findings**:
+
+1. **Gate collapse** (first run): with rr_cls warmup, only ink loss active early → model learns degenerate solution (turn off all gates = zero ink = zero void penalty). Fix: remove warmup entirely (modular design doesn't need encoder protection).
+
+2. **Cold-start bootstrapping**: fixed blur sigma=3 too narrow for distant strokes — gradient vanishes. Fix: blur sigma annealing from 20→3. Large blur acts as smooth spatial attractor, pulling strokes toward letter pixels. This drove all the real progress.
+
+3. **Adversarial pattern problem** (fundamental): 55.8% train rr_ltr, 13.6% test. The re-read path optimizes against the classifier's decision boundary, not visual letter similarity. The motor learns patterns that activate the correct class neurons — adversarial examples, not letters. Like simple makeup patterns that trick face recognition. The classifier is a lossy bottleneck (images → 26 classes), discarding spatial structure. The motor only needs to land in the right decision region, which is much easier than actually writing the letter.
+
+**Conclusion**: self-supervised motor via re-read through a frozen classifier produces adversarial shortcuts, not genuine writing. The ink-on-target spatial signal is the honest signal, but alone it lacks semantic pressure. Fixing this with direct pixel matching (MSE vs canonical) would work but reduces to supervised copying — a different project that doesn't feed back into the vision/attention research. Motor experiments paused pending new ideas.
+
+**Technical notes** (for future reference):
+- Performance-driven blur annealing implemented but not fully tested: `max(ink_blur_sigma, ink_blur_sigma_start * (1 - prev_rr_ltr))`
+- Code supports both ConstrainedMotorDecoder (v5) and legacy MotorTraceDecoder (v1-v4)
+- `evaluate.py` detects `learnable_scan_x` from state_dict (`scan_xs` key) as fallback when not in checkpoint metadata
+
 ## Key Concepts
 
 ### Read -> Write -> Re-Read
@@ -173,5 +199,6 @@ The scaffold trains against these targets early, then fades so the model can dev
 | v1 | 84.6% letter | 47.6% letter | Transfer, 11 fonts, sigma=1.5 |
 | v3 | CE 1.97 | 23% letter | From scratch, 200ep, LR exhausted |
 | v4 | 17.8% letter | 11.0% letter | Two-pass coupled, co-adaptation failure |
+| v5 | 100% (frozen v8) | 13.6% letter | Frozen backbone, adversarial patterns |
 
 Detailed results in `runs/motor/`.

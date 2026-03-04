@@ -44,10 +44,16 @@ def _load_model(model_dir, device):
         patch_size = ckpt.get('patch_size', 12)
         n_traj = ckpt.get('n_trajectory_points', 32)
         render_sigma = ckpt.get('render_sigma', 1.5)
+        motor_n_strokes = ckpt.get('motor_n_strokes', 0)
+        motor_points_per_stroke = ckpt.get('motor_points_per_stroke', 0)
+        learnable_scan_x = ckpt.get('learnable_scan_x', 'scan_xs' in state_dict)
         model = MotorVisionModel(
             n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
             n_scan_glimpses=n_scan, scan_patch_size=scan_ps,
             n_trajectory_points=n_traj, render_sigma=render_sigma,
+            motor_n_strokes=motor_n_strokes,
+            motor_points_per_stroke=motor_points_per_stroke,
+            learnable_scan_x=learnable_scan_x,
         ).to(device)
     elif model_type == 'word':
         n_scan = ckpt['n_scan_glimpses']
@@ -89,7 +95,7 @@ def _load_model(model_dir, device):
         patch_size = ckpt.get('patch_size', 12)
         n_scan = ckpt.get('n_scan_glimpses', 0)
         scan_ps = ckpt.get('scan_patch_size', (12, 18))
-        learnable_scan_x = ckpt.get('learnable_scan_x', False)
+        learnable_scan_x = ckpt.get('learnable_scan_x', 'scan_xs' in state_dict)
         model = VisionModel(
             n_glimpses=n_glimpses, patch_size=patch_size, n_scales=n_scales,
             n_scan_glimpses=n_scan, scan_patch_size=scan_ps,

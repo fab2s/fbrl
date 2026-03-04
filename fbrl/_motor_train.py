@@ -92,6 +92,7 @@ def train_motor_model(cfg):
     render_sigma = cfg.render_sigma
     ink_weight = cfg.ink_weight
     ink_blur_sigma = cfg.ink_blur_sigma
+    ink_blur_sigma_start = cfg.ink_blur_sigma_start
     ink_void_weight = cfg.ink_void_weight
     rr_cls_weight = cfg.rr_cls_weight
     rr_cls_warmup_ratio = cfg.rr_cls_warmup_ratio
@@ -180,9 +181,10 @@ def train_motor_model(cfg):
     train_start = time.time()
 
     rr_w_hdr = f"  {'rr_w':>5s}" if rr_cls_warmup_epochs > 0 else ""
+    blur_hdr = f"  {'blur':>5s}" if ink_blur_sigma_start > 0 else ""
     header = (f"{'epoch':>5s}  {'ink':>7s}  {'rr_cls':>6s}  "
               f"{'rr_ltr':>6s}  {'rr_cas':>6s}  {'gates':>5s}  "
-              f"{'lr':>8s}{rr_w_hdr}  time")
+              f"{'lr':>8s}{rr_w_hdr}{blur_hdr}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
 
     for epoch in range(start_epoch, end_epoch):
@@ -194,6 +196,17 @@ def train_motor_model(cfg):
             rr_cls_w = 0.5 * (1 - math.cos(math.pi * epoch / rr_cls_warmup_epochs))
         else:
             rr_cls_w = 1.0
+
+        # Ink blur sigma: performance-driven, tied to rr_ltr accuracy
+        # sigma = max(final, start * (1 - rr_ltr_acc))
+        # rr_ltr=0%: sigma=start (broad attractor)
+        # rr_ltr=100%: sigma=final (tight precision)
+        if ink_blur_sigma_start > 0:
+            prev_rr_ltr = tracker.history['rr_letter_acc'][-1] if tracker.history['rr_letter_acc'] else 0.0
+            cur_blur_sigma = max(ink_blur_sigma,
+                                 ink_blur_sigma_start * (1 - prev_rr_ltr))
+        else:
+            cur_blur_sigma = ink_blur_sigma
 
         for img, clean, letters, cases, fonts, partner_clean in dataloader:
             img = img.to(device)
@@ -223,7 +236,7 @@ def train_motor_model(cfg):
                 else:
                     canonical_imgs.append(torch.zeros(1, 128, 128))
             canonical = torch.stack(canonical_imgs).to(device)
-            blurred = _gaussian_blur_2d(canonical, sigma=ink_blur_sigma)
+            blurred = _gaussian_blur_2d(canonical, sigma=cur_blur_sigma)
 
             # Coverage reward + void penalty
             ink_loss = (-torch.mean(rendered * blurred) +
@@ -266,17 +279,19 @@ def train_motor_model(cfg):
         lr = motor_sched.get_last_lr()[0]
 
         rr_w_str = f"  rr_w {rr_cls_w:.2f}" if rr_cls_warmup_epochs > 0 else ""
+        blur_str = f"  blur {cur_blur_sigma:.1f}" if ink_blur_sigma_start > 0 else ""
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Ink {avgs['ink']:.4f}  RR_cls {avgs['rr_cls']:.4f}  "
               f"RR_ltr {avgs['rr_letter_acc']:.0%}  RR_cas {avgs['rr_case_acc']:.0%}  "
-              f"Gates {avgs['gate_active']:.1f}  lr {lr:.6f}{rr_w_str}  "
+              f"Gates {avgs['gate_active']:.1f}  lr {lr:.6f}{rr_w_str}{blur_str}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
         rr_w_log = f"  {rr_cls_w:>5.4f}" if rr_cls_warmup_epochs > 0 else ""
+        blur_log = f"  {cur_blur_sigma:>5.1f}" if ink_blur_sigma_start > 0 else ""
         logger.write_line(
             f"{epoch+1:>5d}  {avgs['ink']:>7.4f}  {avgs['rr_cls']:>6.4f}  "
             f"{avgs['rr_letter_acc']:>6.4f}  {avgs['rr_case_acc']:>6.4f}  "
-            f"{avgs['gate_active']:>5.1f}  {lr:>8.6f}{rr_w_log}  {epoch_time:.1f}s")
+            f"{avgs['gate_active']:>5.1f}  {lr:>8.6f}{rr_w_log}{blur_log}  {epoch_time:.1f}s")
 
         if epoch - start_epoch < epochs:
             motor_sched.step()
@@ -294,6 +309,7 @@ def train_motor_model(cfg):
                                 'motor_n_strokes': n_strokes,
                                 'motor_points_per_stroke': points_per_stroke,
                                 'render_sigma': render_sigma,
+                                'learnable_scan_x': cfg.learnable_scan_x,
                                 'image_size': 128, 'has_case': True,
                             })
 
@@ -311,6 +327,7 @@ def train_motor_model(cfg):
                         'motor_n_strokes': n_strokes,
                         'motor_points_per_stroke': points_per_stroke,
                         'render_sigma': render_sigma,
+                        'learnable_scan_x': cfg.learnable_scan_x,
                         'image_size': 128, 'has_case': True,
                     })
 

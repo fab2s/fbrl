@@ -10,7 +10,7 @@ latent_dim: 256
 n_scales: 1
 learnable_scan_x: true
 
-epochs: 300
+epochs: 100
 batch_size: 52
 checkpoint_interval: 10
 multi_head: false
@@ -39,10 +39,11 @@ render_sigma: 0.75
 
 # Self-supervised losses
 ink_weight: 1.0
-ink_blur_sigma: 3.0
+ink_blur_sigma: 3.0           # final (anneals from start -> final over first half)
+ink_blur_sigma_start: 20.0    # broad attractor, narrows to ink_blur_sigma
 ink_void_weight: 0.5
 rr_cls_weight: 1.0
-rr_cls_warmup_ratio: 0.25
+rr_cls_warmup_ratio: 0.0
 
 # Frozen v8 backbone (runs/letters/v8-9glimpse)
 vision_checkpoint: runs/letters/v8-9glimpse/model_final.pth.gz

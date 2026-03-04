@@ -1,8 +1,7 @@
 Letter: 572/572 (100.0%)
 Case:   572/572 (100.0%)
 Avg MSE:      0.0008
-Avg recode:   0.0019
-
+Avg recode:   0.0019  
 Per-font:
   default                 : Letter 100.0%  Case 100.0%  (52)
   dejavu-sans             : Letter 100.0%  Case 100.0%  (52)

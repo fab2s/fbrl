@@ -10,7 +10,7 @@ from PIL import Image
 
 from fbrl import _resolve_device
 from fbrl.data import LetterDataset
-from fbrl.motor import load_trajectory_data, batch_gt_trajectories, soft_render
+from fbrl.motor import load_trajectory_data, batch_gt_trajectories, soft_render, ConstrainedMotorDecoder
 from fbrl.losses import fixation_hit_rate
 from fbrl.evaluate import _load_model, visualize_attention, _tensor_to_base64_png
 
@@ -36,8 +36,14 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
 
     dataset = LetterDataset(test_data_dir)
 
-    # Load trajectory GT
-    traj_data = load_trajectory_data(trajectory_data_dir)
+    # Detect constrained motor decoder (v5)
+    is_constrained = isinstance(model.motor_decoder, ConstrainedMotorDecoder)
+
+    # Load trajectory GT (only needed for legacy decoder)
+    if not is_constrained:
+        traj_data = load_trajectory_data(trajectory_data_dir)
+    else:
+        traj_data = None
 
     letter_correct = 0
     case_correct = 0
@@ -101,17 +107,20 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
         mse = F.mse_loss(recon, img).item()
         mse_scores.append(mse)
 
-        # Trajectory metrics
-        gt_traj = batch_gt_trajectories([letter], [case], traj_data, device)
-        t_mse = F.mse_loss(trajectory[:, :, :2], gt_traj[:, :, :2]).item()
-        traj_mse_scores.append(t_mse)
+        # Trajectory metrics (legacy decoder only — constrained has no GT)
+        if not is_constrained:
+            gt_traj = batch_gt_trajectories([letter], [case], traj_data, device)
+            t_mse = F.mse_loss(trajectory[:, :, :2], gt_traj[:, :, :2]).item()
+            traj_mse_scores.append(t_mse)
 
-        # Pen state F1
-        pred_pen = (torch.sigmoid(trajectory[:, :, 2]) > 0.5).float()
-        gt_pen = gt_traj[:, :, 2]
-        pen_tp += ((pred_pen == 1) & (gt_pen == 1)).sum().item()
-        pen_fp += ((pred_pen == 1) & (gt_pen == 0)).sum().item()
-        pen_fn += ((pred_pen == 0) & (gt_pen == 1)).sum().item()
+            # Pen state F1
+            pred_pen = (torch.sigmoid(trajectory[:, :, 2]) > 0.5).float()
+            gt_pen = gt_traj[:, :, 2]
+            pen_tp += ((pred_pen == 1) & (gt_pen == 1)).sum().item()
+            pen_fp += ((pred_pen == 1) & (gt_pen == 0)).sum().item()
+            pen_fn += ((pred_pen == 0) & (gt_pen == 1)).sum().item()
+        else:
+            t_mse = 0.0
 
         # Per-font stats
         if font not in font_stats:
@@ -185,8 +194,9 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
     print(f"RR Letter accuracy: {rr_letter_correct}/{total} ({rr_letter_acc:.1%})")
     print(f"RR Case accuracy:   {rr_case_correct}/{total} ({rr_case_acc:.1%})")
     print(f"Avg recon MSE:      {avg_mse:.4f}")
-    print(f"Avg traj MSE:       {avg_traj_mse:.4f}")
-    print(f"Pen F1:             {pen_f1:.3f} (P={pen_precision:.3f} R={pen_recall:.3f})")
+    if not is_constrained:
+        print(f"Avg traj MSE:       {avg_traj_mse:.4f}")
+        print(f"Pen F1:             {pen_f1:.3f} (P={pen_precision:.3f} R={pen_recall:.3f})")
     print(f"Avg latent MSE:     {avg_latent_mse:.4f}")
 
     if len(font_stats) > 1:
@@ -241,9 +251,10 @@ def test_motor_model(model_dir, test_data_dir, output_dir='motor_results',
     with open(motor_summary_path, 'w') as f:
         f.write(f"Re-read Letter: {rr_letter_correct}/{total} ({rr_letter_acc:.1%})\n")
         f.write(f"Re-read Case:   {rr_case_correct}/{total} ({rr_case_acc:.1%})\n")
-        f.write(f"Avg Traj MSE:   {avg_traj_mse:.4f}\n")
+        if not is_constrained:
+            f.write(f"Avg Traj MSE:   {avg_traj_mse:.4f}\n")
+            f.write(f"Pen F1:         {pen_f1:.3f} (P={pen_precision:.3f} R={pen_recall:.3f})\n")
         f.write(f"Avg Latent MSE: {avg_latent_mse:.4f}\n")
-        f.write(f"Pen F1:         {pen_f1:.3f} (P={pen_precision:.3f} R={pen_recall:.3f})\n")
 
         if len(font_stats) > 1:
             f.write(f"\nPer-font re-read:\n")
@@ -573,13 +584,27 @@ def generate_motor_atlas(model_dir, test_data_dir, output_path='data/motor_atlas
 
         original_char = letter.lower() if case == 'lower' else letter
 
-        # Trajectory as list of [x, y, pen_prob]
-        traj_np = trajectory[0].cpu().numpy()
-        traj_list = []
-        for t in range(traj_np.shape[0]):
-            x, y = float(traj_np[t, 0]), float(traj_np[t, 1])
-            pen_prob = float(1.0 / (1.0 + np.exp(-traj_np[t, 2])))  # sigmoid
-            traj_list.append([round(x, 4), round(y, 4), round(pen_prob, 3)])
+        # Trajectory as list of [x, y, pen_prob] for JS visualization
+        if isinstance(trajectory, tuple):
+            # Constrained decoder: (points, gates) -> convert to trajectory format
+            points, gates = trajectory
+            pts = points[0].cpu().numpy()     # (K, N, 2)
+            gts = gates[0].cpu().numpy()      # (K,)
+            traj_list = []
+            for k in range(pts.shape[0]):
+                gate_val = float(gts[k])
+                for t in range(pts.shape[1]):
+                    x, y = float(pts[k, t, 0]), float(pts[k, t, 1])
+                    # pen_prob: gate value (pen down within stroke), 0 between strokes
+                    pen = gate_val if t > 0 else 0.0  # pen up at stroke start
+                    traj_list.append([round(x, 4), round(y, 4), round(pen, 3)])
+        else:
+            traj_np = trajectory[0].cpu().numpy()
+            traj_list = []
+            for t in range(traj_np.shape[0]):
+                x, y = float(traj_np[t, 0]), float(traj_np[t, 1])
+                pen_prob = float(1.0 / (1.0 + np.exp(-traj_np[t, 2])))  # sigmoid
+                traj_list.append([round(x, 4), round(y, 4), round(pen_prob, 3)])
 
         if original_char not in entries:
             entries[original_char] = {'char': original_char, 'fonts': {}}

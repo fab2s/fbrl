@@ -590,13 +590,22 @@ class MotorVisionModel(nn.Module):
         return recon, letter_logits, case_logits, enc.locations, enc.latent, enc.scan_content_logits
 
     def motor_forward(self, latent):
-        """Deferred motor path: latent -> trajectory -> rendered image.
+        """Deferred motor path: latent -> trajectory/points -> rendered image.
 
         Call this AFTER freeing the main forward graph.
+        Returns (trajectory_or_points, rendered) where trajectory_or_points is:
+          - MotorTraceDecoder: (B, N, 3) trajectory
+          - ConstrainedMotorDecoder: ((B, K, N, 2) points, (B, K) gates)
         """
-        trajectory = self.motor_decoder(latent)
-        rendered = self._soft_render(trajectory, sigma=self._render_sigma)
-        return trajectory, rendered
+        if hasattr(self, '_render_gated_strokes'):
+            points, gates = self.motor_decoder(latent)
+            rendered = self._render_gated_strokes(points, gates,
+                                                   sigma=self._render_sigma)
+            return (points, gates), rendered
+        else:
+            trajectory = self.motor_decoder(latent)
+            rendered = self._soft_render(trajectory, sigma=self._render_sigma)
+            return trajectory, rendered
 
     def recode(self, img, target_case):
         """Encode image, decode with target case -> capitalize/uncapitalize."""

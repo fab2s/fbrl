@@ -88,7 +88,8 @@ class ExperimentConfig:
     motor_points_per_stroke: int = 20
     motor_hidden_dim: int = 256
     ink_weight: float = 1.0
-    ink_blur_sigma: float = 3.0
+    ink_blur_sigma: float = 3.0               # final blur sigma (or fixed if no anneal)
+    ink_blur_sigma_start: float = 0.0          # starting blur sigma (0 = no anneal, use ink_blur_sigma)
     ink_void_weight: float = 0.5
     vision_checkpoint: Optional[str] = None   # frozen backbone checkpoint path
 
