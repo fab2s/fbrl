@@ -663,3 +663,88 @@ def soft_render(trajectory, height=128, width=128, sigma=1.5):
         canvas = canvas + torch.sigmoid(pen_logit) * blob
 
     return canvas.clamp(0, 1)
+
+
+# --- Constrained Motor Decoder (v5) ---
+
+class ConstrainedMotorDecoder(nn.Module):
+    """latent -> K gated strokes of N points (xy only, no pen state).
+
+    Each stroke has a latent-predicted start point. A GRU unrolls N points
+    per stroke, with hidden state carrying across strokes for inter-stroke
+    context. Per-stroke sigmoid gates allow unused strokes to produce zero ink.
+    """
+    def __init__(self, latent_dim=256, hidden_dim=256,
+                 n_strokes=4, points_per_stroke=20):
+        super().__init__()
+        self.n_strokes = n_strokes
+        self.points_per_stroke = points_per_stroke
+        self.latent_to_h = nn.Linear(latent_dim, hidden_dim)
+        self.stroke_start_head = nn.Linear(latent_dim, n_strokes * 2)
+        self.gru = nn.GRUCell(2, hidden_dim)
+        self.point_head = nn.Linear(hidden_dim, 2)
+        self.gate_head = nn.Linear(latent_dim, n_strokes)
+
+    def forward(self, latent):
+        """Decode latent to gated stroke points.
+
+        Args:
+            latent: (B, latent_dim)
+        Returns:
+            points: (B, K, N, 2) stroke points in [-1, 1]
+            gates: (B, K) per-stroke activation in [0, 1]
+        """
+        B = latent.shape[0]
+        K = self.n_strokes
+        N = self.points_per_stroke
+
+        h = torch.tanh(self.latent_to_h(latent))
+        starts = torch.tanh(self.stroke_start_head(latent)).view(B, K, 2)
+        gates = torch.sigmoid(self.gate_head(latent))
+
+        all_points = []
+        for s in range(K):
+            inp = starts[:, s]
+            for t in range(N):
+                h = self.gru(inp, h)
+                xy = torch.tanh(self.point_head(h))
+                all_points.append(xy)
+                inp = xy.detach()  # autoregressive
+
+        points = torch.stack(all_points, dim=1).view(B, K, N, 2)
+        return points, gates
+
+
+def render_gated_strokes(points, gates, height=128, width=128, sigma=0.75):
+    """Render gated strokes as Gaussian blobs on a canvas.
+
+    Args:
+        points: (B, K, N, 2) stroke points in [-1, 1]
+        gates: (B, K) per-stroke activation in [0, 1]
+        height, width: output canvas size
+        sigma: Gaussian blob width in pixels
+    Returns:
+        canvas: (B, 1, H, W) rendered image, clamped to [0, 1]
+    """
+    B, K, N, _ = points.shape
+    device = points.device
+
+    gy = torch.linspace(-1, 1, height, device=device).view(1, 1, height, 1)
+    gx = torch.linspace(-1, 1, width, device=device).view(1, 1, 1, width)
+
+    sigma_norm_h = sigma * 2.0 / height
+    sigma_norm_w = sigma * 2.0 / width
+
+    canvas = torch.zeros(B, 1, height, width, device=device)
+
+    for k in range(K):
+        gate = gates[:, k].view(B, 1, 1, 1)
+        for t in range(N):
+            x = points[:, k, t, 0].view(B, 1, 1, 1)
+            y = points[:, k, t, 1].view(B, 1, 1, 1)
+            dx = (gx - x) / sigma_norm_w
+            dy = (gy - y) / sigma_norm_h
+            blob = torch.exp(-0.5 * (dx * dx + dy * dy))
+            canvas = canvas + gate * blob
+
+    return canvas.clamp(0, 1)

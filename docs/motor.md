@@ -90,17 +90,60 @@ First motor experiment. Transferred pretrained vision from v5-scan (3 scan + 10 
 
 Designed the enhanced loss stack (latent matching, frozen re-reader, render matching, sharper sigma). Switched to 48 trajectory points, 384 latent dim, binary closing before skeletonization for cleaner targets.
 
-### v3: from scratch with void repulsion (IN PROGRESS)
+### v3: from scratch with void repulsion
 
 Aligned with v7 letter findings: 1 scan + 6 read = 7 glimpses, scan-only guide, void repulsion for reads, isotropic diversity. Training from scratch — no transfer. The hypothesis: self-scaffolding should let all loss terms sequence naturally, as it did for pure vision in v7.
 
 Config: lowercase only (`case_filter: lower`), 384 latent dim, centerline trajectory targets, fast-annealing scaffold (25% of epochs).
 
-Early observations (~80 epochs):
-- Vision side converging slower than pure v7 (expected — 384 dim + motor noise through shared encoder)
-- Void repulsion saturated quickly (all fixations on ink)
-- Motor re-read accuracy near zero — waiting for letter classification to break through
-- Self-scaffolding hypothesis being tested: will classification convergence trigger motor improvement?
+Results (200 epochs): letter CE 1.97, RR 23%, traj MSE 0.097. LR exhausted before classification broke through.
+
+### v4: two-pass unified vision + coupled motor
+
+**Hypothesis**: motor training failed because multi-head backward (4 separate passes with `inputs=` targeting) isolated the encoder from classification gradients. Fix: make vision identical to v7 (single unified backward), then add motor as a second pass where rr_cls gradients couple back into the encoder at a controlled LR.
+
+**Architecture**: two optimizers instead of four:
+
+```
+Pass 1 (vision — identical to v7):
+  vision_loss = recon + letter_CE + case_CE + attn + div + content + void + recode
+  vision_opt.zero_grad() → vision_loss.backward() → clip + step
+
+Pass 2 (motor — fresh forward through post-update encoder):
+  motor_opt.zero_grad()
+  latent2 = model(img)           ← fresh graph, post-vision-update weights
+  trajectory = motor_decoder(latent2)
+  traj scaffold + render + re-read → rr_cls
+  motor_loss.backward()           ← gradients to motor_decoder + encoder
+  motor_opt.step()                ← motor at 0.001, encoder at 0.0001
+```
+
+Motor optimizer holds both motor params (lr=0.001) and vision params (lr=0.0001 = `motor_coupling_lr`). Each optimizer maintains separate Adam momentum states.
+
+**Config**: single font (dejavu-sans) for fast iteration (~8s/epoch), 8 read glimpses, 384 latent, 300 epochs, rr_cls warmup 25%.
+
+**Training convergence** (300 epochs):
+
+| Metric | Ep 1 | Ep 50 | Ep 100 | Ep 150 | Ep 300 |
+|--------|------|-------|--------|--------|--------|
+| Letter CE | 3.28 | 0.26 | 0.016 | 0.007 | 0.0002 |
+| Case CE | 0.70 | 0.035 | 0.008 | 0.0005 | 0.0000 |
+| RR letter acc | 4% | 28% | 55% | 68% | 96% |
+| Traj MSE | 0.022 | 0.073 | 0.060 | 0.055 | 0.068 |
+
+Vision converged exactly like v7 — the unified backward works. RR accuracy climbed to 96% despite traj MSE plateauing at ~0.07 (motor found readable output without perfect trajectory fidelity).
+
+**Test results** (572 samples, 11 fonts):
+
+| Font | Letter | RR |
+|------|--------|----|
+| dejavu-sans (train) | 34.6% | 26.9% |
+| All others | 6-23% | 6-12% |
+| **Overall** | **17.8%** | **11.0%** |
+
+**Failure analysis**: massive train/test gap — 96% RR in training vs 11% on test. Even on the training font, only 35% letter accuracy (vs v7's 100%). The motor coupling at 0.0001 LR over 300 epochs was enough to corrupt the encoder's generalization. The encoder co-adapted to its own motor traces rather than learning robust letter features.
+
+**Conclusion**: joint training of vision + motor doesn't work. Any motor→encoder gradient flow, regardless of LR scaling, causes co-adaptation that destroys generalization. The encoder must be completely frozen.
 
 ## Key Concepts
 
@@ -128,6 +171,7 @@ The scaffold trains against these targets early, then fades so the model can dev
 | Version | Vision Accuracy | Re-read Accuracy | Key detail |
 |---------|----------------|-----------------|------------|
 | v1 | 84.6% letter | 47.6% letter | Transfer, 11 fonts, sigma=1.5 |
-| v3 | TBD | TBD | From scratch, void repulsion, enhanced losses |
+| v3 | CE 1.97 | 23% letter | From scratch, 200ep, LR exhausted |
+| v4 | 17.8% letter | 11.0% letter | Two-pass coupled, co-adaptation failure |
 
 Detailed results in `runs/motor/`.

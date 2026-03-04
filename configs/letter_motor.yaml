@@ -1,53 +1,61 @@
 model_type: letter_motor
 n_positions: 1
+
+# v8 backbone geometry (must match checkpoint)
 n_scan_glimpses: 1
-n_read_glimpses: 6
+n_read_glimpses: 8
 scan_patch_size: [12, 18]
 read_patch_size: 12
-latent_dim: 384
+latent_dim: 256
 n_scales: 1
-case_filter: lower
 learnable_scan_x: true
 
-epochs: 200
+epochs: 300
 batch_size: 52
 checkpoint_interval: 10
-multi_head: true
+multi_head: false
 amp: false
 
-# Attention — v7 pattern
+# Attention weights (not used in v5 -- backbone frozen)
 scan_guide_weight: 8.0
 guide_weight: 0.0
 blur_sigma_ratio: 0.16
 diversity_weight: 1.0
 diversity_sigma: 0.1
 scan_vy: 0.3
-read_vy: 1.0
+read_vy: 1.5
 diversity_vy: 1.0
 content_weight: 0.5
-recode_weight: 1.0
 void_weight: 0.5
 scan_void_weight: 1.5
+recode_weight: 1.0
 
-# Motor — enhanced v2 loss stack
+# Motor v5 -- constrained strokes, self-supervised
 motor_enabled: true
-n_trajectory_points: 48
+motor_n_strokes: 4
+motor_points_per_stroke: 20
+motor_hidden_dim: 256
 render_sigma: 0.75
-traj_weight: 0.5
-traj_scaffold_ratio: 0.25
-traj_scaffold_floor: 0.05
+
+# Self-supervised losses
+ink_weight: 1.0
+ink_blur_sigma: 3.0
+ink_void_weight: 0.5
 rr_cls_weight: 1.0
-latent_match_weight: 2.0
-render_match_weight: 0.25
+rr_cls_warmup_ratio: 0.25
+
+# Frozen v8 backbone (runs/letters/v8-9glimpse)
+vision_checkpoint: runs/letters/v8-9glimpse/model_final.pth.gz
 canonical_font: dejavu-sans
-trajectory_data_dir: data/trajectories_centerline
 
-# Differential cosine decay
-tmax_attn_ratio: 0.5      # saturates by epoch 10, decay fast
-tmax_cls_ratio: 1.5       # needs most runway — the bottleneck
-tmax_recon_ratio: 1.0     # middle ground, supports cls
-tmax_motor_ratio: 1.2     # needs runway after scaffold fades
-lr_floor: 0.00005         # prevent total LR death
+# Legacy motor fields (unused in v5, kept for config compat)
+n_trajectory_points: 48
+traj_weight: 0.0
 
+# Cosine decay
+tmax_motor_ratio: 1.0
+lr_floor: 0.00005
+
+# All fonts, both cases
 data_dir: data/letters
 save_dir: data/motor_models

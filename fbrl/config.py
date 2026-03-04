@@ -76,9 +76,21 @@ class ExperimentConfig:
 
     # Enhanced motor losses (v2)
     case_filter: Optional[str] = None          # 'upper', 'lower', or None (both)
+    motor_target_case: Optional[str] = None    # 'lower'/'upper' — force motor trace case (None = match input)
     latent_match_weight: float = 0.0           # 0 = disabled (backward compat)
     frozen_rr_weight: float = 0.0              # 0 = disabled
     render_match_weight: float = 0.0           # 0 = disabled
+    rr_cls_warmup_ratio: float = 0.0           # ratio of epochs for inverse-cosine ramp 0→1
+    motor_coupling_lr: float = 0.0001          # LR for motor→encoder coupling (0 = no coupling)
+
+    # Constrained motor (v5)
+    motor_n_strokes: int = 4
+    motor_points_per_stroke: int = 20
+    motor_hidden_dim: int = 256
+    ink_weight: float = 1.0
+    ink_blur_sigma: float = 3.0
+    ink_void_weight: float = 0.5
+    vision_checkpoint: Optional[str] = None   # frozen backbone checkpoint path
 
     # Differential cosine decay (per-head T_max ratios, multiply epochs)
     tmax_attn_ratio: float = 1.0

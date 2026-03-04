@@ -512,7 +512,9 @@ class MotorVisionModel(nn.Module):
                  n_scan_glimpses=0, scan_patch_size=(12, 18),
                  n_trajectory_points=32, render_sigma=1.5,
                  read_anchor_scan_indices=None, n_read_per_group=None,
-                 learnable_scan_x=False):
+                 learnable_scan_x=False,
+                 motor_n_strokes=0, motor_points_per_stroke=0,
+                 motor_hidden_dim=256):
         super().__init__()
         self.n_scan_glimpses = n_scan_glimpses
         self.read_anchor_scan_indices = read_anchor_scan_indices
@@ -542,10 +544,17 @@ class MotorVisionModel(nn.Module):
             self.scan_xs = None
 
         # Motor pathway
-        from fbrl.motor import MotorTraceDecoder, soft_render
-        self.motor_decoder = MotorTraceDecoder(latent_dim, latent_dim, n_trajectory_points)
-        self._render_sigma = render_sigma
-        self._soft_render = soft_render
+        if motor_n_strokes > 0 and motor_points_per_stroke > 0:
+            from fbrl.motor import ConstrainedMotorDecoder, render_gated_strokes
+            self.motor_decoder = ConstrainedMotorDecoder(
+                latent_dim, motor_hidden_dim, motor_n_strokes, motor_points_per_stroke)
+            self._render_sigma = render_sigma
+            self._render_gated_strokes = render_gated_strokes
+        else:
+            from fbrl.motor import MotorTraceDecoder, soft_render
+            self.motor_decoder = MotorTraceDecoder(latent_dim, latent_dim, n_trajectory_points)
+            self._render_sigma = render_sigma
+            self._soft_render = soft_render
 
     def _encode(self, img):
         """Run encode loop -- shared scan/read or legacy encoder."""

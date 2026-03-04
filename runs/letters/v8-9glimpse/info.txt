@@ -1,0 +1,4 @@
+git: n/a
+date: 2026-03-04T13:11:22.210177+00:00
+make: make train CONFIG=configs/letter_scan_guided_v8.yaml DEVICE=cuda
+cli: vision_training.py train --config configs/letter_scan_guided_v8.yaml --device cuda
