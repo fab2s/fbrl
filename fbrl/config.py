@@ -93,7 +93,7 @@ class ExperimentConfig:
     ink_void_weight: float = 0.5
     vision_checkpoint: Optional[str] = None   # frozen backbone checkpoint path
 
-    # Three-phase reading
+    # Three-phase reading (v9.1 legacy — kept for backward compat)
     n_meta_glimpses: int = 4
     n_sub_per_meta: int = 3
     n_read_per_sub: int = 3
@@ -110,6 +110,24 @@ class ExperimentConfig:
     sub_content_weight: float = 0.5
     meta_x_drift: float = 0.15
     sub_x_drift: float = 0.1
+
+    # Isolated read heads (v9.2)
+    n_zones: int = 4
+    n_heads_per_zone: int = 2
+    n_search_steps: int = 2
+    n_prescan_steps: int = 1
+    n_read_steps: int = 6
+    head_offset: float = 0.12
+    probe_patch_pixels: tuple = (32, 96)
+    probe_blur_sigma: float = 6.0
+    search_patch_pixels: tuple = (20, 28)
+    search_blur_sigma: float = 2.0
+    prescan_patch_size: tuple = (12, 18)
+    search_content_weight: float = 0.5
+    probe_content_weight: float = 0.5
+    search_guide_weight: float = 8.0
+    zone_diversity_weight: float = 1.0
+    zone_diversity_sigma: float = 0.1
 
     # Differential cosine decay (per-head T_max ratios, multiply epochs)
     tmax_attn_ratio: float = 1.0
@@ -141,7 +159,9 @@ def load_config(yaml_path, cli_overrides=None):
 
     # Convert list -> tuple for tuple fields
     _tuple_fields = ['scan_patch_size', 'read_anchor_scan_indices',
-                     'meta_patch_pixels', 'sub_patch_pixels']
+                     'meta_patch_pixels', 'sub_patch_pixels',
+                     'probe_patch_pixels', 'search_patch_pixels',
+                     'prescan_patch_size']
     for tf in _tuple_fields:
         if tf in data and isinstance(data[tf], list):
             data[tf] = tuple(data[tf])
@@ -179,7 +199,9 @@ def config_to_dict(cfg):
     d = asdict(cfg)
     # Ensure tuples are lists for YAML/JSON compat
     for tf in ('scan_patch_size', 'read_anchor_scan_indices',
-               'meta_patch_pixels', 'sub_patch_pixels'):
+               'meta_patch_pixels', 'sub_patch_pixels',
+               'probe_patch_pixels', 'search_patch_pixels',
+               'prescan_patch_size'):
         if isinstance(d.get(tf), tuple):
             d[tf] = list(d[tf])
     return d
@@ -188,7 +210,9 @@ def config_to_dict(cfg):
 def config_from_dict(d):
     """Restore config from checkpoint dict."""
     for tf in ('scan_patch_size', 'read_anchor_scan_indices',
-               'meta_patch_pixels', 'sub_patch_pixels'):
+               'meta_patch_pixels', 'sub_patch_pixels',
+               'probe_patch_pixels', 'search_patch_pixels',
+               'prescan_patch_size'):
         if tf in d and isinstance(d[tf], list):
             d[tf] = tuple(d[tf])
     valid = {f.name for f in fields(ExperimentConfig)}

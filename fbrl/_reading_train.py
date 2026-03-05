@@ -1,4 +1,4 @@
-"""Three-phase reading training functions — imported by train.py."""
+"""Reading training functions (v9.2 — isolated read heads) — imported by train.py."""
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -16,89 +16,100 @@ from fbrl.training_utils import (LossTracker, TrainingLogger, save_checkpoint,
                                   plot_training_metrics, format_eta, save_run_info)
 
 
-def assign_groups_spatial(barycenter_anchors, char_positions, char_labels, n_groups):
-    """Assign ground-truth letters to read groups by spatial proximity.
+def assign_heads_spatial(prescan_end_positions, char_positions, char_labels, n_heads):
+    """Assign ground-truth letters to read heads by spatial proximity.
 
-    For each letter (non-NaN position), find the closest barycenter anchor x
-    and assign that letter's label to that group. Unassigned groups get void (26).
+    For each letter (non-NaN position), find the closest head by final
+    prescan-phase x-position (detached). Assign that letter's label to
+    that head. Unassigned heads get void (26).
 
-    Uses detached anchor positions for assignment (no gradient through matching).
+    Greedy closest: each letter claims the nearest unassigned head.
 
     Args:
-        barycenter_anchors: list of n_groups × (B, 2) tensors
+        prescan_end_positions: list of n_heads × (B, 2) tensors
         char_positions: (B, max_count) float tensor, NaN-padded
         char_labels: (B, max_count) long tensor, 26-padded (void)
-        n_groups: int
+        n_heads: int
 
     Returns:
-        group_targets: (B, n_groups) long tensor of letter indices (0-25 or 26=void)
+        head_targets: (B, n_heads) long tensor of letter indices (0-25 or 26=void)
     """
     B = char_positions.shape[0]
     device = char_positions.device
 
-    # Stack anchor x-coords: (n_groups, B)
-    anchor_xs = torch.stack([a[:, 0].detach() for a in barycenter_anchors], dim=0)  # (n_groups, B)
+    # Single CPU transfer — avoids ~800 per-element .item() CUDA syncs
+    head_xs_cpu = torch.stack(
+        [p[:, 0].detach() for p in prescan_end_positions], dim=0
+    ).cpu().numpy()  # (n_heads, B)
+    char_pos_cpu = char_positions.cpu().numpy()  # (B, max_count)
+    char_lab_cpu = char_labels.cpu().numpy()     # (B, max_count)
 
-    # Initialize all groups as void
-    group_targets = torch.full((B, n_groups), 26, dtype=torch.long, device=device)
+    # Initialize all heads as void (on CPU, move to device at end)
+    targets = np.full((B, n_heads), 26, dtype=np.int64)
 
-    # For each letter in each batch sample, assign to closest anchor
-    max_count = char_positions.shape[1]
-    for li in range(max_count):
-        pos = char_positions[:, li]   # (B,)
-        label = char_labels[:, li]    # (B,)
-        valid = ~torch.isnan(pos)     # (B,)
+    max_count = char_pos_cpu.shape[1]
+    for b in range(B):
+        assigned = set()
+        # Gather valid letters for this sample
+        letters = []
+        for li in range(max_count):
+            pos = char_pos_cpu[b, li]
+            if not np.isnan(pos):
+                letters.append((pos, int(char_lab_cpu[b, li])))
 
-        if not valid.any():
-            continue
+        # Sort letters by position (left to right) for deterministic assignment
+        letters.sort(key=lambda x: x[0])
 
-        # Distance from this letter to each anchor: (n_groups, B)
-        dists = (anchor_xs - pos.unsqueeze(0)).abs()  # (n_groups, B)
-        # Find closest anchor per sample
-        closest = dists.argmin(dim=0)  # (B,)
+        for pos, label in letters:
+            best_dist = float('inf')
+            best_h = -1
+            for hi in range(n_heads):
+                if hi in assigned:
+                    continue
+                dist = abs(head_xs_cpu[hi, b] - pos)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_h = hi
+            if best_h >= 0:
+                targets[b, best_h] = label
+                assigned.add(best_h)
 
-        # Assign label to closest group (only for valid samples)
-        for b_idx in range(B):
-            if valid[b_idx]:
-                g = closest[b_idx].item()
-                # Only assign if this group is still void (first-come for ties)
-                if group_targets[b_idx, g] == 26:
-                    group_targets[b_idx, g] = label[b_idx]
-
-    return group_targets
+    return torch.from_numpy(targets).to(device)
 
 
 def train_reading_model(cfg):
-    """Train a ReadingModel from an ExperimentConfig.
+    """Train a ReadingModel (v9.2) from an ExperimentConfig.
 
-    Three-phase hierarchical attention: meta-scan (peripheral) ->
-    sub-scan (parafoveal) -> isolated read groups (foveal).
-    Letter classification (27-class: a-z + void) on each read group.
+    Fully isolated read heads: 8 heads (2 per zone), each with:
+      search (blurred) → prescan (sharp wide) → read (sharp).
+    No shared discovery GRU. Content probes at fixed positions for aux.
+    Letter classification (27-class: a-z + void) on each head.
     Count derived from non-void predictions.
     """
-    n_meta = cfg.n_meta_glimpses
-    n_sub_per_meta = cfg.n_sub_per_meta
-    n_read_per_sub = cfg.n_read_per_sub
-    n_read_per_group = cfg.n_read_glimpses_per_group
+    n_zones = cfg.n_zones
+    n_heads_per_zone = cfg.n_heads_per_zone
+    n_search_steps = cfg.n_search_steps
+    n_prescan_steps = cfg.n_prescan_steps
+    n_read_steps = cfg.n_read_steps
+    head_offset = cfg.head_offset
     n_letter_classes = cfg.n_letter_classes
-    meta_patch_pixels = cfg.meta_patch_pixels
-    meta_blur_sigma = cfg.meta_blur_sigma
-    sub_patch_pixels = cfg.sub_patch_pixels
-    sub_blur_sigma = cfg.sub_blur_sigma
+    probe_patch_pixels = cfg.probe_patch_pixels
+    probe_blur_sigma = cfg.probe_blur_sigma
+    search_patch_pixels = cfg.search_patch_pixels
+    search_blur_sigma = cfg.search_blur_sigma
+    prescan_patch_size = cfg.prescan_patch_size
     read_patch_size = cfg.read_patch_size
     latent_dim = cfg.latent_dim
     n_scales = cfg.n_scales
-    meta_guide_weight = cfg.meta_guide_weight
-    sub_guide_weight = cfg.sub_guide_weight
+    search_guide_weight = cfg.search_guide_weight
+    search_content_weight = cfg.search_content_weight
+    probe_content_weight = cfg.probe_content_weight
     read_void_weight = cfg.read_void_weight
-    meta_content_weight = cfg.meta_content_weight
-    sub_content_weight = cfg.sub_content_weight
-    meta_x_drift = cfg.meta_x_drift
-    sub_x_drift = cfg.sub_x_drift
     blur_sigma_ratio = cfg.blur_sigma_ratio
     diversity_weight = cfg.diversity_weight
     diversity_sigma = cfg.diversity_sigma
-    scan_vy = cfg.scan_vy
+    zone_diversity_weight = cfg.zone_diversity_weight
+    zone_diversity_sigma = cfg.zone_diversity_sigma
     batch_size = cfg.batch_size
     epochs = cfg.epochs
     resume = cfg.resume
@@ -106,19 +117,21 @@ def train_reading_model(cfg):
     data_dir = cfg.data_dir
     checkpoint_interval = cfg.checkpoint_interval
 
+    n_heads = n_zones * n_heads_per_zone
+    n_steps_per_head = n_search_steps + n_prescan_steps + n_read_steps
+
     device = _resolve_device(cfg.device)
-    n_discovery = 1 + n_meta + n_meta * n_sub_per_meta
-    n_reads = n_meta * n_read_per_group
-    n_total = n_discovery + n_reads
-    print(f"Reading training on: {device}")
-    print(f"Three-phase: meta={n_meta} ({meta_patch_pixels}, blur={meta_blur_sigma}) + "
-          f"sub={n_sub_per_meta}/meta ({sub_patch_pixels}, blur={sub_blur_sigma}) + "
-          f"read={n_read_per_group}/group × {n_meta} groups = {n_total} total steps")
+    print(f"Reading v9.2 training on: {device}")
+    print(f"Isolated heads: {n_zones} zones × {n_heads_per_zone} heads = {n_heads} heads")
+    print(f"Per head: {n_search_steps} search ({search_patch_pixels}, blur={search_blur_sigma}) + "
+          f"{n_prescan_steps} prescan ({prescan_patch_size}) + "
+          f"{n_read_steps} read ({read_patch_size}) = {n_steps_per_head} steps")
+    print(f"Total GRU steps: {n_heads * n_steps_per_head} + {n_zones} probes (no GRU)")
     print(f"Letter classes: {n_letter_classes} (26 letters + void)")
-    print(f"Attention: meta_guide={meta_guide_weight}  sub_guide={sub_guide_weight}  "
-          f"read_void={read_void_weight}  blur_sigma_ratio={blur_sigma_ratio}  "
-          f"diversity={diversity_weight}  diversity_sigma={diversity_sigma}  "
-          f"scan_vy={scan_vy}  batch_size={batch_size}")
+    print(f"Losses: search_guide={search_guide_weight}  search_content={search_content_weight}  "
+          f"probe_content={probe_content_weight}  read_void={read_void_weight}  "
+          f"diversity={diversity_weight}  zone_div={zone_diversity_weight}  "
+          f"batch_size={batch_size}")
 
     os.makedirs(save_dir, exist_ok=True)
     save_run_info(save_dir, cfg)
@@ -129,22 +142,22 @@ def train_reading_model(cfg):
                              pin_memory=use_cuda)
 
     model = ReadingModel(
-        n_meta=n_meta, n_sub_per_meta=n_sub_per_meta,
-        n_read_per_sub=n_read_per_sub,
-        meta_patch_pixels=meta_patch_pixels, meta_blur_sigma=meta_blur_sigma,
-        sub_patch_pixels=sub_patch_pixels, sub_blur_sigma=sub_blur_sigma,
+        n_zones=n_zones, n_heads_per_zone=n_heads_per_zone,
+        n_search_steps=n_search_steps, n_prescan_steps=n_prescan_steps,
+        n_read_steps=n_read_steps,
+        search_patch_pixels=search_patch_pixels, search_blur_sigma=search_blur_sigma,
+        probe_patch_pixels=probe_patch_pixels, probe_blur_sigma=probe_blur_sigma,
+        prescan_patch_size=prescan_patch_size,
         read_patch_size=read_patch_size, latent_dim=latent_dim,
-        n_scales=n_scales, max_count=3,
-        n_letter_classes=n_letter_classes,
-        n_read_glimpses_per_group=n_read_per_group,
-        meta_x_drift=meta_x_drift, sub_x_drift=sub_x_drift,
+        n_scales=n_scales, n_letter_classes=n_letter_classes,
+        head_offset=head_offset,
     ).to(device)
 
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"ReadingModel: {n_params:,} parameters")
+    print(f"ReadingModel v9.2: {n_params:,} parameters")
 
-    loss_names = ['letter_ce', 'meta_attn', 'sub_attn', 'read_void',
-                  'meta_content', 'sub_content', 'div',
+    loss_names = ['letter_ce', 'search_guide', 'search_content', 'probe_content',
+                  'read_void', 'zone_div', 'read_div',
                   'letter_acc', 'void_acc', 'count_acc',
                   'hit_rate', 'hit_intensity']
     tracker = LossTracker(loss_names)
@@ -166,8 +179,8 @@ def train_reading_model(cfg):
     train_start = time.time()
 
     header = (f"{'epoch':>5s}  {'ltr_ce':>7s}  {'ltr_a':>6s}  {'void_a':>6s}  "
-              f"{'cnt_a':>6s}  {'m_att':>6s}  {'s_att':>6s}  "
-              f"{'r_void':>6s}  {'m_cnt':>6s}  {'s_cnt':>6s}  {'div':>6s}  "
+              f"{'cnt_a':>6s}  {'s_gd':>6s}  {'s_cnt':>6s}  "
+              f"{'p_cnt':>6s}  {'r_void':>6s}  {'z_div':>6s}  {'r_div':>6s}  "
               f"{'hr':>6s}  {'hi':>6s}  {'lr':>8s}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
 
@@ -189,14 +202,14 @@ def train_reading_model(cfg):
             char_lab = char_lab.to(device)
             B = img.shape[0]
 
-            group_logits, enc = model(img)  # (B, n_meta, 27)
+            group_logits, enc = model(img)  # (B, n_heads, 27)
 
-            # Assign ground-truth labels to groups by spatial proximity
-            group_targets = assign_groups_spatial(
-                enc.barycenter_anchors, char_pos, char_lab, n_meta)  # (B, n_meta)
+            # Assign ground-truth labels to heads by spatial proximity
+            head_targets = assign_heads_spatial(
+                enc.prescan_end_positions, char_pos, char_lab, n_heads)  # (B, n_heads)
 
             # Dynamic void class weight: inverse frequency per batch
-            flat_targets = group_targets.view(-1)
+            flat_targets = head_targets.view(-1)
             n_void = (flat_targets == 26).sum().float()
             n_nonvoid = (flat_targets != 26).sum().float()
             total_fg = n_void + n_nonvoid
@@ -207,65 +220,88 @@ def train_reading_model(cfg):
             else:
                 class_weights = None
 
-            # Primary: letter CE
+            # Primary: letter CE on all heads
             letter_ce = F.cross_entropy(
                 group_logits.view(-1, n_letter_classes),
                 flat_targets,
                 weight=class_weights,
             )
 
-            # Phase-specific location lists for auxiliary losses
-            init_loc = enc.locations[0]
-            meta_locs = [init_loc] + enc.meta_positions
-            sub_locs = [init_loc] + enc.sub_positions
+            # Search guide: pull search positions toward ink
+            search_locs = [enc.locations[i] for i, tag in enumerate(enc.phase_tags) if tag == 'search']
+            search_guide_loss = torch.tensor(0.0, device=device)
+            if search_guide_weight > 0 and len(search_locs) > 0:
+                # Add a dummy init location at center for attention_content_loss
+                init_loc = torch.zeros(B, 2, device=device)
+                search_guide_loss = search_guide_weight * attention_content_loss(
+                    clean, [init_loc] + search_locs, blur_sigma_ratio=blur_sigma_ratio)
 
-            # Read locations (from enc, added by ReadingModel)
-            read_locs = [enc.locations[i] for i, tag in enumerate(enc.phase_tags) if tag == 'read']
+            # Search content BCE
+            search_content_loss = torch.tensor(0.0, device=device)
+            if search_content_weight > 0 and len(enc.search_content_logits) > 0:
+                for loc, logit in zip(search_locs, enc.search_content_logits):
+                    grid = loc.view(B, 1, 1, 2)
+                    sampled = F.grid_sample(clean, grid, align_corners=True,
+                                            padding_mode='zeros')
+                    label = (sampled.view(-1, 1) > 0.1).float()
+                    search_content_loss = search_content_loss + bce(logit, label)
+                search_content_loss = search_content_loss / len(enc.search_content_logits)
 
-            # Attention guides (meta + sub toward ink)
-            meta_attn = meta_guide_weight * attention_content_loss(
-                clean, meta_locs, blur_sigma_ratio=blur_sigma_ratio)
-            sub_attn = sub_guide_weight * attention_content_loss(
-                clean, sub_locs, blur_sigma_ratio=blur_sigma_ratio)
+            # Probe content BCE
+            probe_content_loss = torch.tensor(0.0, device=device)
+            if probe_content_weight > 0 and len(enc.probe_content_logits) > 0:
+                probe_locs = [enc.locations[i] for i, tag in enumerate(enc.phase_tags) if tag == 'probe']
+                for loc, logit in zip(probe_locs, enc.probe_content_logits):
+                    grid = loc.view(B, 1, 1, 2)
+                    sampled = F.grid_sample(clean, grid, align_corners=True,
+                                            padding_mode='zeros')
+                    label = (sampled.view(-1, 1) > 0.1).float()
+                    probe_content_loss = probe_content_loss + bce(logit, label)
+                probe_content_loss = probe_content_loss / len(enc.probe_content_logits)
 
             # Read void repulsion
             read_void_loss = torch.tensor(0.0, device=device)
-            if read_void_weight > 0 and len(read_locs) > 0:
-                read_void_loss = read_void_weight * void_repulsion(
-                    clean, read_locs, read_patch_size, read_patch_size)
+            if read_void_weight > 0:
+                read_locs = [enc.locations[i] for i, tag in enumerate(enc.phase_tags) if tag == 'read']
+                if len(read_locs) > 0:
+                    read_void_loss = read_void_weight * void_repulsion(
+                        clean, read_locs, read_patch_size, read_patch_size)
 
-            # Diversity (meta + sub)
-            meta_div = fixation_diversity_loss(meta_locs, sigma=diversity_sigma, vy=scan_vy)
-            sub_div = fixation_diversity_loss(sub_locs, sigma=diversity_sigma, vy=scan_vy)
-            div_loss = meta_div + sub_div
+            # Zone diversity: within-zone repulsion between paired heads
+            zone_div_loss = torch.tensor(0.0, device=device)
+            if zone_diversity_weight > 0:
+                for zi in range(n_zones):
+                    # Get prescan end positions for the 2 heads in this zone
+                    h0_idx = zi * n_heads_per_zone
+                    h1_idx = h0_idx + 1
+                    pos0 = enc.prescan_end_positions[h0_idx]  # (B, 2)
+                    pos1 = enc.prescan_end_positions[h1_idx]  # (B, 2)
+                    diff = pos0 - pos1
+                    dist_sq = (diff ** 2).sum(-1)  # (B,)
+                    repulsion = torch.exp(-dist_sq / (2 * zone_diversity_sigma ** 2))
+                    zone_div_loss = zone_div_loss + repulsion.mean()
+                zone_div_loss = zone_div_loss / n_zones
 
-            # Content BCE (meta)
-            meta_content_loss = torch.tensor(0.0, device=device)
-            if meta_content_weight > 0 and len(enc.meta_content_logits) > 0:
-                for loc, logit in zip(enc.meta_positions, enc.meta_content_logits):
-                    grid = loc.view(B, 1, 1, 2)
-                    sampled = F.grid_sample(clean, grid, align_corners=True,
-                                            padding_mode='zeros')
-                    label = (sampled.view(-1, 1) > 0.1).float()
-                    meta_content_loss = meta_content_loss + bce(logit, label)
-                meta_content_loss = meta_content_loss / len(enc.meta_content_logits)
-
-            # Content BCE (sub)
-            sub_content_loss = torch.tensor(0.0, device=device)
-            if sub_content_weight > 0 and len(enc.sub_content_logits) > 0:
-                for loc, logit in zip(enc.sub_positions, enc.sub_content_logits):
-                    grid = loc.view(B, 1, 1, 2)
-                    sampled = F.grid_sample(clean, grid, align_corners=True,
-                                            padding_mode='zeros')
-                    label = (sampled.view(-1, 1) > 0.1).float()
-                    sub_content_loss = sub_content_loss + bce(logit, label)
-                sub_content_loss = sub_content_loss / len(enc.sub_content_logits)
+            # Per-head read diversity: spread read positions within each head
+            read_div_loss = torch.tensor(0.0, device=device)
+            if diversity_weight > 0:
+                for head_i in range(n_heads):
+                    head_read_locs = [enc.locations[i] for i in range(len(enc.locations))
+                                      if enc.head_ids[i] == head_i and enc.phase_tags[i] == 'read']
+                    if len(head_read_locs) >= 2:
+                        # Use standard fixation_diversity_loss (expects [init] + locs)
+                        dummy_init = head_read_locs[0]  # reuse first as dummy
+                        read_div_loss = read_div_loss + fixation_diversity_loss(
+                            [dummy_init] + head_read_locs, sigma=diversity_sigma)
+                read_div_loss = read_div_loss / max(n_heads, 1)
 
             total_loss = (letter_ce
-                          + meta_attn + sub_attn + read_void_loss
-                          + diversity_weight * div_loss
-                          + meta_content_weight * meta_content_loss
-                          + sub_content_weight * sub_content_loss)
+                          + search_guide_loss
+                          + search_content_weight * search_content_loss
+                          + probe_content_weight * probe_content_loss
+                          + read_void_loss
+                          + zone_diversity_weight * zone_div_loss
+                          + diversity_weight * read_div_loss)
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -274,10 +310,10 @@ def train_reading_model(cfg):
 
             # Metrics
             with torch.no_grad():
-                preds = group_logits.argmax(2)  # (B, n_meta)
-                targets = group_targets
+                preds = group_logits.argmax(2)  # (B, n_heads)
+                targets = head_targets
 
-                # Letter accuracy (non-void groups only)
+                # Letter accuracy (non-void heads only)
                 nonvoid_mask = targets != 26
                 if nonvoid_mask.any():
                     total_letter_correct += (preds[nonvoid_mask] == targets[nonvoid_mask]).sum().item()
@@ -297,10 +333,11 @@ def train_reading_model(cfg):
 
                 hr, hi = fixation_hit_rate(clean, enc.locations)
 
-            tracker.update(letter_ce=letter_ce, meta_attn=meta_attn,
-                           sub_attn=sub_attn, read_void=read_void_loss,
-                           meta_content=meta_content_loss, sub_content=sub_content_loss,
-                           div=div_loss,
+            tracker.update(letter_ce=letter_ce, search_guide=search_guide_loss,
+                           search_content=search_content_loss,
+                           probe_content=probe_content_loss,
+                           read_void=read_void_loss,
+                           zone_div=zone_div_loss, read_div=read_div_loss,
                            letter_acc=0, void_acc=0, count_acc=0,
                            hit_rate=hr, hit_intensity=hi)
 
@@ -324,39 +361,28 @@ def train_reading_model(cfg):
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"LtrCE {avgs['letter_ce']:.4f}  LtrA {letter_acc:.0%}  "
               f"VoidA {void_acc:.0%}  CntA {count_acc:.0%}  "
-              f"MetaA {avgs['meta_attn']:.4f}  SubA {avgs['sub_attn']:.4f}  "
-              f"Void {avgs['read_void']:.4f}  Div {avgs['div']:.4f}  "
+              f"SGd {avgs['search_guide']:.4f}  SCnt {avgs['search_content']:.4f}  "
+              f"PCnt {avgs['probe_content']:.4f}  Void {avgs['read_void']:.4f}  "
+              f"ZDiv {avgs['zone_div']:.4f}  RDiv {avgs['read_div']:.4f}  "
               f"Hit {avgs['hit_rate']:.0%}  "
               f"lr {current_lr:.6f}  [{epoch_time:.1f}s  ETA {eta}]")
 
         logger.write_line(
             f"{epoch+1:>5d}  {avgs['letter_ce']:>7.4f}  {letter_acc:>6.4f}  {void_acc:>6.4f}  "
-            f"{count_acc:>6.4f}  {avgs['meta_attn']:>6.4f}  {avgs['sub_attn']:>6.4f}  "
-            f"{avgs['read_void']:>6.4f}  {avgs['meta_content']:>6.4f}  {avgs['sub_content']:>6.4f}  "
-            f"{avgs['div']:>6.4f}  "
+            f"{count_acc:>6.4f}  {avgs['search_guide']:>6.4f}  {avgs['search_content']:>6.4f}  "
+            f"{avgs['probe_content']:>6.4f}  {avgs['read_void']:>6.4f}  "
+            f"{avgs['zone_div']:>6.4f}  {avgs['read_div']:>6.4f}  "
             f"{avgs['hit_rate']:>6.4f}  {avgs['hit_intensity']:>6.4f}  "
             f"{current_lr:>8.6f}  {epoch_time:.1f}s")
         scheduler.step()
 
         if (epoch + 1 - start_epoch) % checkpoint_interval == 0:
             _save_reading_checkpoint(model, epoch, save_dir, cfg, tracker,
-                                     n_meta, n_sub_per_meta, n_read_per_sub,
-                                     meta_patch_pixels, meta_blur_sigma,
-                                     sub_patch_pixels, sub_blur_sigma,
-                                     read_patch_size, latent_dim, n_scales,
-                                     n_letter_classes, n_read_per_group,
-                                     meta_x_drift, sub_x_drift,
                                      name=f'checkpoint_epoch_{epoch+1}.pth')
 
     logger.close()
 
     _save_reading_checkpoint(model, end_epoch - 1, save_dir, cfg, tracker,
-                             n_meta, n_sub_per_meta, n_read_per_sub,
-                             meta_patch_pixels, meta_blur_sigma,
-                             sub_patch_pixels, sub_blur_sigma,
-                             read_patch_size, latent_dim, n_scales,
-                             n_letter_classes, n_read_per_group,
-                             meta_x_drift, sub_x_drift,
                              name='model_final.pth')
 
     specs = [
@@ -369,17 +395,18 @@ def train_reading_model(cfg):
          'styles': ['-', '--', ':'],
          'title': 'Accuracy', 'ylabel': 'Accuracy', 'ylim': (0, 1),
          'hlines': [(1/27, 'Random letter (3.7%)', 'gray')]},
-        {'keys': ['meta_attn', 'sub_attn'], 'labels': ['Meta guide', 'Sub guide'],
-         'colors': ['tab:green', 'tab:olive'], 'styles': ['-', '--'],
-         'title': 'Attention guide (lower = fixations on content)', 'ylabel': 'Loss'},
+        {'keys': ['search_guide'], 'labels': ['Search guide'], 'colors': ['tab:green'],
+         'title': 'Search attention guide (lower = on content)', 'ylabel': 'Loss'},
+        {'keys': ['search_content', 'probe_content'],
+         'labels': ['Search content', 'Probe content'],
+         'colors': ['tab:cyan', 'tab:teal'], 'styles': ['-', '--'],
+         'title': 'Content detection (search + probe)', 'ylabel': 'BCE'},
         {'keys': ['read_void'], 'labels': ['Read void'], 'colors': ['tab:brown'],
          'title': 'Read void repulsion', 'ylabel': 'Loss'},
-        {'keys': ['div'], 'labels': ['Diversity'], 'colors': ['tab:orange'],
-         'title': 'Fixation diversity (lower = more spread)', 'ylabel': 'Repulsion'},
-        {'keys': ['meta_content', 'sub_content'],
-         'labels': ['Meta content', 'Sub content'],
-         'colors': ['tab:cyan', 'tab:teal'], 'styles': ['-', '--'],
-         'title': 'Content detection (meta + sub)', 'ylabel': 'BCE'},
+        {'keys': ['zone_div', 'read_div'],
+         'labels': ['Zone diversity', 'Read diversity'],
+         'colors': ['tab:orange', 'tab:pink'], 'styles': ['-', '--'],
+         'title': 'Diversity losses', 'ylabel': 'Repulsion'},
         {'keys': ['hit_rate', 'hit_intensity'],
          'labels': ['Hit rate', 'Intensity'],
          'colors': ['tab:purple', 'tab:purple'], 'styles': ['-', '--'],
@@ -394,32 +421,25 @@ def train_reading_model(cfg):
           f"Model and graph saved in {save_dir}")
 
 
-def _save_reading_checkpoint(model, epoch, save_dir, cfg, tracker,
-                             n_meta, n_sub_per_meta, n_read_per_sub,
-                             meta_patch_pixels, meta_blur_sigma,
-                             sub_patch_pixels, sub_blur_sigma,
-                             read_patch_size, latent_dim, n_scales,
-                             n_letter_classes, n_read_per_group,
-                             meta_x_drift, sub_x_drift,
-                             name='model_final.pth'):
+def _save_reading_checkpoint(model, epoch, save_dir, cfg, tracker, name='model_final.pth'):
     save_checkpoint(model, epoch,
                     os.path.join(save_dir, name),
                     cfg=cfg, losses_dict=tracker.get_history_dict(),
                     extra={
                         'model_type': 'reading',
-                        'n_meta': n_meta,
-                        'n_sub_per_meta': n_sub_per_meta,
-                        'n_read_per_sub': n_read_per_sub,
-                        'meta_patch_pixels': list(meta_patch_pixels),
-                        'meta_blur_sigma': meta_blur_sigma,
-                        'sub_patch_pixels': list(sub_patch_pixels),
-                        'sub_blur_sigma': sub_blur_sigma,
-                        'read_patch_size': read_patch_size,
-                        'latent_dim': latent_dim,
-                        'n_scales': n_scales,
-                        'max_count': 3,
-                        'n_letter_classes': n_letter_classes,
-                        'n_read_glimpses_per_group': n_read_per_group,
-                        'meta_x_drift': meta_x_drift,
-                        'sub_x_drift': sub_x_drift,
+                        'n_zones': cfg.n_zones,
+                        'n_heads_per_zone': cfg.n_heads_per_zone,
+                        'n_search_steps': cfg.n_search_steps,
+                        'n_prescan_steps': cfg.n_prescan_steps,
+                        'n_read_steps': cfg.n_read_steps,
+                        'head_offset': cfg.head_offset,
+                        'probe_patch_pixels': list(cfg.probe_patch_pixels),
+                        'probe_blur_sigma': cfg.probe_blur_sigma,
+                        'search_patch_pixels': list(cfg.search_patch_pixels),
+                        'search_blur_sigma': cfg.search_blur_sigma,
+                        'prescan_patch_size': list(cfg.prescan_patch_size),
+                        'read_patch_size': cfg.read_patch_size,
+                        'latent_dim': cfg.latent_dim,
+                        'n_scales': cfg.n_scales,
+                        'n_letter_classes': cfg.n_letter_classes,
                     })

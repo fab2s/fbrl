@@ -1,30 +1,31 @@
 model_type: reading
-n_meta_glimpses: 4
-n_sub_per_meta: 3
-n_read_per_sub: 3
-n_read_glimpses_per_group: 3
-n_letter_classes: 27
-meta_patch_pixels: [32, 96]
-meta_blur_sigma: 6.0
-sub_patch_pixels: [20, 28]
-sub_blur_sigma: 2.0
+n_zones: 4
+n_heads_per_zone: 2
+n_search_steps: 2
+n_prescan_steps: 1
+n_read_steps: 6
+head_offset: 0.12
+probe_patch_pixels: [32, 96]
+probe_blur_sigma: 6.0
+search_patch_pixels: [20, 28]
+search_blur_sigma: 2.0
+prescan_patch_size: [12, 18]
 read_patch_size: 12
 latent_dim: 256
 n_scales: 1
-meta_x_drift: 0.15
-sub_x_drift: 0.1
+n_letter_classes: 27
 epochs: 50
 batch_size: 32
 checkpoint_interval: 10
 train_fonts: default,dejavu-sans,dejavu-serif,liberation-sans
-meta_guide_weight: 8.0
-sub_guide_weight: 8.0
+search_guide_weight: 8.0
+search_content_weight: 0.5
+probe_content_weight: 0.5
 read_void_weight: 0.5
 blur_sigma_ratio: 0.16
 diversity_weight: 1.0
 diversity_sigma: 0.1
-scan_vy: 0.3
-meta_content_weight: 0.5
-sub_content_weight: 0.5
+zone_diversity_weight: 1.0
+zone_diversity_sigma: 0.1
 data_dir: data/counting
 save_dir: data/reading_models

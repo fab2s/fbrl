@@ -1,4 +1,4 @@
-"""Three-phase reading evaluation functions — imported by evaluate.py."""
+"""Reading evaluation functions (v9.2 — isolated read heads) — imported by evaluate.py."""
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -14,55 +14,57 @@ from fbrl.losses import fixation_hit_rate
 
 
 def _load_reading_model(model_dir, device):
-    """Load a trained ReadingModel from checkpoint."""
+    """Load a trained ReadingModel v9.2 from checkpoint."""
     ckpt = torch.load(os.path.join(model_dir, 'model_final.pth'),
                       map_location=device, weights_only=False)
-    n_meta = ckpt.get('n_meta', 4)
-    n_sub_per_meta = ckpt.get('n_sub_per_meta', 3)
-    n_read_per_sub = ckpt.get('n_read_per_sub', 3)
-    meta_patch_pixels = tuple(ckpt.get('meta_patch_pixels', [32, 96]))
-    meta_blur_sigma = ckpt.get('meta_blur_sigma', 6.0)
-    sub_patch_pixels = tuple(ckpt.get('sub_patch_pixels', [20, 28]))
-    sub_blur_sigma = ckpt.get('sub_blur_sigma', 2.0)
+    n_zones = ckpt.get('n_zones', 4)
+    n_heads_per_zone = ckpt.get('n_heads_per_zone', 2)
+    n_search_steps = ckpt.get('n_search_steps', 2)
+    n_prescan_steps = ckpt.get('n_prescan_steps', 1)
+    n_read_steps = ckpt.get('n_read_steps', 6)
+    head_offset = ckpt.get('head_offset', 0.12)
+    probe_patch_pixels = tuple(ckpt.get('probe_patch_pixels', [32, 96]))
+    probe_blur_sigma = ckpt.get('probe_blur_sigma', 6.0)
+    search_patch_pixels = tuple(ckpt.get('search_patch_pixels', [20, 28]))
+    search_blur_sigma = ckpt.get('search_blur_sigma', 2.0)
+    prescan_patch_size = tuple(ckpt.get('prescan_patch_size', [12, 18]))
     read_patch_size = ckpt.get('read_patch_size', 12)
     latent_dim = ckpt.get('latent_dim', 256)
     n_scales = ckpt.get('n_scales', 1)
-    max_count = ckpt.get('max_count', 3)
     n_letter_classes = ckpt.get('n_letter_classes', 27)
-    n_read_glimpses_per_group = ckpt.get('n_read_glimpses_per_group', 3)
-    meta_x_drift = ckpt.get('meta_x_drift', 0.15)
-    sub_x_drift = ckpt.get('sub_x_drift', 0.1)
 
     model = ReadingModel(
-        n_meta=n_meta, n_sub_per_meta=n_sub_per_meta,
-        n_read_per_sub=n_read_per_sub,
-        meta_patch_pixels=meta_patch_pixels, meta_blur_sigma=meta_blur_sigma,
-        sub_patch_pixels=sub_patch_pixels, sub_blur_sigma=sub_blur_sigma,
+        n_zones=n_zones, n_heads_per_zone=n_heads_per_zone,
+        n_search_steps=n_search_steps, n_prescan_steps=n_prescan_steps,
+        n_read_steps=n_read_steps,
+        search_patch_pixels=search_patch_pixels, search_blur_sigma=search_blur_sigma,
+        probe_patch_pixels=probe_patch_pixels, probe_blur_sigma=probe_blur_sigma,
+        prescan_patch_size=prescan_patch_size,
         read_patch_size=read_patch_size, latent_dim=latent_dim,
-        n_scales=n_scales, max_count=max_count,
-        n_letter_classes=n_letter_classes,
-        n_read_glimpses_per_group=n_read_glimpses_per_group,
-        meta_x_drift=meta_x_drift, sub_x_drift=sub_x_drift,
+        n_scales=n_scales, n_letter_classes=n_letter_classes,
+        head_offset=head_offset,
     ).to(device)
     model.load_state_dict(ckpt['model'], strict=False)
     model.eval()
-    return model, max_count, n_meta
+    n_heads = n_zones * n_heads_per_zone
+    return model, n_heads, n_zones
 
 
 def test_reading_model(model_dir, test_data_dir, output_dir='reading_results',
                         device='auto'):
-    """Test a trained ReadingModel on counting test data.
+    """Test a trained ReadingModel v9.2 on counting test data.
 
-    Reports per-group letter accuracy, void accuracy,
+    Reports per-head letter accuracy, void accuracy,
     derived count accuracy, and per-font breakdown.
     """
     device = _resolve_device(device)
-    print(f"Reading testing on: {device}")
+    print(f"Reading v9.2 testing on: {device}")
 
     os.makedirs(output_dir, exist_ok=True)
-    model, max_count, n_meta = _load_reading_model(model_dir, device)
+    model, n_heads, n_zones = _load_reading_model(model_dir, device)
     dataset = CountingDataset(test_data_dir)
 
+    max_count = 3
     per_count_correct = {c: 0 for c in range(1, max_count + 1)}
     per_count_total = {c: 0 for c in range(1, max_count + 1)}
     total_letter_correct = 0
@@ -81,18 +83,18 @@ def test_reading_model(model_dir, test_data_dir, output_dir='reading_results',
         char_lab_t = char_lab.unsqueeze(0).to(device)
 
         with torch.no_grad():
-            group_logits, enc = model(img_t)  # (1, n_meta, 27)
-            preds = group_logits.argmax(2).squeeze(0)  # (n_meta,)
+            group_logits, enc = model(img_t)  # (1, n_heads, 27)
+            preds = group_logits.argmax(2).squeeze(0)  # (n_heads,)
 
             # Derived count
             pred_count = (preds != 26).sum().item()
             pred_count = max(1, min(pred_count, max_count))
 
             # Assign ground-truth for letter accuracy
-            from fbrl._reading_train import assign_groups_spatial
-            targets = assign_groups_spatial(
-                enc.barycenter_anchors, char_pos_t, char_lab_t, n_meta,
-            ).squeeze(0)  # (n_meta,)
+            from fbrl._reading_train import assign_heads_spatial
+            targets = assign_heads_spatial(
+                enc.prescan_end_positions, char_pos_t, char_lab_t, n_heads,
+            ).squeeze(0)  # (n_heads,)
 
             # Letter accuracy (non-void)
             nonvoid = targets != 26
@@ -113,7 +115,6 @@ def test_reading_model(model_dir, test_data_dir, output_dir='reading_results',
         if pred_count == count:
             per_count_correct[count] = per_count_correct.get(count, 0) + 1
         else:
-            # Decode predictions for error log
             pred_letters = []
             for p in preds:
                 if p.item() != 26:
@@ -137,7 +138,7 @@ def test_reading_model(model_dir, test_data_dir, output_dir='reading_results',
     void_acc = total_void_correct / max(total_void_total, 1)
 
     print(f"\nDerived count accuracy: {total_count_correct}/{total} = {count_acc:.1%}")
-    print(f"Letter accuracy (non-void groups): {total_letter_correct}/{total_letter_total} = {letter_acc:.1%}")
+    print(f"Letter accuracy (non-void heads): {total_letter_correct}/{total_letter_total} = {letter_acc:.1%}")
     print(f"Void accuracy: {total_void_correct}/{total_void_total} = {void_acc:.1%}")
 
     for c in sorted(per_count_total):
@@ -191,41 +192,45 @@ def generate_reading_atlas(model_dir, test_data_dir,
                             device='auto'):
     """Generate HTML atlas with phase-colored trajectory overlay.
 
-    Blue circles: meta-scan positions
-    Green circles: sub-scan positions
-    Orange diamonds: barycenter anchors
-    Red/hot colormap: read positions (grouped by color)
-    Letter prediction labels on each read group
+    Blue circles: content probes (4 fixed positions)
+    Green circles: search positions (2 per zone, 8 total)
+    Yellow circles: prescan positions (refine exact center)
+    Orange diamonds: prescan endpoints (read head anchors)
+    Per-head colored dots: read positions
+    Letter prediction labels on each active head
     """
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
 
     device = _resolve_device(device)
-    print(f"Generating reading atlas on: {device}")
+    print(f"Generating reading v9.2 atlas on: {device}")
 
-    model, max_count, n_meta = _load_reading_model(model_dir, device)
+    model, n_heads, n_zones = _load_reading_model(model_dir, device)
     dataset = CountingDataset(test_data_dir)
 
+    max_count = 3
     by_count = {c: [] for c in range(1, max_count + 1)}
     for i in range(len(dataset)):
         img, clean, count, letters, font, _cp, _cl = dataset[i]
         by_count[count].append((i, letters, font))
 
-    # Read group colors (distinguish 4 groups)
-    read_group_colors = ['#ff4444', '#ff8844', '#ffcc44', '#ff44cc']
+    # Per-head colors (8 heads)
+    head_colors = ['#ff4444', '#ff8844', '#ffcc44', '#ff44cc',
+                   '#44ccff', '#44ff88', '#cc44ff', '#ffff44']
 
     html_parts = ["""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<title>Reading Atlas (Three-Phase v9)</title>
+<title>Reading Atlas (v9.2 — Isolated Heads)</title>
 <style>
 body { font-family: monospace; background: #1a1a1a; color: #ccc; padding: 20px; }
 h1 { color: #fff; }
 h2 { color: #aaa; margin-top: 30px; }
 .legend { margin: 10px 0; }
 .legend span { margin-right: 15px; }
-.meta { color: #4488ff; }
-.sub { color: #44cc44; }
+.probe { color: #4488ff; }
+.search { color: #44cc44; }
+.prescan { color: #cccc44; }
 .anchor { color: #ff8800; }
 .read { color: #ff4444; }
 .grid { display: flex; flex-wrap: wrap; gap: 10px; }
@@ -235,18 +240,17 @@ h2 { color: #aaa; margin-top: 30px; }
 .wrong { border: 2px solid #a44; }
 .label { font-size: 12px; margin-top: 4px; }
 </style></head><body>
-<h1>Reading Atlas (Three-Phase v9 — Letter Classification)</h1>
+<h1>Reading Atlas (v9.2 — Isolated Read Heads)</h1>
 <div class="legend">
-  <span class="meta">&#9679; Meta-scan</span>
-  <span class="sub">&#9679; Sub-scan</span>
-  <span class="anchor">&#9670; Barycenter anchor</span>
-  <span class="read">&#9679; Read (per group)</span>
+  <span class="probe">&#9679; Content probes</span>
+  <span class="search">&#9679; Search positions</span>
+  <span class="prescan">&#9679; Prescan positions</span>
+  <span class="anchor">&#9670; Prescan endpoints</span>
+  <span class="read">&#9679; Read positions (per head)</span>
 </div>
 """]
 
     n_samples_per_count = 30
-    phase_colors = {'meta': '#4488ff', 'sub': '#44cc44'}
-    phase_sizes = {'meta': 8, 'sub': 6}
 
     for count_val in sorted(by_count):
         items = by_count[count_val][:n_samples_per_count]
@@ -261,7 +265,7 @@ h2 { color: #aaa; margin-top: 30px; }
 
             with torch.no_grad():
                 group_logits, enc = model(img_t)
-                preds = group_logits.argmax(2).squeeze(0)  # (n_meta,)
+                preds = group_logits.argmax(2).squeeze(0)  # (n_heads,)
                 pred_count = (preds != 26).sum().item()
                 pred_count = max(1, min(pred_count, max_count))
 
@@ -275,51 +279,39 @@ h2 { color: #aaa; margin-top: 30px; }
             fig, ax = plt.subplots(figsize=(max(2, W / 64), 2))
             ax.imshow(img_np, cmap='gray', vmin=0, vmax=1)
 
-            # Plot discovery phases
-            for li, (loc, tag) in enumerate(zip(enc.locations, enc.phase_tags)):
-                if tag == 'init':
-                    continue
+            # Plot by phase
+            for li, (loc, tag, head_id) in enumerate(
+                    zip(enc.locations, enc.phase_tags, enc.head_ids)):
                 loc_np = loc[0].cpu().numpy()
                 px = (loc_np[0] + 1) / 2 * W
                 py = (loc_np[1] + 1) / 2 * H
 
-                if tag in phase_colors:
-                    color = phase_colors[tag]
-                    size = phase_sizes[tag]
-                    ax.plot(px, py, 'o', color=color, markersize=size,
+                if tag == 'probe':
+                    ax.plot(px, py, 'o', color='#4488ff', markersize=8,
+                            markeredgecolor='white', markeredgewidth=0.2)
+                elif tag == 'search':
+                    ax.plot(px, py, 'o', color='#44cc44', markersize=5,
+                            markeredgecolor='white', markeredgewidth=0.2)
+                elif tag == 'prescan':
+                    ax.plot(px, py, 'o', color='#cccc44', markersize=6,
                             markeredgecolor='white', markeredgewidth=0.2)
                 elif tag == 'read':
-                    # Read dots handled per group below
-                    pass
+                    color = head_colors[head_id % len(head_colors)]
+                    ax.plot(px, py, 'o', color=color, markersize=3,
+                            markeredgecolor='white', markeredgewidth=0.1)
 
-            # Plot barycenter anchors and read group info
-            n_discovery = 1 + n_meta + n_meta * model.n_sub_per_meta
-            read_locs_per_group = model.n_read_glimpses_per_group
-
-            for gi in range(n_meta):
-                # Anchor diamond
-                anchor = enc.barycenter_anchors[gi][0].cpu().numpy()
+            # Plot prescan endpoints (anchors) and labels
+            for hi in range(n_heads):
+                anchor = enc.prescan_end_positions[hi][0].cpu().numpy()
                 ax_x = (anchor[0] + 1) / 2 * W
                 ax_y = (anchor[1] + 1) / 2 * H
-                color = read_group_colors[gi % len(read_group_colors)]
-                ax.plot(ax_x, ax_y, 'D', color='#ff8800', markersize=7,
-                        markeredgecolor='white', markeredgewidth=0.5)
+                ax.plot(ax_x, ax_y, 'D', color='#ff8800', markersize=5,
+                        markeredgecolor='white', markeredgewidth=0.3)
 
-                # Read locations for this group
-                start = n_discovery + gi * read_locs_per_group
-                for ri in range(read_locs_per_group):
-                    loc_idx = start + ri
-                    if loc_idx < len(enc.locations):
-                        rloc = enc.locations[loc_idx][0].cpu().numpy()
-                        rpx = (rloc[0] + 1) / 2 * W
-                        rpy = (rloc[1] + 1) / 2 * H
-                        ax.plot(rpx, rpy, 'o', color=color, markersize=4,
-                                markeredgecolor='white', markeredgewidth=0.2)
-
-                # Letter label
-                pred_idx = preds[gi].item()
+                pred_idx = preds[hi].item()
                 if pred_idx < 26:
                     pred_letter = chr(ord('a') + pred_idx)
+                    color = head_colors[hi % len(head_colors)]
                     ax.text(ax_x, -2, pred_letter, fontsize=7, color=color,
                             ha='center', va='bottom', fontweight='bold')
 
@@ -334,7 +326,6 @@ h2 { color: #aaa; margin-top: 30px; }
 
             css_class = 'correct' if is_correct else 'wrong'
 
-            # Build prediction string
             pred_letters = []
             for p in preds:
                 if p.item() < 26:

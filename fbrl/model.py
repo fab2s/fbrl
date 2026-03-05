@@ -1218,94 +1218,189 @@ class ReadGRU(nn.Module):
         return h_read, read_locations
 
 
+@dataclass
+class ReadingResult:
+    """Output of ReadingModel v9.2 — fully isolated read heads."""
+    locations: list          # all locations from all heads + probes, list of (B, 2)
+    phase_tags: list         # 'probe'|'search'|'prescan'|'read' per location
+    head_ids: list           # which head (0-7) each location belongs to (-1 for probes)
+    zone_ids: list           # which zone (0-3) each location belongs to
+    probe_content_logits: list   # list of (B, 1) per probe
+    search_content_logits: list  # list of (B, 1) per search step per head
+    group_logits: object         # (B, n_heads, 27) per-head letter logits
+    prescan_end_positions: list  # list of n_heads × (B, 2), position after prescan (best for assignment)
+
+
 class ReadingModel(nn.Module):
-    """Three-phase foveal reading: peripheral -> parafoveal -> foveal.
+    """Fully isolated read heads for multi-letter reading (v9.2).
 
-    Discovery GRU (meta + sub) builds spatial map with content-weighted
-    barycenters. Isolated ReadGRU runs per-group letter reading loops.
-    Letter classifier (27-class: 26 letters + void) on each group.
-    Count = number of non-void predictions (derived, not trained).
+    Content probes (no GRU) at fixed positions detect ink presence.
+    8 isolated read heads (2 per zone) each start from a learned h0
+    with only an x-coordinate as spatial prior. Each head runs:
+      1. Search phase  (blurred PeripheralSensor 20x28) — coarse area finding
+      2. Prescan phase (sharp wider GlimpseSensor 12x18) — refine exact center
+      3. Read phase    (sharp GlimpseSensor 12x12) — identify the letter
+    Letter identity must come from actual read glimpses — no shared state.
     """
-    def __init__(self, n_meta=4, n_sub_per_meta=3, n_read_per_sub=3,
-                 meta_patch_pixels=(32, 96), meta_blur_sigma=6.0,
-                 sub_patch_pixels=(20, 28), sub_blur_sigma=2.0,
+    def __init__(self, n_zones=4, n_heads_per_zone=2,
+                 n_search_steps=2, n_prescan_steps=1, n_read_steps=6,
+                 search_patch_pixels=(20, 28), search_blur_sigma=2.0,
+                 probe_patch_pixels=(32, 96), probe_blur_sigma=6.0,
+                 prescan_patch_size=(12, 18),
                  read_patch_size=12, latent_dim=256, n_scales=1,
-                 max_count=3, n_letter_classes=27,
-                 n_read_glimpses_per_group=3,
-                 meta_x_drift=0.15, sub_x_drift=0.1):
+                 n_letter_classes=27, head_offset=0.12):
         super().__init__()
-        self.n_meta = n_meta
-        self.n_sub_per_meta = n_sub_per_meta
-        self.n_read_per_sub = n_read_per_sub
-        self.max_count = max_count
+        self.n_zones = n_zones
+        self.n_heads_per_zone = n_heads_per_zone
+        self.n_heads = n_zones * n_heads_per_zone
+        self.n_search_steps = n_search_steps
+        self.n_prescan_steps = n_prescan_steps
+        self.n_read_steps = n_read_steps
         self.n_letter_classes = n_letter_classes
-        self.n_read_glimpses_per_group = n_read_glimpses_per_group
-        self.meta_x_drift = meta_x_drift
-        self.sub_x_drift = sub_x_drift
+        self.head_offset = head_offset
 
-        # Two sensors for discovery — peripheral, parafoveal
-        self.meta_sensor = PeripheralSensor(meta_patch_pixels, meta_blur_sigma, latent_dim)
-        self.sub_sensor = PeripheralSensor(sub_patch_pixels, sub_blur_sigma, latent_dim)
-
-        # Foveal sensor for reading
+        # Sensors: blurry → sharp-wide → sharp-focused
+        self.probe_sensor = PeripheralSensor(probe_patch_pixels, probe_blur_sigma, latent_dim)
+        self.search_sensor = PeripheralSensor(search_patch_pixels, search_blur_sigma, latent_dim)
+        self.prescan_sensor = GlimpseSensor(prescan_patch_size, n_scales, latent_dim)
         self.read_sensor = GlimpseSensor(read_patch_size, n_scales, latent_dim)
 
-        # Discovery GRU controller (meta + sub phases)
-        self.controller = AttentionController(
-            glimpse_dim=latent_dim, hidden_dim=latent_dim, latent_dim=latent_dim,
-        )
+        # Read head components (shared across all 8 heads)
+        self.read_gru = nn.GRUCell(latent_dim, latent_dim)
+        self.location_head = nn.Linear(latent_dim, 2)
+        self.h0 = nn.Parameter(torch.zeros(1, latent_dim))
 
-        # Separate content heads per discovery phase
-        self.meta_content_head = nn.Linear(latent_dim, 1)
-        self.sub_content_head = nn.Linear(latent_dim, 1)
+        # Content heads
+        self.search_content_head = nn.Linear(latent_dim, 1)
+        self.probe_content_head = nn.Linear(latent_dim, 1)
 
-        # Isolated read GRU (shared weights, different h0 per group)
-        self.read_gru = ReadGRU(glimpse_dim=latent_dim, latent_dim=latent_dim)
-
-        # Letter classifier (27-class: a-z + void), shared across groups
+        # Letter classifier (27-class: a-z + void), shared across heads
         self.letter_classifier = nn.Linear(latent_dim, n_letter_classes)
 
+        # Precompute zone centers and head start positions
+        zone_centers = torch.linspace(-0.75, 0.75, n_zones)
+        head_starts = []
+        for zi in range(n_zones):
+            for hi in range(n_heads_per_zone):
+                offset = head_offset if hi == 1 else -head_offset
+                head_starts.append(zone_centers[zi] + offset)
+        self.register_buffer('zone_centers', zone_centers)
+        self.register_buffer('head_starts', torch.tensor(head_starts))
+
     def forward(self, img):
-        """Forward pass: discovery + isolated read groups + letter classification.
+        """Forward pass: content probes + isolated read heads (batched).
+
+        All 8 heads run in parallel by folding them into the batch dimension.
+        Each head: search (blurred) → prescan (sharp wide) → read (sharp).
 
         Args:
             img: (B, 1, H, W) input image (192x128 canvas)
         Returns:
-            group_logits: (B, n_meta, n_letter_classes) per-group letter logits
-            enc: ThreePhaseResult with all locations and diagnostics
+            group_logits: (B, n_heads, n_letter_classes) per-head logits
+            result: ReadingResult with all locations and diagnostics
         """
-        # Phase 1+2: discovery (meta + sub)
-        enc = encode_three_phase(
-            img, self.controller,
-            self.meta_sensor, self.sub_sensor,
-            self.n_meta, self.n_sub_per_meta,
-            self.meta_content_head, self.sub_content_head,
-            self.meta_x_drift, self.sub_x_drift,
+        B = img.shape[0]
+        device = img.device
+        N = self.n_heads
+
+        # --- Content probes (batched, no GRU) ---
+        # Build probe locations: (n_zones*B, 2)
+        probe_locs_per_zone = []
+        for zi in range(self.n_zones):
+            ploc = torch.zeros(B, 2, device=device)
+            ploc[:, 0] = self.zone_centers[zi]
+            probe_locs_per_zone.append(ploc)
+        probe_locs_flat = torch.cat(probe_locs_per_zone, dim=0)  # (n_zones*B, 2)
+        img_probes = img.repeat(self.n_zones, 1, 1, 1)  # (n_zones*B, 1, H, W)
+        probe_feats = self.probe_sensor(img_probes, probe_locs_flat)  # (n_zones*B, D)
+        probe_logits_flat = self.probe_content_head(probe_feats)  # (n_zones*B, 1)
+        probe_content_logits = list(probe_logits_flat.reshape(self.n_zones, B, 1))
+
+        # --- Batched isolated read heads (B*N in parallel) ---
+        # Expand image for all heads: (B*N, 1, H, W)
+        # repeat_interleave: [img0]*N, [img1]*N, ... so index i → batch i//N, head i%N
+        img_heads = img.repeat_interleave(N, dim=0)
+
+        # Initial h0 for all heads
+        h = self.h0.expand(B * N, -1).contiguous()  # (B*N, D)
+
+        # Initial locations: head_starts tiled for batch
+        location = torch.zeros(B * N, 2, device=device)
+        location[:, 0] = self.head_starts.repeat(B)  # [h0..h7, h0..h7, ...]
+
+        # Pre-compute head→zone mapping
+        head_zone = [hi // self.n_heads_per_zone for hi in range(N)]
+
+        # Tracking lists
+        all_locations = []
+        all_phase_tags = []
+        all_head_ids = []
+        all_zone_ids = []
+        search_content_logits = []
+
+        # SEARCH phase (all heads in parallel)
+        for _s in range(self.n_search_steps):
+            glimpse = self.search_sensor(img_heads, location)
+            h = self.read_gru(glimpse, h)
+            location = torch.tanh(self.location_head(h))
+            sc_logit = self.search_content_head(h)  # (B*N, 1)
+            # Decompose: (B*N, 2) → N × (B, 2)
+            loc_bh = location.view(B, N, 2)
+            sc_bh = sc_logit.view(B, N, 1)
+            for hi in range(N):
+                all_locations.append(loc_bh[:, hi].contiguous())
+                all_phase_tags.append('search')
+                all_head_ids.append(hi)
+                all_zone_ids.append(head_zone[hi])
+                search_content_logits.append(sc_bh[:, hi].contiguous())
+
+        # PRESCAN phase (all heads in parallel)
+        for _p in range(self.n_prescan_steps):
+            glimpse = self.prescan_sensor(img_heads, location)
+            h = self.read_gru(glimpse, h)
+            location = torch.tanh(self.location_head(h))
+            loc_bh = location.view(B, N, 2)
+            for hi in range(N):
+                all_locations.append(loc_bh[:, hi].contiguous())
+                all_phase_tags.append('prescan')
+                all_head_ids.append(hi)
+                all_zone_ids.append(head_zone[hi])
+
+        # Record prescan end positions per head
+        prescan_end_bh = location.view(B, N, 2)
+        prescan_end_positions = [prescan_end_bh[:, hi].contiguous() for hi in range(N)]
+
+        # READ phase (all heads in parallel)
+        for _r in range(self.n_read_steps):
+            glimpse = self.read_sensor(img_heads, location)
+            h = self.read_gru(glimpse, h)
+            location = torch.tanh(self.location_head(h))
+            loc_bh = location.view(B, N, 2)
+            for hi in range(N):
+                all_locations.append(loc_bh[:, hi].contiguous())
+                all_phase_tags.append('read')
+                all_head_ids.append(hi)
+                all_zone_ids.append(head_zone[hi])
+
+        # Classify all heads at once
+        logits = self.letter_classifier(h)  # (B*N, n_classes)
+        group_logits = logits.view(B, N, self.n_letter_classes)
+
+        # Assemble result: probes first, then head locations
+        locations = list(probe_locs_per_zone) + all_locations
+        phase_tags = ['probe'] * self.n_zones + all_phase_tags
+        head_ids_list = [-1] * self.n_zones + all_head_ids
+        zone_ids_list = list(range(self.n_zones)) + all_zone_ids
+
+        result = ReadingResult(
+            locations=locations,
+            phase_tags=phase_tags,
+            head_ids=head_ids_list,
+            zone_ids=zone_ids_list,
+            probe_content_logits=probe_content_logits,
+            search_content_logits=search_content_logits,
+            group_logits=group_logits,
+            prescan_end_positions=prescan_end_positions,
         )
 
-        # Phase 3: isolated read loops per group
-        B = img.shape[0]
-        all_group_logits = []
-
-        for gi in range(self.n_meta):
-            h_context = enc.group_h_contexts[gi]  # (B, D)
-            anchor = enc.barycenter_anchors[gi]    # (B, 2)
-
-            h_read, read_locs = self.read_gru.run_group(
-                img, self.read_sensor, h_context, anchor,
-                self.n_read_glimpses_per_group,
-            )
-
-            # Classify this group
-            logits = self.letter_classifier(h_read)  # (B, n_letter_classes)
-            all_group_logits.append(logits)
-
-            # Add read locations to enc for visualization
-            for loc in read_locs:
-                enc.locations.append(loc)
-                enc.phase_tags.append('read')
-
-        group_logits = torch.stack(all_group_logits, dim=1)  # (B, n_meta, 27)
-        enc.read_group_logits = group_logits
-
-        return group_logits, enc
+        return group_logits, result
