@@ -58,7 +58,7 @@ def test_counting_model(model_dir, test_data_dir, output_dir='counting_results',
     errors = []
 
     for i in range(len(dataset)):
-        img, clean, count, letters, font = dataset[i]
+        img, clean, count, letters, font, *_ = dataset[i]
         img = img.unsqueeze(0).to(device)
 
         with torch.no_grad():
@@ -149,7 +149,7 @@ def generate_counting_atlas(model_dir, test_data_dir,
     # Group samples by count
     by_count = {c: [] for c in range(1, max_count + 1)}
     for i in range(len(dataset)):
-        img, clean, count, letters, font = dataset[i]
+        img, clean, count, letters, font, *_ = dataset[i]
         by_count[count].append((i, letters, font))
 
     html_parts = ["""<!DOCTYPE html>
@@ -179,7 +179,7 @@ h2 { color: #aaa; margin-top: 30px; }
         html_parts.append(f'<h2>Count = {count_val} (showing {total} samples)</h2>\n<div class="grid">\n')
 
         for idx, letters, font in items:
-            img, clean, count, _letters, _font = dataset[idx]
+            img, clean, count, _letters, _font, *_ = dataset[idx]
             img_t = img.unsqueeze(0).to(device)
 
             with torch.no_grad():

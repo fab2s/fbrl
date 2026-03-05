@@ -1042,27 +1042,34 @@ class ThreePhaseResult:
     sub_content_logits: list      # list of (B, 1) per sub step
     meta_positions: list          # list of (B, 2) — meta landing coords
     sub_positions: list           # list of (B, 2) — sub landing coords
+    group_h_contexts: list        # list of n_meta × (B, D), discovery h snapshot per meta zone
+    sub_content_weights: list     # list of n_meta × (B, 3), softmax weights for barycenter
+    barycenter_anchors: list      # list of n_meta × (B, 2), content-weighted anchor positions
+    read_group_logits: object     # populated by ReadingModel, not encode_three_phase
 
 
 def encode_three_phase(image, controller,
-                       meta_sensor, sub_sensor, read_sensor,
-                       n_meta, n_sub_per_meta, n_read_per_sub,
-                       meta_content_head=None, sub_content_head=None):
-    """Three-phase hierarchical GRU attention loop.
+                       meta_sensor, sub_sensor,
+                       n_meta, n_sub_per_meta,
+                       meta_content_head=None, sub_content_head=None,
+                       meta_x_drift=0.15, sub_x_drift=0.1):
+    """Two-phase discovery loop: meta-scan + sub-scan with barycenter anchors.
 
     Phase 1 — META-SCAN: n_meta steps with PeripheralSensor (heavy blur).
-      Prescribed linspace x, y learned. Builds coarse content map.
+      Prescribed linspace x ± drift, y learned. Builds coarse content map.
     Phase 2 — SUB-SCAN: n_sub_per_meta steps per meta zone with PeripheralSensor (mild blur).
-      Anchored x from meta parent, y resets to 0. Free movement within zone.
-    Phase 3 — READ: n_read_per_sub steps per sub position with GlimpseSensor (sharp).
-      Anchored to sub positions. v7-style free movement.
+      Prescribed x within meta zone ± drift, y learned.
 
-    h never resets across phases — one continuous GRU chain.
-    Only position resets at phase boundaries (x from parent anchor, y=0).
+    After each group of n_sub_per_meta sub-scans:
+      Content-weighted barycenter collapses 3 sub positions → 1 read anchor.
+      Snapshot h as h_context for isolated read GRU.
+
+    Read phase is NOT here — handled by ReadingModel's ReadGRU.
     """
     B = image.shape[0]
+    device = image.device
     h = controller.h0.expand(B, -1).contiguous()
-    location = torch.zeros(B, 2, device=image.device)
+    location = torch.zeros(B, 2, device=device)
 
     locations = [location]
     phase_tags = ['init']
@@ -1070,45 +1077,91 @@ def encode_three_phase(image, controller,
     sub_content_logits = []
     meta_positions = []
     sub_positions = []
+    group_h_contexts = []
+    sub_content_weights = []
+    barycenter_anchors = []
 
-    # Phase 1 — META-SCAN (prescribed x, learned y)
-    meta_xs = torch.linspace(-0.75, 0.75, n_meta, device=image.device)
+    # Phase 1 — META-SCAN (prescribed x ± drift, learned y)
+    meta_xs = torch.linspace(-0.75, 0.75, n_meta, device=device)
     for t in range(n_meta):
         glimpse = meta_sensor(image, location)
         h = controller.gru(glimpse, h)
         raw_loc = torch.tanh(controller.location_head(h))
-        # Prescribed x, learned y
-        location = torch.stack([meta_xs[t].expand(B), raw_loc[:, 1]], dim=1)
+        # Prescribed x with drift, learned y
+        drifted_x = (meta_xs[t] + meta_x_drift * raw_loc[:, 0]).clamp(-1, 1)
+        location = torch.stack([drifted_x, raw_loc[:, 1]], dim=1)
         locations.append(location)
         phase_tags.append('meta')
         meta_positions.append(location)
         if meta_content_head is not None:
             meta_content_logits.append(meta_content_head(h))
 
-    # Phase 2 — SUB-SCAN (anchored to meta positions, free movement)
-    for meta_loc in meta_positions:
-        # Reset: x from meta anchor, y=0
-        location = torch.stack([meta_loc[:, 0].detach(), torch.zeros(B, device=image.device)], dim=1)
-        for _s in range(n_sub_per_meta):
+    # Phase 2 — SUB-SCAN (prescribed x within zone ± drift, learned y)
+    # Meta spacing for sub-scan zone placement
+    if n_meta > 1:
+        meta_spacing = (meta_xs[1] - meta_xs[0]).item()
+    else:
+        meta_spacing = 1.0
+
+    for gi, meta_loc in enumerate(meta_positions):
+        meta_x_center = meta_xs[gi]
+        # 3 sub-scan positions evenly spaced within this meta zone
+        sub_xs = torch.linspace(
+            meta_x_center - 0.2, meta_x_center + 0.2,
+            n_sub_per_meta, device=device,
+        )
+
+        # Reset location to meta anchor center
+        location = torch.stack([
+            meta_loc[:, 0].detach(),
+            torch.zeros(B, device=device),
+        ], dim=1)
+
+        group_sub_positions = []
+        group_sub_content_logits = []
+
+        for s in range(n_sub_per_meta):
             glimpse = sub_sensor(image, location)
             h = controller.gru(glimpse, h)
-            location = torch.tanh(controller.location_head(h))
+            raw_loc = torch.tanh(controller.location_head(h))
+            # Prescribed x within zone with drift, learned y
+            drifted_x = (sub_xs[s] + sub_x_drift * raw_loc[:, 0]).clamp(-1, 1)
+            location = torch.stack([drifted_x, raw_loc[:, 1]], dim=1)
             locations.append(location)
             phase_tags.append('sub')
             sub_positions.append(location)
-            if sub_content_head is not None:
-                sub_content_logits.append(sub_content_head(h))
+            group_sub_positions.append(location)
 
-    # Phase 3 — READ (anchored to sub positions, free movement)
-    for sub_loc in sub_positions:
-        # Reset: x from sub anchor, y=0
-        location = torch.stack([sub_loc[:, 0].detach(), torch.zeros(B, device=image.device)], dim=1)
-        for _r in range(n_read_per_sub):
-            glimpse = read_sensor(image, location)
-            h = controller.gru(glimpse, h)
-            location = torch.tanh(controller.location_head(h))
-            locations.append(location)
-            phase_tags.append('read')
+            if sub_content_head is not None:
+                logit = sub_content_head(h)
+                sub_content_logits.append(logit)
+                group_sub_content_logits.append(logit)
+
+        # Content-weighted barycenter: collapse 3 sub positions → 1 anchor
+        if group_sub_content_logits:
+            # (n_sub, B, 1) → softmax over sub-scans
+            raw_weights = torch.stack(
+                [torch.sigmoid(l) for l in group_sub_content_logits], dim=0,
+            )  # (n_sub, B, 1)
+            weights = F.softmax(raw_weights.squeeze(-1), dim=0)  # (n_sub, B)
+        else:
+            # Uniform weights if no content head
+            weights = torch.ones(n_sub_per_meta, B, device=device) / n_sub_per_meta
+
+        # Weighted average of sub positions
+        anchor_x = sum(
+            weights[s] * group_sub_positions[s][:, 0]
+            for s in range(n_sub_per_meta)
+        )
+        anchor_y = sum(
+            weights[s] * group_sub_positions[s][:, 1]
+            for s in range(n_sub_per_meta)
+        )
+        anchor = torch.stack([anchor_x, anchor_y], dim=1)  # (B, 2)
+
+        barycenter_anchors.append(anchor)
+        sub_content_weights.append(weights)
+        group_h_contexts.append(h.clone())
 
     latent = controller.latent_head(h)
 
@@ -1120,57 +1173,139 @@ def encode_three_phase(image, controller,
         sub_content_logits=sub_content_logits,
         meta_positions=meta_positions,
         sub_positions=sub_positions,
+        group_h_contexts=group_h_contexts,
+        sub_content_weights=sub_content_weights,
+        barycenter_anchors=barycenter_anchors,
+        read_group_logits=None,
     )
+
+
+class ReadGRU(nn.Module):
+    """Isolated per-group read attention loop.
+
+    Shared weights across all read groups, but each group gets its own
+    initial h_read state from the discovery GRU via a bridge projection.
+    """
+    def __init__(self, glimpse_dim=256, latent_dim=256):
+        super().__init__()
+        self.gru = nn.GRUCell(glimpse_dim, latent_dim)
+        self.location_head = nn.Linear(latent_dim, 2)
+        self.bridge = nn.Linear(latent_dim, latent_dim)
+
+    def run_group(self, image, read_sensor, h_context, start_location, n_steps):
+        """Run one read group: n_steps of GRU attention from start_location.
+
+        Args:
+            image: (B, 1, H, W)
+            read_sensor: GlimpseSensor
+            h_context: (B, D) discovery GRU snapshot (detached)
+            start_location: (B, 2) barycenter anchor
+            n_steps: number of read glimpses
+        Returns:
+            h_read: (B, D) final hidden state
+            read_locations: list of (B, 2) read positions
+        """
+        h_read = torch.relu(self.bridge(h_context))
+        location = start_location
+        read_locations = []
+
+        for _r in range(n_steps):
+            glimpse = read_sensor(image, location)
+            h_read = self.gru(glimpse, h_read)
+            location = torch.tanh(self.location_head(h_read))
+            read_locations.append(location)
+
+        return h_read, read_locations
 
 
 class ReadingModel(nn.Module):
     """Three-phase foveal reading: peripheral -> parafoveal -> foveal.
 
-    Meta-scan (PeripheralSensor, heavy blur) -> Sub-scan (PeripheralSensor,
-    mild blur) -> Read (GlimpseSensor, sharp). One GRU carries context
-    across all phases. Count head on final latent (3-class: 1-3 letters).
+    Discovery GRU (meta + sub) builds spatial map with content-weighted
+    barycenters. Isolated ReadGRU runs per-group letter reading loops.
+    Letter classifier (27-class: 26 letters + void) on each group.
+    Count = number of non-void predictions (derived, not trained).
     """
     def __init__(self, n_meta=4, n_sub_per_meta=3, n_read_per_sub=3,
                  meta_patch_pixels=(32, 96), meta_blur_sigma=6.0,
                  sub_patch_pixels=(20, 28), sub_blur_sigma=2.0,
-                 read_patch_size=12, latent_dim=256, n_scales=1, max_count=3):
+                 read_patch_size=12, latent_dim=256, n_scales=1,
+                 max_count=3, n_letter_classes=27,
+                 n_read_glimpses_per_group=3,
+                 meta_x_drift=0.15, sub_x_drift=0.1):
         super().__init__()
         self.n_meta = n_meta
         self.n_sub_per_meta = n_sub_per_meta
         self.n_read_per_sub = n_read_per_sub
         self.max_count = max_count
+        self.n_letter_classes = n_letter_classes
+        self.n_read_glimpses_per_group = n_read_glimpses_per_group
+        self.meta_x_drift = meta_x_drift
+        self.sub_x_drift = sub_x_drift
 
-        # Three sensors — peripheral, parafoveal, foveal
+        # Two sensors for discovery — peripheral, parafoveal
         self.meta_sensor = PeripheralSensor(meta_patch_pixels, meta_blur_sigma, latent_dim)
         self.sub_sensor = PeripheralSensor(sub_patch_pixels, sub_blur_sigma, latent_dim)
+
+        # Foveal sensor for reading
         self.read_sensor = GlimpseSensor(read_patch_size, n_scales, latent_dim)
 
-        # One GRU controller for all phases
+        # Discovery GRU controller (meta + sub phases)
         self.controller = AttentionController(
             glimpse_dim=latent_dim, hidden_dim=latent_dim, latent_dim=latent_dim,
         )
 
-        # Separate content heads per phase
+        # Separate content heads per discovery phase
         self.meta_content_head = nn.Linear(latent_dim, 1)
         self.sub_content_head = nn.Linear(latent_dim, 1)
 
-        # Count head on final latent
-        self.count_head = nn.Linear(latent_dim, max_count)
+        # Isolated read GRU (shared weights, different h0 per group)
+        self.read_gru = ReadGRU(glimpse_dim=latent_dim, latent_dim=latent_dim)
+
+        # Letter classifier (27-class: a-z + void), shared across groups
+        self.letter_classifier = nn.Linear(latent_dim, n_letter_classes)
 
     def forward(self, img):
-        """Forward pass: three-phase attention, predict count.
+        """Forward pass: discovery + isolated read groups + letter classification.
 
         Args:
             img: (B, 1, H, W) input image (192x128 canvas)
         Returns:
-            count_logits: (B, max_count) class logits
+            group_logits: (B, n_meta, n_letter_classes) per-group letter logits
             enc: ThreePhaseResult with all locations and diagnostics
         """
+        # Phase 1+2: discovery (meta + sub)
         enc = encode_three_phase(
             img, self.controller,
-            self.meta_sensor, self.sub_sensor, self.read_sensor,
-            self.n_meta, self.n_sub_per_meta, self.n_read_per_sub,
+            self.meta_sensor, self.sub_sensor,
+            self.n_meta, self.n_sub_per_meta,
             self.meta_content_head, self.sub_content_head,
+            self.meta_x_drift, self.sub_x_drift,
         )
-        count_logits = self.count_head(enc.latent)
-        return count_logits, enc
+
+        # Phase 3: isolated read loops per group
+        B = img.shape[0]
+        all_group_logits = []
+
+        for gi in range(self.n_meta):
+            h_context = enc.group_h_contexts[gi]  # (B, D)
+            anchor = enc.barycenter_anchors[gi]    # (B, 2)
+
+            h_read, read_locs = self.read_gru.run_group(
+                img, self.read_sensor, h_context, anchor,
+                self.n_read_glimpses_per_group,
+            )
+
+            # Classify this group
+            logits = self.letter_classifier(h_read)  # (B, n_letter_classes)
+            all_group_logits.append(logits)
+
+            # Add read locations to enc for visualization
+            for loc in read_locs:
+                enc.locations.append(loc)
+                enc.phase_tags.append('read')
+
+        group_logits = torch.stack(all_group_logits, dim=1)  # (B, n_meta, 27)
+        enc.read_group_logits = group_logits
+
+        return group_logits, enc

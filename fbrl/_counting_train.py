@@ -94,7 +94,7 @@ def train_counting_model(cfg):
         total_correct = 0
         total_samples = 0
 
-        for img, clean, counts_batch, _letters, _fonts in dataloader:
+        for img, clean, counts_batch, _letters, _fonts, *_ in dataloader:
             img = img.to(device)
             clean = clean.to(device)
             B = img.shape[0]

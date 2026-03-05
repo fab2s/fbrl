@@ -97,6 +97,8 @@ class ExperimentConfig:
     n_meta_glimpses: int = 4
     n_sub_per_meta: int = 3
     n_read_per_sub: int = 3
+    n_read_glimpses_per_group: int = 3
+    n_letter_classes: int = 27
     meta_patch_pixels: tuple = (32, 96)
     meta_blur_sigma: float = 6.0
     sub_patch_pixels: tuple = (20, 28)
@@ -106,6 +108,8 @@ class ExperimentConfig:
     read_void_weight: float = 0.5
     meta_content_weight: float = 0.5
     sub_content_weight: float = 0.5
+    meta_x_drift: float = 0.15
+    sub_x_drift: float = 0.1
 
     # Differential cosine decay (per-head T_max ratios, multiply epochs)
     tmax_attn_ratio: float = 1.0

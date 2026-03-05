@@ -616,16 +616,57 @@ COUNTING_TRIPLES_200 = [
 COUNTING_CANVAS = (192, 128)
 
 
-def _render_counting_image(text, font, canvas_size=COUNTING_CANVAS):
-    """Render text centered on a fixed-size canvas. Returns PIL Image."""
+def _render_counting_image(text, font, canvas_size=COUNTING_CANVAS,
+                           random_placement=False, rng=None):
+    """Render text on a fixed-size canvas. Returns (PIL Image, char_centers_norm).
+
+    char_centers_norm: list of per-character center-x in [-1, 1] normalized coords.
+    When random_placement=True, text x-offset is randomized (within bounds).
+    """
     w, h = canvas_size
     img = Image.new('L', (w, h), color=0)
     draw = ImageDraw.Draw(img)
     bbox = draw.textbbox((0, 0), text, font=font)
-    x = (w - bbox[2] - bbox[0]) / 2
-    y = (h - bbox[3] - bbox[1]) / 2
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
+    # Centered y always
+    y = (h - text_h - bbox[1]) / 2
+
+    # x placement: centered or randomized
+    x_centered = (w - text_w - bbox[0]) / 2
+    if random_placement and text_w < w - 10:
+        margin = 5
+        x_min = margin - bbox[0]
+        x_max = w - text_w - bbox[0] - margin
+        if x_max > x_min and rng is not None:
+            x = rng.uniform(x_min, x_max)
+        elif x_max > x_min:
+            x = np.random.uniform(x_min, x_max)
+        else:
+            x = x_centered
+    else:
+        x = x_centered
+
     draw.text((x, y), text, fill=255, font=font)
-    return img
+
+    # Compute per-character center-x in [-1, 1] normalized coords
+    char_centers = []
+    for i, ch in enumerate(text):
+        # Get bbox of text prefix up to and including this char
+        prefix = text[:i + 1]
+        prefix_bbox = draw.textbbox((0, 0), prefix, font=font)
+        if i > 0:
+            prev_bbox = draw.textbbox((0, 0), text[:i], font=font)
+            char_left = x + prev_bbox[2]
+        else:
+            char_left = x + prefix_bbox[0]
+        char_right = x + prefix_bbox[2]
+        char_cx = (char_left + char_right) / 2
+        # Normalize to [-1, 1]: 0 -> -1, w -> 1
+        char_centers.append(char_cx / w * 2 - 1)
+
+    return img, char_centers
 
 
 def generate_counting_dataset(output_dir, noise_level=0.01, num_variants=1,
@@ -636,14 +677,16 @@ def generate_counting_dataset(output_dir, noise_level=0.01, num_variants=1,
     2-letter: 200 random pairs per font (lowercase)
     3-letter: 200 random triples per font (lowercase)
     All on same canvas size — model must look to count.
+    Random horizontal placement forces spatial discovery.
     """
     os.makedirs(output_dir, exist_ok=True)
     fonts = discover_fonts(font_spec)
     print(f"Generating counting data with {len(fonts)} font(s): {', '.join(n for n, _ in fonts)}")
-    print(f"Fixed canvas: {COUNTING_CANVAS[0]}x{COUNTING_CANVAS[1]}")
+    print(f"Fixed canvas: {COUNTING_CANVAS[0]}x{COUNTING_CANVAS[1]} (random placement)")
 
     metadata = {}
     all_singles = [chr(i) for i in range(65, 91)] + [chr(i) for i in range(97, 123)]
+    rng = np.random.RandomState(123)
 
     items_by_count = {
         1: [(letter,) for letter in all_singles],
@@ -656,14 +699,16 @@ def generate_counting_dataset(output_dir, noise_level=0.01, num_variants=1,
 
         for count, text_items in items_by_count.items():
             for (text,) in text_items:
-                img = _render_counting_image(text, font)
-
-                clean_path = os.path.join(output_dir, f'clean_{count}_{text}_{font_name}.png')
-                img.save(clean_path)
-                img_array = np.array(img) / 255.0
-
                 for v in range(num_variants):
-                    noisy = img_array + np.random.normal(0, noise_level, img_array.shape)
+                    # Each variant gets its own random placement
+                    v_img, v_centers = _render_counting_image(
+                        text, font, random_placement=True, rng=rng)
+
+                    clean_path = os.path.join(output_dir, f'clean_{count}_{text}_{font_name}_{v}.png')
+                    v_img.save(clean_path)
+
+                    v_array = np.array(v_img) / 255.0
+                    noisy = v_array + np.random.normal(0, noise_level, v_array.shape)
                     noisy = np.clip(noisy, 0, 1)
                     noisy_img = Image.fromarray((noisy * 255).astype(np.uint8))
                     img_path = os.path.join(output_dir, f'img_{count}_{text}_{font_name}_{v}.png')
@@ -672,6 +717,7 @@ def generate_counting_dataset(output_dir, noise_level=0.01, num_variants=1,
                     metadata[key] = {
                         'image': img_path, 'clean': clean_path,
                         'count': count, 'letters': text, 'font': font_name,
+                        'char_positions': v_centers,
                     }
 
     with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
@@ -690,6 +736,7 @@ def generate_counting_test(output_dir, font_spec='all'):
     """Generate clean counting test set on fixed 192x128 canvas.
 
     52 singles + 50 pairs + 50 triples per font.
+    Random horizontal placement (seeded for reproducibility).
     """
     os.makedirs(output_dir, exist_ok=True)
     fonts = discover_fonts(font_spec)
@@ -697,6 +744,7 @@ def generate_counting_test(output_dir, font_spec='all'):
 
     metadata = {}
     all_singles = [chr(i) for i in range(65, 91)] + [chr(i) for i in range(97, 123)]
+    rng = np.random.RandomState(456)
 
     items_by_count = {
         1: all_singles,
@@ -709,12 +757,13 @@ def generate_counting_test(output_dir, font_spec='all'):
 
         for count, texts in items_by_count.items():
             for text in texts:
-                img = _render_counting_image(text, font)
+                img, char_centers = _render_counting_image(
+                    text, font, random_placement=True, rng=rng)
                 img_path = os.path.join(output_dir, f'img_{count}_{text}_{font_name}.png')
                 img.save(img_path)
                 metadata[f'{count}_{text}_{font_name}'] = {
                     'image': img_path, 'count': count, 'letters': text,
-                    'font': font_name,
+                    'font': font_name, 'char_positions': char_centers,
                 }
 
     with open(os.path.join(output_dir, 'metadata.json'), 'w') as f:
@@ -730,10 +779,20 @@ def generate_counting_test(output_dir, font_spec='all'):
 
 
 class CountingDataset(Dataset):
-    """Loads counting images (fixed 192x128) into memory. All counts mixed."""
-    def __init__(self, data_dir):
+    """Loads counting images (fixed 192x128) into memory. All counts mixed.
+
+    Returns (img, clean, count, letters, font, char_positions, char_labels).
+    char_positions: (max_count,) float tensor of center-x in [-1,1], NaN-padded.
+    char_labels: (max_count,) long tensor of letter indices (a=0..z=25), 26-padded (void).
+    """
+    def __init__(self, data_dir, train_fonts=None, max_count=3):
         with open(os.path.join(data_dir, 'metadata.json'), 'r') as f:
             metadata = json.load(f)
+
+        if train_fonts:
+            font_set = set(f.strip() for f in train_fonts.split(','))
+            metadata = {k: v for k, v in metadata.items()
+                        if v.get('font', 'default') in font_set}
 
         print(f"Loading {len(metadata)} counting samples into memory...", end=' ', flush=True)
         t0 = time.time()
@@ -742,6 +801,9 @@ class CountingDataset(Dataset):
         self.counts = []
         self.letters = []
         self.fonts = []
+        self.char_positions = []
+        self.char_labels = []
+        self.max_count = max_count
 
         clean_cache = {}
         count_tally = {}
@@ -768,6 +830,20 @@ class CountingDataset(Dataset):
             else:
                 self.clean_images.append(img_tensor)
 
+            # Parse char positions and labels
+            raw_pos = entry.get('char_positions', [])
+            text = entry['letters']
+            pos_tensor = torch.full((max_count,), float('nan'), dtype=torch.float32)
+            label_tensor = torch.full((max_count,), 26, dtype=torch.long)  # 26 = void
+            for i, ch in enumerate(text):
+                if i >= max_count:
+                    break
+                label_tensor[i] = ord(ch.lower()) - ord('a')
+                if i < len(raw_pos):
+                    pos_tensor[i] = raw_pos[i]
+            self.char_positions.append(pos_tensor)
+            self.char_labels.append(label_tensor)
+
             c = entry['count']
             count_tally[c] = count_tally.get(c, 0) + 1
 
@@ -781,7 +857,8 @@ class CountingDataset(Dataset):
     def __getitem__(self, idx):
         return (self.images[idx], self.clean_images[idx],
                 self.counts[idx], self.letters[idx],
-                self.fonts[idx])
+                self.fonts[idx],
+                self.char_positions[idx], self.char_labels[idx])
 
 
 class WordDataset(Dataset):

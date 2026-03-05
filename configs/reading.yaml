@@ -2,6 +2,8 @@ model_type: reading
 n_meta_glimpses: 4
 n_sub_per_meta: 3
 n_read_per_sub: 3
+n_read_glimpses_per_group: 3
+n_letter_classes: 27
 meta_patch_pixels: [32, 96]
 meta_blur_sigma: 6.0
 sub_patch_pixels: [20, 28]
@@ -9,9 +11,12 @@ sub_blur_sigma: 2.0
 read_patch_size: 12
 latent_dim: 256
 n_scales: 1
-epochs: 100
+meta_x_drift: 0.15
+sub_x_drift: 0.1
+epochs: 50
 batch_size: 32
 checkpoint_interval: 10
+train_fonts: default,dejavu-sans,dejavu-serif,liberation-sans
 meta_guide_weight: 8.0
 sub_guide_weight: 8.0
 read_void_weight: 0.5
