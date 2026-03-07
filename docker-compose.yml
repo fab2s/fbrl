@@ -1,15 +1,17 @@
 services:
-  fbrl:
-    build: .
+  # Python implementation (original)
+  python:
+    build:
+      context: python
     entrypoint: ["tail", "-f", "/dev/null"]
     volumes:
-      - ./data:/app/data
-      - ./runs:/app/runs
-      - ./vision_training.py:/app/vision_training.py
-      - ./fbrl:/app/fbrl
-      - ./configs:/app/configs
-      - ./tests:/app/tests
-      - ./pytest.ini:/app/pytest.ini
+      - ./python/data:/app/data
+      - ./python/runs:/app/runs
+      - ./python/vision_training.py:/app/vision_training.py
+      - ./python/fbrl:/app/fbrl
+      - ./python/configs:/app/configs
+      - ./python/tests:/app/tests
+      - ./python/pytest.ini:/app/pytest.ini
     deploy:
       resources:
         reservations:

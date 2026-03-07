@@ -93,7 +93,7 @@ make train-motor DEVICE=cuda
 make train-words EPOCHS=300 BATCH=64 DEVICE=cuda
 ```
 
-Training parameters live in YAML configs (`configs/*.yaml`). CLI args override config values. Always `make restart` after code changes.
+Training parameters live in YAML configs (`python/configs/*.yaml`). CLI args override config values. Always `make restart` after code changes.
 
 See [docs/usage.md](docs/usage.md) for full CLI reference and Makefile documentation.
 
@@ -107,32 +107,36 @@ If anyone feels like donating a modern GPU to the cause, the latent space would 
 
 ```
 fbrl/
-+-- vision_training.py       # CLI entry point
-+-- configs/                  # YAML training configs (one per model type)
-+-- fbrl/                     # Core package
-|   +-- config.py             #   ExperimentConfig dataclass
-|   +-- model.py              #   All model classes + encode_scan_read()
-|   +-- data.py               #   Dataset classes + data generation
-|   +-- losses.py             #   All loss functions
-|   +-- train.py              #   Letter + bigram training loops
-|   +-- _word_train.py        #   Word training loop
-|   +-- _motor_train.py       #   Motor training loop
-|   +-- motor.py              #   MotorTraceDecoder, soft_render, trajectory extraction
-|   +-- evaluate.py           #   Test + atlas generation (letter, bigram)
-|   +-- _word_eval.py         #   Word evaluation + atlas
-|   +-- _motor_eval.py        #   Motor evaluation + atlas
-|   +-- training_utils.py     #   Shared infra (checkpoints, logging, transfer, plotting)
-+-- tests/                    # Unit tests (pytest, CPU-only)
-+-- docs/
-|   +-- letters.md            # Single-letter experiments in depth
-|   +-- bigrams.md            # Bigram experiments in depth
-|   +-- words.md              # Word experiments in depth
-|   +-- motor.md              # Motor trace experiments in depth
-|   +-- usage.md              # CLI reference + Makefile docs
-|   +-- glossary.md           # Deep learning terms and concepts
-+-- thoughts/                 # Research notes
-+-- runs/                     # Archived models + results
-+-- data/                     # Generated data (Docker volume, not in git)
++-- python/                      # Python implementation (original)
+|   +-- Dockerfile               #   Python + PyTorch container
+|   +-- vision_training.py       #   CLI entry point
+|   +-- configs/                 #   YAML training configs (one per model type)
+|   +-- fbrl/                    #   Core package
+|   |   +-- config.py            #     ExperimentConfig dataclass
+|   |   +-- model.py             #     All model classes + encode_scan_read()
+|   |   +-- data.py              #     Dataset classes + data generation
+|   |   +-- losses.py            #     All loss functions
+|   |   +-- train.py             #     Letter + bigram training loops
+|   |   +-- _word_train.py       #     Word training loop
+|   |   +-- _motor_train.py      #     Motor training loop
+|   |   +-- motor.py             #     MotorTraceDecoder, soft_render, trajectory extraction
+|   |   +-- evaluate.py          #     Test + atlas generation (letter, bigram)
+|   |   +-- _word_eval.py        #     Word evaluation + atlas
+|   |   +-- _motor_eval.py       #     Motor evaluation + atlas
+|   |   +-- training_utils.py    #     Shared infra (checkpoints, logging, transfer, plotting)
+|   +-- tests/                   #   Unit tests (pytest, CPU-only)
+|   +-- data/                    #   Generated data (Docker volume, not in git)
+|   +-- runs/                    #   Archived models + results
++-- docs/                        # Research documentation (shared)
+|   +-- letters.md               #   Single-letter experiments in depth
+|   +-- bigrams.md               #   Bigram experiments in depth
+|   +-- words.md                 #   Word experiments in depth
+|   +-- motor.md                 #   Motor trace experiments in depth
+|   +-- usage.md                 #   CLI reference + Makefile docs
+|   +-- glossary.md              #   Deep learning terms and concepts
++-- thoughts/                    # Research notes
++-- docker-compose.yml           # Services: python (+ go, later)
++-- Makefile                     # Orchestrates both implementations
 ```
 
 ## Reference

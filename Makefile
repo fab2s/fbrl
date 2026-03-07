@@ -1,4 +1,4 @@
-SERVICE = fbrl
+SERVICE = python
 RUN     = docker compose exec $(SERVICE) python vision_training.py
 
 # Runtime overrides (e.g. make train-words EPOCHS=500 DEVICE=cuda)
@@ -35,12 +35,12 @@ shell:
 	docker compose exec $(SERVICE) bash
 
 # Cleanup helpers — remove all files except .gitignore and archived logs
-CLEAN_MODELS = find data/letter_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
-CLEAN_RESULTS = find data/letter_results -type f ! -name .gitignore -delete 2>/dev/null; true
-CLEAN_BIGRAM_MODELS = find data/bigram_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
-CLEAN_BIGRAM_RESULTS = find data/bigram_results -type f ! -name .gitignore -delete 2>/dev/null; true
-CLEAN_WORD_MODELS = find data/word_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
-CLEAN_WORD_RESULTS = find data/word_results -type f ! -name .gitignore -delete 2>/dev/null; true
+CLEAN_MODELS = find python/data/letter_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_RESULTS = find python/data/letter_results -type f ! -name .gitignore -delete 2>/dev/null; true
+CLEAN_BIGRAM_MODELS = find python/data/bigram_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_BIGRAM_RESULTS = find python/data/bigram_results -type f ! -name .gitignore -delete 2>/dev/null; true
+CLEAN_WORD_MODELS = find python/data/word_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_WORD_RESULTS = find python/data/word_results -type f ! -name .gitignore -delete 2>/dev/null; true
 
 # Pipeline — Generation (unchanged)
 generate:
@@ -68,7 +68,7 @@ visualize:
 	$(RUN) visualize --model_dir data/letter_models --data_dir data/letters --output_dir data/letter_visualizations
 
 atlas:
-	@rm -f data/letter_atlas.html
+	@rm -f python/data/letter_atlas.html
 	$(RUN) atlas --model_dir data/letter_models --test_data_dir data/letter_test --output data/letter_atlas.html --device $(DEVICE)
 
 check-attention:
@@ -79,15 +79,15 @@ archive:
 ifndef NAME
 	$(error Usage: make archive NAME=v1-single-font)
 endif
-	@mkdir -p runs/$(NAME)
+	@mkdir -p python/runs/$(NAME)
 	$(RUN) compress_model --input data/letter_models/model_final.pth --output data/letter_models/_archive.pth.gz
-	mv data/letter_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
-	cp data/letter_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
-	cp data/letter_models/training.log runs/$(NAME)/ 2>/dev/null || true
-	cp data/letter_atlas.html runs/$(NAME)/ 2>/dev/null || true
-	cp data/letter_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
-	cp data/letter_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(CONFIG)" > runs/$(NAME)/info.txt; }
-	@echo "Archived to runs/$(NAME)/"
+	mv python/data/letter_models/_archive.pth.gz python/runs/$(NAME)/model_final.pth.gz
+	cp python/data/letter_models/training_metrics.png python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/letter_models/training.log python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/letter_atlas.html python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/letter_models/config.yaml python/runs/$(NAME)/ 2>/dev/null || cp python/$(CONFIG) python/runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp python/data/letter_models/info.txt python/runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(CONFIG)" > python/runs/$(NAME)/info.txt; }
+	@echo "Archived to python/runs/$(NAME)/"
 
 # Bigram pipeline
 generate-bigrams:
@@ -113,22 +113,22 @@ check-bigram-attention:
 	$(RUN) check_bigram_attention --data_dir data/bigrams --device $(DEVICE)
 
 bigram-atlas:
-	@rm -f data/bigram_atlas.html
+	@rm -f python/data/bigram_atlas.html
 	$(RUN) bigram_atlas --model_dir data/bigram_models --test_data_dir data/bigram_test --output data/bigram_atlas.html --device $(DEVICE)
 
 archive-bigrams:
 ifndef NAME
 	$(error Usage: make archive-bigrams NAME=v4-bigram-transfer)
 endif
-	@mkdir -p runs/$(NAME)
+	@mkdir -p python/runs/$(NAME)
 	$(RUN) compress_model --input data/bigram_models/model_final.pth --output data/bigram_models/_archive.pth.gz
-	mv data/bigram_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
-	cp data/bigram_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
-	cp data/bigram_models/training.log runs/$(NAME)/ 2>/dev/null || true
-	cp data/bigram_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
-	cp data/bigram_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(BIGRAM_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
-	cp data/bigram_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(BIGRAM_CONFIG)" > runs/$(NAME)/info.txt; }
-	@echo "Archived to runs/$(NAME)/"
+	mv python/data/bigram_models/_archive.pth.gz python/runs/$(NAME)/model_final.pth.gz
+	cp python/data/bigram_models/training_metrics.png python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/bigram_models/training.log python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/bigram_atlas.html python/runs/$(NAME)/atlas.html 2>/dev/null || true
+	cp python/data/bigram_models/config.yaml python/runs/$(NAME)/ 2>/dev/null || cp python/$(BIGRAM_CONFIG) python/runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp python/data/bigram_models/info.txt python/runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(BIGRAM_CONFIG)" > python/runs/$(NAME)/info.txt; }
+	@echo "Archived to python/runs/$(NAME)/"
 
 # Word pipeline
 generate-words:
@@ -154,32 +154,32 @@ test-word-isolation:
 	$(RUN) test_word_isolation --model_dir data/word_models --test_data_dir data/letter_test --output_dir data/word_results --device $(DEVICE)
 
 word-atlas:
-	@rm -f data/word_atlas.html
+	@rm -f python/data/word_atlas.html
 	$(RUN) word_atlas --model_dir data/word_models --test_data_dir data/word_test --output data/word_atlas.html --device $(DEVICE)
 
 isolation-atlas:
-	@rm -f data/isolation_atlas.html
+	@rm -f python/data/isolation_atlas.html
 	$(RUN) isolation_atlas --model_dir data/word_models --test_data_dir data/letter_test --output data/isolation_atlas.html --device $(DEVICE)
 
 archive-words:
 ifndef NAME
 	$(error Usage: make archive-words NAME=v1-word-prescribed)
 endif
-	@mkdir -p runs/$(NAME)
+	@mkdir -p python/runs/$(NAME)
 	$(RUN) compress_model --input data/word_models/model_final.pth --output data/word_models/_archive.pth.gz
-	mv data/word_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
-	cp data/word_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
-	cp data/word_models/training.log runs/$(NAME)/ 2>/dev/null || true
-	cp data/word_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
-	cp data/isolation_atlas.html runs/$(NAME)/isolation_atlas.html 2>/dev/null || true
-	cp data/word_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(WORD_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
-	cp data/word_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(WORD_CONFIG)" > runs/$(NAME)/info.txt; }
-	@echo "Archived to runs/$(NAME)/"
+	mv python/data/word_models/_archive.pth.gz python/runs/$(NAME)/model_final.pth.gz
+	cp python/data/word_models/training_metrics.png python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/word_models/training.log python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/word_atlas.html python/runs/$(NAME)/atlas.html 2>/dev/null || true
+	cp python/data/isolation_atlas.html python/runs/$(NAME)/isolation_atlas.html 2>/dev/null || true
+	cp python/data/word_models/config.yaml python/runs/$(NAME)/ 2>/dev/null || cp python/$(WORD_CONFIG) python/runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp python/data/word_models/info.txt python/runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(WORD_CONFIG)" > python/runs/$(NAME)/info.txt; }
+	@echo "Archived to python/runs/$(NAME)/"
 
 # Motor pipeline
 MOTOR_CONFIG ?= configs/letter_motor.yaml
-CLEAN_MOTOR_MODELS = find data/motor_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
-CLEAN_MOTOR_RESULTS = find data/motor_results -type f ! -name .gitignore -delete 2>/dev/null; true
+CLEAN_MOTOR_MODELS = find python/data/motor_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_MOTOR_RESULTS = find python/data/motor_results -type f ! -name .gitignore -delete 2>/dev/null; true
 
 generate-trajectories:
 	$(RUN) generate_trajectories --output_dir data/trajectories --font dejavu-sans --letters $(LETTERS) --n_points 48
@@ -196,27 +196,27 @@ test-motor:
 	$(RUN) test_motor --model_dir data/motor_models --test_data_dir data/letter_test --output_dir data/motor_results --device $(DEVICE)
 
 motor-atlas:
-	@rm -f data/motor_atlas.html
+	@rm -f python/data/motor_atlas.html
 	$(RUN) motor_atlas --model_dir data/motor_models --test_data_dir data/letter_test --output data/motor_atlas.html --device $(DEVICE)
 
 archive-motor:
 ifndef NAME
 	$(error Usage: make archive-motor NAME=v1-motor-baseline)
 endif
-	@mkdir -p runs/$(NAME)
+	@mkdir -p python/runs/$(NAME)
 	$(RUN) compress_model --input data/motor_models/model_final.pth --output data/motor_models/_archive.pth.gz
-	mv data/motor_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
-	cp data/motor_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
-	cp data/motor_models/training.log runs/$(NAME)/ 2>/dev/null || true
-	cp data/motor_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
-	cp data/motor_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(MOTOR_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
-	cp data/motor_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(MOTOR_CONFIG)" > runs/$(NAME)/info.txt; }
-	@echo "Archived to runs/$(NAME)/"
+	mv python/data/motor_models/_archive.pth.gz python/runs/$(NAME)/model_final.pth.gz
+	cp python/data/motor_models/training_metrics.png python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/motor_models/training.log python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/motor_atlas.html python/runs/$(NAME)/atlas.html 2>/dev/null || true
+	cp python/data/motor_models/config.yaml python/runs/$(NAME)/ 2>/dev/null || cp python/$(MOTOR_CONFIG) python/runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp python/data/motor_models/info.txt python/runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(MOTOR_CONFIG)" > python/runs/$(NAME)/info.txt; }
+	@echo "Archived to python/runs/$(NAME)/"
 
 # Counting pipeline
 COUNTING_CONFIG ?= configs/counting.yaml
-CLEAN_COUNTING_MODELS = find data/counting_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
-CLEAN_COUNTING_RESULTS = find data/counting_results -type f ! -name .gitignore -delete 2>/dev/null; true
+CLEAN_COUNTING_MODELS = find python/data/counting_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_COUNTING_RESULTS = find python/data/counting_results -type f ! -name .gitignore -delete 2>/dev/null; true
 
 generate-counting:
 	$(RUN) generate_counting --num_variants $(VARIANTS) --noise_level $(NOISE) --output_dir data/counting --fonts $(FONTS)
@@ -236,27 +236,27 @@ test-counting:
 	$(RUN) test_counting --model_dir data/counting_models --test_data_dir data/counting_test --output_dir data/counting_results --device $(DEVICE)
 
 counting-atlas:
-	@rm -f data/counting_atlas.html
+	@rm -f python/data/counting_atlas.html
 	$(RUN) counting_atlas --model_dir data/counting_models --test_data_dir data/counting_test --output data/counting_atlas.html --device $(DEVICE)
 
 archive-counting:
 ifndef NAME
 	$(error Usage: make archive-counting NAME=v1-counting-baseline)
 endif
-	@mkdir -p runs/$(NAME)
+	@mkdir -p python/runs/$(NAME)
 	$(RUN) compress_model --input data/counting_models/model_final.pth --output data/counting_models/_archive.pth.gz
-	mv data/counting_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
-	cp data/counting_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
-	cp data/counting_models/training.log runs/$(NAME)/ 2>/dev/null || true
-	cp data/counting_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
-	cp data/counting_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(COUNTING_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
-	cp data/counting_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(COUNTING_CONFIG)" > runs/$(NAME)/info.txt; }
-	@echo "Archived to runs/$(NAME)/"
+	mv python/data/counting_models/_archive.pth.gz python/runs/$(NAME)/model_final.pth.gz
+	cp python/data/counting_models/training_metrics.png python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/counting_models/training.log python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/counting_atlas.html python/runs/$(NAME)/atlas.html 2>/dev/null || true
+	cp python/data/counting_models/config.yaml python/runs/$(NAME)/ 2>/dev/null || cp python/$(COUNTING_CONFIG) python/runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp python/data/counting_models/info.txt python/runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(COUNTING_CONFIG)" > python/runs/$(NAME)/info.txt; }
+	@echo "Archived to python/runs/$(NAME)/"
 
 # Reading pipeline (three-phase foveal)
 READING_CONFIG ?= configs/reading.yaml
-CLEAN_READING_MODELS = find data/reading_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
-CLEAN_READING_RESULTS = find data/reading_results -type f ! -name .gitignore -delete 2>/dev/null; true
+CLEAN_READING_MODELS = find python/data/reading_models -type f ! -name .gitignore ! -name 'training_*.log' -delete 2>/dev/null; true
+CLEAN_READING_RESULTS = find python/data/reading_results -type f ! -name .gitignore -delete 2>/dev/null; true
 
 train-reading:
 	@$(CLEAN_READING_MODELS)
@@ -270,22 +270,22 @@ test-reading:
 	$(RUN) test_reading --model_dir data/reading_models --test_data_dir data/counting_test --output_dir data/reading_results --device $(DEVICE)
 
 reading-atlas:
-	@rm -f data/reading_atlas.html
+	@rm -f python/data/reading_atlas.html
 	$(RUN) reading_atlas --model_dir data/reading_models --test_data_dir data/counting_test --output data/reading_atlas.html --device $(DEVICE)
 
 archive-reading:
 ifndef NAME
 	$(error Usage: make archive-reading NAME=v1-reading-baseline)
 endif
-	@mkdir -p runs/$(NAME)
+	@mkdir -p python/runs/$(NAME)
 	$(RUN) compress_model --input data/reading_models/model_final.pth --output data/reading_models/_archive.pth.gz
-	mv data/reading_models/_archive.pth.gz runs/$(NAME)/model_final.pth.gz
-	cp data/reading_models/training_metrics.png runs/$(NAME)/ 2>/dev/null || true
-	cp data/reading_models/training.log runs/$(NAME)/ 2>/dev/null || true
-	cp data/reading_atlas.html runs/$(NAME)/atlas.html 2>/dev/null || true
-	cp data/reading_models/config.yaml runs/$(NAME)/ 2>/dev/null || cp $(READING_CONFIG) runs/$(NAME)/config.yaml 2>/dev/null || true
-	cp data/reading_models/info.txt runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(READING_CONFIG)" > runs/$(NAME)/info.txt; }
-	@echo "Archived to runs/$(NAME)/"
+	mv python/data/reading_models/_archive.pth.gz python/runs/$(NAME)/model_final.pth.gz
+	cp python/data/reading_models/training_metrics.png python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/reading_models/training.log python/runs/$(NAME)/ 2>/dev/null || true
+	cp python/data/reading_atlas.html python/runs/$(NAME)/atlas.html 2>/dev/null || true
+	cp python/data/reading_models/config.yaml python/runs/$(NAME)/ 2>/dev/null || cp python/$(READING_CONFIG) python/runs/$(NAME)/config.yaml 2>/dev/null || true
+	cp python/data/reading_models/info.txt python/runs/$(NAME)/ 2>/dev/null || { echo "git: $$(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')\ndate: $$(date -Iseconds)\nconfig: $(READING_CONFIG)" > python/runs/$(NAME)/info.txt; }
+	@echo "Archived to python/runs/$(NAME)/"
 
 test-unit:
 	docker compose exec $(SERVICE) pytest tests/ -v
