@@ -54,22 +54,21 @@ func NewGlimpseSensor(patchH, patchW int64, nScales, latentDim int) *GlimpseSens
 	}
 }
 
+// SubModules returns all child modules for recursive framework operations.
+func (g *GlimpseSensor) SubModules() []nn.Module {
+	return []nn.Module{g.conv1, g.conv2, g.conv3, g.glimpseFC, g.locationFC, g.combineFC}
+}
+
 // Parameters returns all learnable parameters.
 func (g *GlimpseSensor) Parameters() []*nn.Parameter {
-	var params []*nn.Parameter
-	params = append(params, g.conv1.Parameters()...)
-	params = append(params, g.conv2.Parameters()...)
-	params = append(params, g.conv3.Parameters()...)
-	params = append(params, g.glimpseFC.Parameters()...)
-	params = append(params, g.locationFC.Parameters()...)
-	params = append(params, g.combineFC.Parameters()...)
-	return params
+	return nn.CollectParameters(g)
 }
 
 // Forward extracts a patch at the given location, encodes it, and fuses with location.
-// image: [B, C, H, W], location: [B, 2] in [-1, 1].
+// inputs[0]: image [B, C, H, W], inputs[1]: location [B, 2] in [-1, 1].
 // Returns: [B, latentDim].
-func (g *GlimpseSensor) Forward(image, location *autograd.Variable) *autograd.Variable {
+func (g *GlimpseSensor) Forward(inputs ...*autograd.Variable) *autograd.Variable {
+	image, location := inputs[0], inputs[1]
 	imgShape := image.Data().Shape() // [B, C, H, W]
 	H, W := imgShape[2], imgShape[3]
 
@@ -112,9 +111,9 @@ func makeGrid(location *autograd.Variable, scale int, patchH, patchW, H, W int64
 	deltaH := float64(scale) * float64(patchH) / float64(H)
 	deltaW := float64(scale) * float64(patchW) / float64(W)
 
-	// Build centered grid (no gradient needed for the base grid).
-	gridY, _ := tensor.Linspace(-deltaH, deltaH, patchH)
-	gridX, _ := tensor.Linspace(-deltaW, deltaW, patchW)
+	// Build centered grid on target device (no gradient needed for the base grid).
+	gridY, _ := tensor.Linspace(-deltaH, deltaH, patchH, tensor.WithDevice(device))
+	gridX, _ := tensor.Linspace(-deltaW, deltaW, patchW, tensor.WithDevice(device))
 
 	// Meshgrid: expand gridX to [patchH, patchW], gridY to [patchH, patchW].
 	gx := gridX.Reshape([]int64{1, patchW}).Expand([]int64{patchH, patchW})
@@ -125,7 +124,7 @@ func makeGrid(location *autograd.Variable, scale int, patchH, patchW, H, W int64
 	gyFlat := gy.Reshape([]int64{patchH * patchW})
 	stacked := tensor.Stack([]*tensor.Tensor{gxFlat, gyFlat}, 1) // [patchH*patchW, 2]
 	baseGrid := stacked.Reshape([]int64{1, patchH, patchW, 2})
-	baseGrid = baseGrid.Expand([]int64{B, patchH, patchW, 2}).ToDevice(device)
+	baseGrid = baseGrid.Expand([]int64{B, patchH, patchW, 2})
 	gridVar := autograd.NewVariable(baseGrid, false)
 
 	// Shift by location: location is [B, 2], reshape to [B, 1, 1, 2] for broadcast.
@@ -133,5 +132,3 @@ func makeGrid(location *autograd.Variable, scale int, patchH, patchW, H, W int64
 	return gridVar.Add(locReshaped)
 }
 
-// SetTraining sets training mode (currently no-op, but matches Module interface).
-func (g *GlimpseSensor) SetTraining(training bool) {}

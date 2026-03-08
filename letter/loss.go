@@ -48,8 +48,7 @@ func AttentionGuideLoss(image *autograd.Variable, locations []*autograd.Variable
 	}
 
 	// Separable blur: convolve rows then columns.
-	gaussT, _ := tensor.FromFloat32(kernelData, []int64{int64(k)})
-	gaussT = gaussT.ToDevice(imgData.Device())
+	gaussT, _ := tensor.FromFloat32(kernelData, []int64{int64(k)}, tensor.WithDevice(imgData.Device()))
 	kernelH := gaussT.Reshape([]int64{1, 1, int64(k), 1})
 	kernelW := gaussT.Reshape([]int64{1, 1, 1, int64(k)})
 

@@ -80,9 +80,9 @@ func main() {
 	fmt.Println()
 
 	err = letter.TrainLetter(cfg, ds, func(s letter.EpochStats) {
-		fmt.Printf("Epoch %3d  Ltr %.4f  Case %.4f  Recon %.4f  Guide %.4f  Div %.4f  Hit %.0f%%  lr %.6f  [%s  ETA %s]\n",
-			s.Epoch+1, s.LetterLoss, s.CaseLoss, s.ReconLoss, s.GuideLoss, s.DivLoss,
-			s.HitRate*100, s.LR, s.Duration, s.ETA)
+		fmt.Printf("Epoch %3d  Ltr %.4f(%.0f%%)  Case %.4f(%.0f%%)  Recon %.4f  Guide %.4f  Div %.4f  Hit %.0f%%  lr %.6f  [%s  ETA %s]\n",
+			s.Epoch+1, s.LetterLoss, s.LetterAcc*100, s.CaseLoss, s.CaseAcc*100,
+			s.ReconLoss, s.GuideLoss, s.DivLoss, s.HitRate*100, s.LR, s.Duration, s.ETA)
 	})
 	if err != nil {
 		log.Fatalf("training: %v", err)

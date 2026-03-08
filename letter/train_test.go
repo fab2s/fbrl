@@ -21,8 +21,8 @@ func TestTrainLetterSmoke(t *testing.T) {
 	var stats []EpochStats
 	err = TrainLetter(cfg, ds, func(s EpochStats) {
 		stats = append(stats, s)
-		t.Logf("epoch %d: letter=%.4f case=%.4f recon=%.4f guide=%.4f div=%.4f total=%.4f hit=%.0f%% lr=%.6f [%s ETA %s]",
-			s.Epoch, s.LetterLoss, s.CaseLoss, s.ReconLoss, s.GuideLoss, s.DivLoss,
+		t.Logf("epoch %d: letter=%.4f(%.0f%%) case=%.4f(%.0f%%) recon=%.4f guide=%.4f div=%.4f total=%.4f hit=%.0f%% lr=%.6f [%s ETA %s]",
+			s.Epoch, s.LetterLoss, s.LetterAcc*100, s.CaseLoss, s.CaseAcc*100, s.ReconLoss, s.GuideLoss, s.DivLoss,
 			s.TotalLoss, s.HitRate*100, s.LR, s.Duration, s.ETA)
 	})
 	if err != nil {

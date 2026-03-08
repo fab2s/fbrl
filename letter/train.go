@@ -4,8 +4,7 @@ package letter
 import (
 	"fmt"
 	"os"
-	"runtime"
-	"time"
+"time"
 
 	"github.com/fab2s/goDl/autograd"
 	"github.com/fab2s/goDl/graph"
@@ -79,6 +78,8 @@ type EpochStats struct {
 	Epoch      int
 	LetterLoss float64
 	CaseLoss   float64
+	LetterAcc  float64
+	CaseAcc    float64
 	ReconLoss  float64
 	GuideLoss  float64
 	DivLoss    float64
@@ -91,7 +92,7 @@ type EpochStats struct {
 
 // metricTags lists all metric tags recorded per batch.
 var metricTags = []string{
-	"letter_ce", "case_ce", "recon_mse", "guide", "diversity", "total", "hit_rate", "lr",
+	"letter_ce", "case_ce", "letter_acc", "case_acc", "recon_mse", "guide", "diversity", "total", "hit_rate", "lr",
 }
 
 // TrainLetter runs the full training loop for the letter model.
@@ -155,6 +156,28 @@ func TrainLetter(cfg LetterConfig, ds *LetterDataset, onEpoch func(EpochStats)) 
 
 			result := m.Forward(imgVar, caseVar)
 
+			// Debug: print fixation locations and guide diagnostics on first batch.
+			if epoch == 0 && nBatches == 0 {
+				fmt.Printf("DEBUG: %d traces (locations)\n", len(result.Locations))
+				for i, loc := range result.Locations {
+					d := loc.Data()
+					fmt.Printf("  loc[%d]: shape=%v device=%v", i, d.Shape(), d.Device())
+					vals, err := d.ToCPU().Float32Data()
+					fmt.Printf(" len=%d err=%v", len(vals), err)
+					if len(vals) >= 2 {
+						fmt.Printf(" sample[0]=(%.4f, %.4f)", vals[0], vals[1])
+					}
+					fmt.Println()
+				}
+				// Check clean image stats.
+				cleanData, _ := batch.Clean.ToCPU().Float32Data()
+				sum := float32(0)
+				for _, v := range cleanData {
+					sum += v
+				}
+				fmt.Printf("DEBUG: clean image mean=%.6f (nPixels=%d)\n", float64(sum)/float64(len(cleanData)), len(cleanData))
+			}
+
 			// Classification losses.
 			letterTarget := autograd.NewVariable(batch.LetterIdx, false)
 			caseTarget := autograd.NewVariable(caseIdxFromFloat(batch.CaseLabel), false)
@@ -188,10 +211,14 @@ func TrainLetter(cfg LetterConfig, ds *LetterDataset, onEpoch func(EpochStats)) 
 
 			// Record metrics into graph observation layer.
 			hr, _ := FixationHitRate(cleanVar, result.Locations, 0.3)
+			letterAcc := accuracy(result.LetterLogits.Data(), batch.LetterIdx)
+			caseAcc := accuracy(result.CaseLogits.Data(), caseIdxFromFloat(batch.CaseLabel))
 			m.Graph.Record("letter_ce", letterLoss.Item())
 			m.Graph.Record("case_ce", caseLoss.Item())
+			m.Graph.Record("letter_acc", letterAcc)
+			m.Graph.Record("case_acc", caseAcc)
 			m.Graph.Record("recon_mse", reconLoss.Item())
-			m.Graph.Record("guide", guideLoss.Item())
+			m.Graph.Record("guide", guideLoss.Item()*cfg.GuideWeight)
 			m.Graph.Record("diversity", divLoss.Item())
 			m.Graph.Record("total", total.Item())
 			m.Graph.Record("hit_rate", hr)
@@ -228,6 +255,8 @@ func TrainLetter(cfg LetterConfig, ds *LetterDataset, onEpoch func(EpochStats)) 
 			Epoch:      epoch,
 			LetterLoss: m.Graph.Trend("letter_ce").Latest(),
 			CaseLoss:   m.Graph.Trend("case_ce").Latest(),
+			LetterAcc:  m.Graph.Trend("letter_acc").Latest(),
+			CaseAcc:    m.Graph.Trend("case_acc").Latest(),
 			ReconLoss:  m.Graph.Trend("recon_mse").Latest(),
 			GuideLoss:  m.Graph.Trend("guide").Latest(),
 			DivLoss:    m.Graph.Trend("diversity").Latest(),
@@ -244,16 +273,12 @@ func TrainLetter(cfg LetterConfig, ds *LetterDataset, onEpoch func(EpochStats)) 
 
 		// Append to streaming log.
 		if logFile != nil {
-			fmt.Fprintf(logFile, "epoch %3d  ltr=%.4f  case=%.4f  recon=%.4f  guide=%.4f  div=%.4f  hit=%.0f%%  lr=%.6f  [%s  ETA %s]\n",
-				epoch+1, stats.LetterLoss, stats.CaseLoss, stats.ReconLoss,
-				stats.GuideLoss, stats.DivLoss, stats.HitRate*100, stats.LR,
+			fmt.Fprintf(logFile, "epoch %3d  ltr=%.4f(%.0f%%)  case=%.4f(%.0f%%)  recon=%.4f  guide=%.4f  div=%.4f  hit=%.0f%%  lr=%.6f  [%s  ETA %s]\n",
+				epoch+1, stats.LetterLoss, stats.LetterAcc*100, stats.CaseLoss, stats.CaseAcc*100,
+				stats.ReconLoss, stats.GuideLoss, stats.DivLoss, stats.HitRate*100, stats.LR,
 				stats.Duration, stats.ETA)
 			logFile.Sync()
 		}
-
-		// Force GC to reclaim CGo-backed tensor memory that Go's GC
-		// can't see (libtorch allocations behind tiny Go pointers).
-		runtime.GC()
 
 		// Checkpoint.
 		if cfg.SaveDir != "" && cfg.CheckpointInterval > 0 && (epoch+1)%cfg.CheckpointInterval == 0 {
@@ -286,15 +311,24 @@ func TrainLetter(cfg LetterConfig, ds *LetterDataset, onEpoch func(EpochStats)) 
 }
 
 // caseIdxFromFloat converts [B, 1] float case labels to [B] int64 indices.
+// Stays on-device — no CPU round-trip.
 func caseIdxFromFloat(caseLabel *tensor.Tensor) *tensor.Tensor {
-	data, _ := caseLabel.Float32Data()
-	B := caseLabel.Shape()[0]
-	idx := make([]int64, B)
-	for i := range B {
-		if data[i] > 0.5 {
-			idx[i] = 1
+	return caseLabel.Squeeze(1).GTScalar(0.5).ToInt64()
+}
+
+// accuracy computes classification accuracy from logits and target indices.
+// logits: [B, C], targets: [B] int64. Returns fraction correct in [0, 1].
+func accuracy(logits, targets *tensor.Tensor) float64 {
+	preds, _ := logits.ToCPU().ArgMax(1, false).Int64Data()
+	truth, _ := targets.ToCPU().Int64Data()
+	if len(preds) == 0 {
+		return 0
+	}
+	correct := 0
+	for i, p := range preds {
+		if p == truth[i] {
+			correct++
 		}
 	}
-	t, _ := tensor.FromInt64(idx, []int64{B})
-	return t
+	return float64(correct) / float64(len(preds))
 }

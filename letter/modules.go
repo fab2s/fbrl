@@ -7,14 +7,6 @@ import (
 	"github.com/fab2s/goDl/tensor"
 )
 
-// Sensor extracts a feature vector from an image at a given fixation location.
-// Both GlimpseSensor (foveal, sharp) and future PeripheralSensor (wide, blurred)
-// implement this interface — the controller doesn't care which one it's using.
-type Sensor interface {
-	Forward(image, location *autograd.Variable) *autograd.Variable
-	Parameters() []*nn.Parameter
-}
-
 // Identity passes the input through unchanged. Used as the graph entry
 // point to tag the image before routing it to downstream modules.
 type Identity struct{}
@@ -56,7 +48,7 @@ func (h *H0Init) Parameters() []*nn.Parameter { return []*nn.Parameter{h.H0} }
 // graph auto-resets before each forward and the loop collects the
 // fixation trajectory automatically.
 type AttentionStep struct {
-	sensor  Sensor
+	sensor  nn.Module
 	gru     *nn.GRUCell
 	locHead *nn.Linear
 
@@ -65,7 +57,7 @@ type AttentionStep struct {
 }
 
 // NewAttentionStep creates an attention step with the given sensor and dimensions.
-func NewAttentionStep(sensor Sensor, hiddenDim int64) *AttentionStep {
+func NewAttentionStep(sensor nn.Module, hiddenDim int64) *AttentionStep {
 	gru, err := nn.NewGRUCell(hiddenDim, hiddenDim)
 	if err != nil {
 		panic(err)
@@ -77,16 +69,13 @@ func NewAttentionStep(sensor Sensor, hiddenDim int64) *AttentionStep {
 	}
 }
 
-// Reset initializes location to zeros on the same device as the model parameters.
+// Reset initializes location to zeros on the given device.
 // Called automatically by the graph before each forward pass (implements nn.Resettable).
-func (s *AttentionStep) Reset(batchSize int64) {
-	locT, err := tensor.Zeros([]int64{batchSize, 2})
+func (s *AttentionStep) Reset(batchSize int64, device tensor.Device) {
+	locT, err := tensor.Zeros([]int64{batchSize, 2}, tensor.WithDevice(device))
 	if err != nil {
 		panic(err)
 	}
-	// Match device of model parameters (set via Graph.SetDevice).
-	dev := s.locHead.Weight.Data().Device()
-	locT = locT.ToDevice(dev)
 	s.location = autograd.NewVariable(locT, false)
 }
 
@@ -113,15 +102,15 @@ func (s *AttentionStep) ForwardNamed(h *autograd.Variable, refs map[string]*auto
 // RefNames declares the expected Using refs for build-time validation.
 func (s *AttentionStep) RefNames() []string { return []string{"image"} }
 
-func (s *AttentionStep) Parameters() []*nn.Parameter {
-	var params []*nn.Parameter
-	params = append(params, s.sensor.Parameters()...)
-	params = append(params, s.gru.Parameters()...)
-	params = append(params, s.locHead.Parameters()...)
-	return params
+// SubModules returns all child modules for recursive framework operations.
+func (s *AttentionStep) SubModules() []nn.Module {
+	return []nn.Module{s.sensor, s.gru, s.locHead}
 }
 
-func (s *AttentionStep) SetTraining(training bool) {}
+// Parameters returns all learnable parameters.
+func (s *AttentionStep) Parameters() []*nn.Parameter {
+	return nn.CollectParameters(s)
+}
 
 // Detach breaks the gradient chain on the carried location state.
 // Called by Graph.DetachState via the nn.Detachable interface.

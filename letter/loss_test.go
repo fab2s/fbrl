@@ -223,6 +223,91 @@ func TestFixationHitRate(t *testing.T) {
 	}
 }
 
+func TestAttentionGuideLossRealistic(t *testing.T) {
+	// Simulate a centered letter: white square in center of 128x128 black image.
+	B := int64(2)
+	H, W := int64(128), int64(128)
+
+	imgData := make([]float32, B*H*W)
+	for b := range B {
+		for y := int64(40); y < 88; y++ {
+			for x := int64(44); x < 84; x++ {
+				imgData[b*H*W+y*W+x] = 1.0
+			}
+		}
+	}
+	imgT, _ := tensor.FromFloat32(imgData, []int64{B, 1, H, W})
+	image := autograd.NewVariable(imgT, false)
+
+	// Sample at center (0,0), off-center (0.5,0.5), and edge (-0.9,-0.9).
+	locs := makeLocations(B, [][]float32{
+		{0, 0},      // initial (skipped)
+		{0, 0},      // center — should be high guide value
+		{0.5, 0.5},  // off-center — still within blur radius
+		{-0.9, -0.9}, // corner — should be low
+	})
+
+	loss := AttentionGuideLoss(image, locs, 0.16)
+	if err := loss.Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	lossVal := loss.Item()
+	t.Logf("realistic guide loss (128x128, centered square): %f", lossVal)
+
+	// With a centered bright region and fixations mostly at center,
+	// guide loss should be substantially negative (not near zero).
+	if lossVal > -0.05 {
+		t.Errorf("guide loss too weak: %f (expected < -0.05)", lossVal)
+	}
+
+	// Also check individual sample values by sampling guide field.
+	blurSigma := 0.16 * 128.0
+	k := int(4*blurSigma) | 1
+	halfK := k / 2
+	kernelData := make([]float32, k)
+	kSum := float64(0)
+	for i := range k {
+		x := float64(i - halfK)
+		v := math.Exp(-x * x / (2 * blurSigma * blurSigma))
+		kernelData[i] = float32(v)
+		kSum += v
+	}
+	for i := range k {
+		kernelData[i] /= float32(kSum)
+	}
+	gaussT, _ := tensor.FromFloat32(kernelData, []int64{int64(k)})
+	kernelH := gaussT.Reshape([]int64{1, 1, int64(k), 1})
+	kernelW := gaussT.Reshape([]int64{1, 1, 1, int64(k)})
+
+	guide := imgT.Conv2d(kernelH, nil, []int64{1, 1}, []int64{int64(halfK), 0}, []int64{1, 1}, 1)
+	guide = guide.Conv2d(kernelW, nil, []int64{1, 1}, []int64{0, int64(halfK)}, []int64{1, 1}, 1)
+
+	// Sample guide at center
+	centerGrid, _ := tensor.FromFloat32([]float32{0, 0, 0, 0}, []int64{B, 1, 1, 2})
+	centerSample := guide.GridSample(centerGrid, 0, 0, true)
+	centerVals, _ := centerSample.Float32Data()
+	t.Logf("guide field at center (0,0): %v", centerVals)
+
+	// Sample at corner
+	cornerGrid, _ := tensor.FromFloat32([]float32{-0.9, -0.9, -0.9, -0.9}, []int64{B, 1, 1, 2})
+	cornerSample := guide.GridSample(cornerGrid, 0, 0, true)
+	cornerVals, _ := cornerSample.Float32Data()
+	t.Logf("guide field at corner (-0.9,-0.9): %v", cornerVals)
+
+	// Center should have much higher guide value than corner.
+	if len(centerVals) > 0 && len(cornerVals) > 0 {
+		if centerVals[0] <= cornerVals[0] {
+			t.Errorf("center guide (%f) should exceed corner guide (%f)", centerVals[0], cornerVals[0])
+		}
+		t.Logf("center/corner ratio: %.1f", centerVals[0]/cornerVals[0])
+	}
+
+	// Also check: what does hit rate show on this image?
+	hr, mi := FixationHitRate(image, locs, 0.3)
+	t.Logf("hit rate: %.0f%%, mean intensity: %.4f", hr*100, mi)
+}
+
 func TestRecodeLoss(t *testing.T) {
 	B := int64(2)
 	aT, _ := tensor.RandN([]int64{B, 1, 8, 8})

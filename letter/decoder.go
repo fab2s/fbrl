@@ -112,20 +112,14 @@ func batchNorm2d(x *autograd.Variable, bn *nn.BatchNorm) *autograd.Variable {
 	return back.Permute(0, 3, 1, 2) // [B, C, H, W]
 }
 
-// Parameters returns all learnable parameters.
-func (d *VisualDecoder) Parameters() []*nn.Parameter {
-	var params []*nn.Parameter
-	params = append(params, d.fc.Parameters()...)
-	params = append(params, d.deconv1.Parameters()...)
-	params = append(params, d.bn1.Parameters()...)
-	params = append(params, d.deconv2.Parameters()...)
-	params = append(params, d.bn2.Parameters()...)
-	params = append(params, d.conv.Parameters()...)
-	return params
+// SubModules returns all child modules for recursive framework operations.
+// This enables Graph.SetDevice to reach BatchNorm's running statistics,
+// and Graph.SetTraining to propagate to bn1/bn2 automatically.
+func (d *VisualDecoder) SubModules() []nn.Module {
+	return []nn.Module{d.fc, d.deconv1, d.bn1, d.deconv2, d.bn2, d.conv}
 }
 
-// SetTraining propagates training mode to batch norm layers.
-func (d *VisualDecoder) SetTraining(training bool) {
-	d.bn1.SetTraining(training)
-	d.bn2.SetTraining(training)
+// Parameters returns all learnable parameters.
+func (d *VisualDecoder) Parameters() []*nn.Parameter {
+	return nn.CollectParameters(d)
 }

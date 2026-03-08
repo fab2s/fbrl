@@ -2,6 +2,7 @@
 package letter
 
 import (
+	"fmt"
 	"math/rand/v2"
 
 	"github.com/fab2s/goDl/tensor"
@@ -135,9 +136,25 @@ func (l *LetterLoader) Next() bool {
 	// Move to target device if set.
 	if l.device != nil {
 		imgBatch = imgBatch.ToDevice(*l.device)
+		if err := imgBatch.Err(); err != nil {
+			l.err = fmt.Errorf("loader: move image to device: %w", err)
+			return false
+		}
 		cleanBatch = cleanBatch.ToDevice(*l.device)
+		if err := cleanBatch.Err(); err != nil {
+			l.err = fmt.Errorf("loader: move clean to device: %w", err)
+			return false
+		}
 		letterIdx = letterIdx.ToDevice(*l.device)
+		if err := letterIdx.Err(); err != nil {
+			l.err = fmt.Errorf("loader: move letterIdx to device: %w", err)
+			return false
+		}
 		caseLabel = caseLabel.ToDevice(*l.device)
+		if err := caseLabel.Err(); err != nil {
+			l.err = fmt.Errorf("loader: move caseLabel to device: %w", err)
+			return false
+		}
 	}
 
 	l.cur = &LetterBatch{

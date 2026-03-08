@@ -24,6 +24,8 @@ type metaEntry struct {
 
 // LoadLetterDataset loads a dataset from a Python-generated data directory.
 // The directory must contain metadata.json and referenced PNG files.
+// Image paths in metadata.json are resolved relative to dir first; if not
+// found, they are tried as-is (for paths relative to a parent working dir).
 func LoadLetterDataset(dir string) (*LetterDataset, error) {
 	metaPath := filepath.Join(dir, "metadata.json")
 	f, err := os.Open(metaPath)
@@ -43,10 +45,7 @@ func LoadLetterDataset(dir string) (*LetterDataset, error) {
 	samples := make([]LetterSample, 0, len(meta))
 	for _, entry := range meta {
 		// Load noisy image.
-		imgPath := entry.Image
-		if !filepath.IsAbs(imgPath) {
-			imgPath = filepath.Join(dir, imgPath)
-		}
+		imgPath := resolveDataPath(dir, entry.Image)
 		imgT, err := loadGrayPNG(imgPath)
 		if err != nil {
 			return nil, fmt.Errorf("load image %s: %w", imgPath, err)
@@ -55,10 +54,7 @@ func LoadLetterDataset(dir string) (*LetterDataset, error) {
 		// Load or cache clean image.
 		var cleanT *tensor.Tensor
 		if entry.Clean != "" {
-			cleanPath := entry.Clean
-			if !filepath.IsAbs(cleanPath) {
-				cleanPath = filepath.Join(dir, cleanPath)
-			}
+			cleanPath := resolveDataPath(dir, entry.Clean)
 			if cached, ok := cleanCache[cleanPath]; ok {
 				cleanT = cached
 			} else {
@@ -140,4 +136,34 @@ func loadGrayPNG(path string) (*tensor.Tensor, error) {
 	}
 
 	return tensor.FromFloat32(data, []int64{1, int64(h), int64(w)})
+}
+
+// resolveDataPath resolves a relative image path from metadata.json.
+// Tries dir-relative first (images alongside metadata.json), then walks
+// up parent directories to find where the relative path resolves.
+// This handles metadata paths like "data/letters/img.png" when metadata.json
+// is inside data/letters/ (paths relative to a grandparent like python/).
+func resolveDataPath(dir, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	// Try joining with dir directly.
+	joined := filepath.Join(dir, path)
+	if _, err := os.Stat(joined); err == nil {
+		return joined
+	}
+	// Walk up parent directories.
+	parent := dir
+	for range 5 {
+		parent = filepath.Dir(parent)
+		if parent == "." || parent == "/" {
+			break
+		}
+		candidate := filepath.Join(parent, path)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	// Last resort: return dir-relative (will produce a clear error).
+	return joined
 }
