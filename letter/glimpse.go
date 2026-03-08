@@ -1,5 +1,5 @@
 // Foveal attention sensor — extracts multi-resolution patches via grid_sample.
-package model
+package letter
 
 import (
 	"github.com/fab2s/goDl/autograd"
@@ -74,9 +74,10 @@ func (g *GlimpseSensor) Forward(image, location *autograd.Variable) *autograd.Va
 	H, W := imgShape[2], imgShape[3]
 
 	// Extract one patch per scale via differentiable grid_sample.
+	dev := image.Data().Device()
 	var patches []*autograd.Variable
 	for _, scale := range g.scales {
-		grid := makeGrid(location, scale, g.patchH, g.patchW, H, W)
+		grid := makeGrid(location, scale, g.patchH, g.patchW, H, W, dev)
 		patch := image.GridSample(grid, 0, 0, true) // bilinear, zeros, align_corners
 		patches = append(patches, patch)
 	}
@@ -92,7 +93,7 @@ func (g *GlimpseSensor) Forward(image, location *autograd.Variable) *autograd.Va
 	feat = g.conv2.Forward(feat).ReLU()
 	feat = g.conv3.Forward(feat).ReLU()
 	feat = feat.AdaptiveAvgPool2d([]int64{1, 1})
-	feat = feat.Reshape([]int64{feat.Data().Shape()[0], 128})
+	feat = feat.Flatten(1)
 
 	// Fuse "what I see" + "where I am"
 	glimpseFeat := g.glimpseFC.Forward(feat).ReLU()
@@ -103,7 +104,7 @@ func (g *GlimpseSensor) Forward(image, location *autograd.Variable) *autograd.Va
 
 // makeGrid builds a sampling grid for grid_sample, centered on location.
 // Returns a Variable of shape [B, patchH, patchW, 2].
-func makeGrid(location *autograd.Variable, scale int, patchH, patchW, H, W int64) *autograd.Variable {
+func makeGrid(location *autograd.Variable, scale int, patchH, patchW, H, W int64, device tensor.Device) *autograd.Variable {
 	locData := location.Data()
 	B := locData.Shape()[0]
 
@@ -124,11 +125,11 @@ func makeGrid(location *autograd.Variable, scale int, patchH, patchW, H, W int64
 	gyFlat := gy.Reshape([]int64{patchH * patchW})
 	stacked := tensor.Stack([]*tensor.Tensor{gxFlat, gyFlat}, 1) // [patchH*patchW, 2]
 	baseGrid := stacked.Reshape([]int64{1, patchH, patchW, 2})
-	baseGrid = baseGrid.Expand([]int64{B, patchH, patchW, 2})
+	baseGrid = baseGrid.Expand([]int64{B, patchH, patchW, 2}).ToDevice(device)
 	gridVar := autograd.NewVariable(baseGrid, false)
 
 	// Shift by location: location is [B, 2], reshape to [B, 1, 1, 2] for broadcast.
-	locReshaped := location.Reshape([]int64{B, 1, 1, 2})
+	locReshaped := location.Unsqueeze(1).Unsqueeze(2)
 	return gridVar.Add(locReshaped)
 }
 

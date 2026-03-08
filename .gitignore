@@ -1,2 +1,10 @@
 .*/
 __pycache__/
+docker-compose.override.yml
+
+# Training/eval outputs (keep dirs, ignore contents)
+**/training/*
+!**/training/.gitkeep
+**/results/*
+!**/results/.gitkeep
+

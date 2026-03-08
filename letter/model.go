@@ -8,7 +8,7 @@
 //
 // Fixation locations are collected automatically via graph Traces.
 // All outputs are accessible via Tagged after Forward.
-package model
+package letter
 
 import (
 	"github.com/fab2s/goDl/autograd"
@@ -61,7 +61,10 @@ func NewLetterModel(nClasses, nGlimpses, patchSize, nScales, latentDim int) *Let
 // img: [B, 1, 128, 128] input image.
 // caseLabel: [B, 1] float — 0.0=upper, 1.0=lower (conditions the decoder).
 func (m *LetterModel) Forward(img, caseLabel *autograd.Variable) *LetterResult {
-	m.Graph.Forward(img, caseLabel)
+	out := m.Graph.Forward(img, caseLabel)
+	if err := out.Err(); err != nil {
+		panic("forward error: " + err.Error())
+	}
 
 	return &LetterResult{
 		LetterLogits: m.Graph.Tagged("heads_0"),

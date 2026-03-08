@@ -1,4 +1,4 @@
-package loss
+package letter
 
 import (
 	"math"
@@ -7,12 +7,6 @@ import (
 	"github.com/fab2s/goDl/autograd"
 	"github.com/fab2s/goDl/tensor"
 )
-
-// scalar extracts the float32 value from a scalar-like Variable.
-func scalar(v *autograd.Variable) float32 {
-	data, _ := v.Data().Float32Data()
-	return data[0]
-}
 
 func makeLocations(B int64, coords [][]float32) []*autograd.Variable {
 	locs := make([]*autograd.Variable, len(coords))
@@ -46,7 +40,7 @@ func TestAttentionGuideLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lossVal := scalar(loss)
+	lossVal := loss.Item()
 	// Loss should be negative (guide values are positive, then negated).
 	if lossVal >= 0 {
 		t.Errorf("expected negative loss, got %f", lossVal)
@@ -88,7 +82,7 @@ func TestAttentionGuideLossTooFewLocations(t *testing.T) {
 
 	locs := makeLocations(B, [][]float32{{0, 0}})
 	loss := AttentionGuideLoss(image, locs, 0.16)
-	val := scalar(loss)
+	val := loss.Item()
 	if val != 0 {
 		t.Errorf("expected 0 loss for single location, got %f", val)
 	}
@@ -121,8 +115,8 @@ func TestFixationDiversityLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	vc := scalar(lossClustered)
-	vs := scalar(lossSpread)
+	vc := lossClustered.Item()
+	vs := lossSpread.Item()
 
 	if vc <= vs {
 		t.Errorf("clustered loss (%f) should exceed spread loss (%f)", vc, vs)
@@ -149,16 +143,16 @@ func TestFixationDiversityLossVy(t *testing.T) {
 		{0, 0.1},
 	})
 
-	hLossVy1 := scalar(FixationDiversityLoss(hLocs, 0.1, 1.0))
-	hLossVy3 := scalar(FixationDiversityLoss(hLocs, 0.1, 3.0))
+	hLossVy1 := FixationDiversityLoss(hLocs, 0.1, 1.0).Item()
+	hLossVy3 := FixationDiversityLoss(hLocs, 0.1, 3.0).Item()
 
 	// Horizontal separation: vy has no effect on x-only distance.
-	if math.Abs(float64(hLossVy1-hLossVy3)) > 1e-6 {
+	if math.Abs(hLossVy1-hLossVy3) > 1e-6 {
 		t.Errorf("horizontal: vy should not matter, got vy=1: %f, vy=3: %f", hLossVy1, hLossVy3)
 	}
 
-	vLossVy1 := scalar(FixationDiversityLoss(vLocs, 0.1, 1.0))
-	vLossVy3 := scalar(FixationDiversityLoss(vLocs, 0.1, 3.0))
+	vLossVy1 := FixationDiversityLoss(vLocs, 0.1, 1.0).Item()
+	vLossVy3 := FixationDiversityLoss(vLocs, 0.1, 3.0).Item()
 
 	// Vertical separation: higher vy → larger effective distance → less repulsion.
 	if vLossVy3 >= vLossVy1 {
@@ -192,7 +186,7 @@ func TestFixationDiversityLossTooFew(t *testing.T) {
 	B := int64(2)
 	locs := makeLocations(B, [][]float32{{0, 0}, {0.5, 0.5}})
 	loss := FixationDiversityLoss(locs, 0.1, 1.0)
-	val := scalar(loss)
+	val := loss.Item()
 	if val != 0 {
 		t.Errorf("expected 0 loss for single learned location, got %f", val)
 	}
@@ -242,7 +236,7 @@ func TestRecodeLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	val := scalar(loss)
+	val := loss.Item()
 	if val < 0 {
 		t.Errorf("MSE should be non-negative, got %f", val)
 	}
@@ -254,8 +248,8 @@ func TestRecodeLoss(t *testing.T) {
 
 	// Same tensor should give zero loss.
 	same := RecodeLoss(autograd.NewVariable(aT, false), autograd.NewVariable(aT, false))
-	sameVal := scalar(same)
-	if math.Abs(float64(sameVal)) > 1e-6 {
+	sameVal := same.Item()
+	if math.Abs(sameVal) > 1e-6 {
 		t.Errorf("expected ~0 loss for identical tensors, got %f", sameVal)
 	}
 }

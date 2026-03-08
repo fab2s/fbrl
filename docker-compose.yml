@@ -1,17 +1,14 @@
 services:
-  # Python implementation (original)
-  python:
+  dev:
     build:
-      context: python
-    entrypoint: ["tail", "-f", "/dev/null"]
+      context: .
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - GOPATH=/tmp/go
+      - GOCACHE=/tmp/go-cache
     volumes:
-      - ./python/data:/app/data
-      - ./python/runs:/app/runs
-      - ./python/vision_training.py:/app/vision_training.py
-      - ./python/fbrl:/app/fbrl
-      - ./python/configs:/app/configs
-      - ./python/tests:/app/tests
-      - ./python/pytest.ini:/app/pytest.ini
+      - .:/workspace
+    working_dir: /workspace
     deploy:
       resources:
         reservations:

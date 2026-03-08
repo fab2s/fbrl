@@ -1,0 +1,21 @@
+services:
+  # Python implementation (original)
+  python:
+    build:
+      context: .
+    entrypoint: ["tail", "-f", "/dev/null"]
+    volumes:
+      - ./data:/app/data
+      - ./runs:/app/runs
+      - ./vision_training.py:/app/vision_training.py
+      - ./fbrl:/app/fbrl
+      - ./configs:/app/configs
+      - ./tests:/app/tests
+      - ./pytest.ini:/app/pytest.ini
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

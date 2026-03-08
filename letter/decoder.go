@@ -1,5 +1,5 @@
 // VisualDecoder — reconstructs images from latent vectors.
-package model
+package letter
 
 import (
 	"github.com/fab2s/goDl/autograd"
@@ -103,13 +103,13 @@ func (d *VisualDecoder) decode(z *autograd.Variable) *autograd.Variable {
 func batchNorm2d(x *autograd.Variable, bn *nn.BatchNorm) *autograd.Variable {
 	shape := x.Data().Shape() // [B, C, H, W]
 	B, C, H, W := shape[0], shape[1], shape[2], shape[3]
-	// Transpose to [B, H, W, C] then reshape to [B*H*W, C]
-	xt := x.Transpose(1, 2).Transpose(2, 3) // [B, H, W, C]
+	// Permute to [B, H, W, C] then reshape to [B*H*W, C]
+	xt := x.Permute(0, 2, 3, 1) // [B, H, W, C]
 	flat := xt.Reshape([]int64{B * H * W, C})
 	normed := bn.Forward(flat)
-	// Reshape back to [B, H, W, C] then transpose to [B, C, H, W]
+	// Reshape back to [B, H, W, C] then permute to [B, C, H, W]
 	back := normed.Reshape([]int64{B, H, W, C})
-	return back.Transpose(2, 3).Transpose(1, 2) // [B, C, H, W]
+	return back.Permute(0, 3, 1, 2) // [B, C, H, W]
 }
 
 // Parameters returns all learnable parameters.

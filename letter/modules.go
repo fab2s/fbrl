@@ -1,11 +1,19 @@
 // Graph-compatible modules for the attention pipeline.
-package model
+package letter
 
 import (
 	"github.com/fab2s/goDl/autograd"
 	"github.com/fab2s/goDl/nn"
 	"github.com/fab2s/goDl/tensor"
 )
+
+// Sensor extracts a feature vector from an image at a given fixation location.
+// Both GlimpseSensor (foveal, sharp) and future PeripheralSensor (wide, blurred)
+// implement this interface — the controller doesn't care which one it's using.
+type Sensor interface {
+	Forward(image, location *autograd.Variable) *autograd.Variable
+	Parameters() []*nn.Parameter
+}
 
 // Identity passes the input through unchanged. Used as the graph entry
 // point to tag the image before routing it to downstream modules.
@@ -69,13 +77,16 @@ func NewAttentionStep(sensor Sensor, hiddenDim int64) *AttentionStep {
 	}
 }
 
-// Reset initializes location to zeros. Called automatically by the
-// graph before each forward pass (implements nn.Resettable).
+// Reset initializes location to zeros on the same device as the model parameters.
+// Called automatically by the graph before each forward pass (implements nn.Resettable).
 func (s *AttentionStep) Reset(batchSize int64) {
 	locT, err := tensor.Zeros([]int64{batchSize, 2})
 	if err != nil {
 		panic(err)
 	}
+	// Match device of model parameters (set via Graph.SetDevice).
+	dev := s.locHead.Weight.Data().Device()
+	locT = locT.ToDevice(dev)
 	s.location = autograd.NewVariable(locT, false)
 }
 
@@ -111,6 +122,14 @@ func (s *AttentionStep) Parameters() []*nn.Parameter {
 }
 
 func (s *AttentionStep) SetTraining(training bool) {}
+
+// Detach breaks the gradient chain on the carried location state.
+// Called by Graph.DetachState via the nn.Detachable interface.
+func (s *AttentionStep) Detach() {
+	if s.location != nil {
+		s.location = autograd.NewVariable(s.location.Data(), false)
+	}
+}
 
 // LatentHead projects the final hidden state to the latent space.
 type LatentHead struct {
