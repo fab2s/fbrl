@@ -1,7 +1,6 @@
 package letter
 
 import (
-	"runtime/debug"
 	"testing"
 
 	"github.com/fab2s/goDl/autograd"
@@ -57,11 +56,7 @@ func TestCUDAAfterSetDevice(t *testing.T) {
 		t.Skip("CUDA not available")
 	}
 
-	// Completely disable GC to test if finalizers cause the crash.
-	debug.SetGCPercent(-1)
-	defer debug.SetGCPercent(100)
-
-	// Exact reproduction of TrainLetter flow.
+	// Regression test for goDl CUDA use-after-free (fixed in d0cbf66).
 	ds, err := NewSyntheticDataset(64)
 	if err != nil {
 		t.Fatal(err)

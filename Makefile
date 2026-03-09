@@ -7,7 +7,7 @@
 COMPOSE = docker compose
 RUN     = $(COMPOSE) run --rm dev
 
-.PHONY: image test test-cpu test-race shell vet clean
+.PHONY: image test test-cpu test-race shell vet clean kill
 
 # Build the Docker image (reuses goDl's Dockerfile)
 image:
@@ -38,6 +38,10 @@ vet: image
 SAVE ?= letter/training
 train-letter: image
 	$(RUN) bash -c "go build -tags cuda -o /tmp/letter-train ./letter/cmd && /tmp/letter-train $(if $(DATA),--data $(DATA)) $(if $(SYNTHETIC),--synthetic $(SYNTHETIC)) --save $(SAVE) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(LR),--lr $(LR)) $(if $(PROFILE),--profile)"
+
+# Kill running training containers
+kill:
+	@docker ps -q --filter "name=fbrl-dev-run" | xargs -r docker stop
 
 # Clean up containers and volumes
 clean:

@@ -4,7 +4,7 @@ package letter
 import (
 	"fmt"
 	"os"
-"time"
+	"time"
 
 	"github.com/fab2s/goDl/autograd"
 	"github.com/fab2s/goDl/graph"
@@ -148,6 +148,7 @@ func TrainLetter(cfg LetterConfig, ds *LetterDataset, onEpoch func(EpochStats)) 
 		nBatches := 0
 
 		for loader.Next() {
+			scope := autograd.NewScope()
 			batch := loader.Batch()
 
 			imgVar := autograd.NewVariable(batch.Image, false)
@@ -155,28 +156,6 @@ func TrainLetter(cfg LetterConfig, ds *LetterDataset, onEpoch func(EpochStats)) 
 			cleanVar := autograd.NewVariable(batch.Clean, false)
 
 			result := m.Forward(imgVar, caseVar)
-
-			// Debug: print fixation locations and guide diagnostics on first batch.
-			if epoch == 0 && nBatches == 0 {
-				fmt.Printf("DEBUG: %d traces (locations)\n", len(result.Locations))
-				for i, loc := range result.Locations {
-					d := loc.Data()
-					fmt.Printf("  loc[%d]: shape=%v device=%v", i, d.Shape(), d.Device())
-					vals, err := d.ToCPU().Float32Data()
-					fmt.Printf(" len=%d err=%v", len(vals), err)
-					if len(vals) >= 2 {
-						fmt.Printf(" sample[0]=(%.4f, %.4f)", vals[0], vals[1])
-					}
-					fmt.Println()
-				}
-				// Check clean image stats.
-				cleanData, _ := batch.Clean.ToCPU().Float32Data()
-				sum := float32(0)
-				for _, v := range cleanData {
-					sum += v
-				}
-				fmt.Printf("DEBUG: clean image mean=%.6f (nPixels=%d)\n", float64(sum)/float64(len(cleanData)), len(cleanData))
-			}
 
 			// Classification losses.
 			letterTarget := autograd.NewVariable(batch.LetterIdx, false)
@@ -228,6 +207,7 @@ func TrainLetter(cfg LetterConfig, ds *LetterDataset, onEpoch func(EpochStats)) 
 				m.Graph.CollectTimings()
 			}
 
+			scope.Close()
 			nBatches++
 		}
 
