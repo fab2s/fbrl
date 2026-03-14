@@ -4,7 +4,9 @@ Can a recurrent foveal attention mechanism learn to "read" text by placing strat
 
 This project trains a vision model that sees the world through a tiny patch window (12x12 pixels — under 1% of the image). A GRU-based controller decides where to look next, building up a latent representation over a sequence of glimpses. The model must learn *where* to look, not just *what* it sees.
 
-This is an active research project, built from scratch by someone new to deep learning and Python — driven by curiosity about whether a biologically-inspired attention mechanism can develop reading strategies that mirror human eye movements.
+This is an active research project — driven by curiosity about whether a biologically-inspired attention mechanism can develop reading strategies that mirror human eye movements.
+
+The project has two implementations: the original **Python/PyTorch** prototype that proved the architecture (100% letter accuracy), and a **Rust/floDl** port that serves as the first real-world benchmark for [floDl](https://github.com/fab2s/flodl), a graph-native deep learning framework built on libtorch. A Go implementation (goDl) validated the graph API but [hit fundamental GC/VRAM limits](docs/go-retrospective.md).
 
 ### Why "Feedback Recursive Loop"?
 
@@ -72,6 +74,19 @@ The architecture is converging toward a **semantic OCR** system:
 
 ## Quick Start
 
+### Rust/floDl (active development)
+
+```bash
+# All commands run inside Docker (libtorch is container-only)
+make build                           # Build Docker image
+make test                            # Run unit tests (CUDA)
+make train-letter DATA=../python/data/letters EPOCHS=100
+make train-letter SYNTHETIC=64 EPOCHS=2  # Quick smoke test
+make shell                           # Interactive container shell
+```
+
+### Python/PyTorch (reference implementation)
+
 ```bash
 make build up                        # Build and start Docker container
 
@@ -85,62 +100,60 @@ make atlas DEVICE=cuda               # Interactive attention atlas (HTML)
 make generate-words && make generate-words-test
 make train-words DEVICE=cuda TRANSFER=data/letter_models/model_final.pth
 
-# Motor pipeline
-make generate-trajectories
-make train-motor DEVICE=cuda
-
 # Override any config value
 make train-words EPOCHS=300 BATCH=64 DEVICE=cuda
 ```
 
-Training parameters live in YAML configs (`python/configs/*.yaml`). CLI args override config values. Always `make restart` after code changes.
+Training parameters live in YAML configs (`python/configs/*.yaml`). CLI args override config values.
 
 See [docs/usage.md](docs/usage.md) for full CLI reference and Makefile documentation.
 
 ## Requirements
 
-**PyTorch 2.5.1** — Pinned because training runs on a Pascal-era GPU (GTX 1080 Ti). PyTorch 2.6+ dropped CUDA support for Pascal. If you have an Ampere or newer card, feel free to bump the version in the Dockerfile.
+**Rust/floDl**: Docker with NVIDIA GPU. libtorch 2.10 (cu126) is installed in the container — no local torch installation needed. Rust stable toolchain (also in-container).
 
-If anyone feels like donating a modern GPU to the cause, the latent space would be eternally grateful.
+**Python**: PyTorch 2.5.1 — pinned for Pascal-era GPU compatibility (GTX 1080 Ti). PyTorch 2.6+ dropped CUDA support for Pascal.
 
 ## Project Structure
 
 ```
 fbrl/
-+-- python/                      # Python implementation (original)
-|   +-- Dockerfile               #   Python + PyTorch container
-|   +-- vision_training.py       #   CLI entry point
-|   +-- configs/                 #   YAML training configs (one per model type)
-|   +-- fbrl/                    #   Core package
-|   |   +-- config.py            #     ExperimentConfig dataclass
-|   |   +-- model.py             #     All model classes + encode_scan_read()
-|   |   +-- data.py              #     Dataset classes + data generation
-|   |   +-- losses.py            #     All loss functions
-|   |   +-- train.py             #     Letter + bigram training loops
-|   |   +-- _word_train.py       #     Word training loop
-|   |   +-- _motor_train.py      #     Motor training loop
-|   |   +-- motor.py             #     MotorTraceDecoder, soft_render, trajectory extraction
-|   |   +-- evaluate.py          #     Test + atlas generation (letter, bigram)
-|   |   +-- _word_eval.py        #     Word evaluation + atlas
-|   |   +-- _motor_eval.py       #     Motor evaluation + atlas
-|   |   +-- training_utils.py    #     Shared infra (checkpoints, logging, transfer, plotting)
-|   +-- tests/                   #   Unit tests (pytest, CPU-only)
-|   +-- data/                    #   Generated data (Docker volume, not in git)
++-- letter/                      # Rust/floDl implementation (active)
+|   +-- src/
+|   |   +-- lib.rs               #   Crate root
+|   |   +-- main.rs              #   CLI entry point
+|   |   +-- letter/
+|   |       +-- model.rs         #     LetterModel (FlowBuilder graph)
+|   |       +-- glimpse.rs       #     GlimpseSensor (multi-scale grid_sample + CNN)
+|   |       +-- decoder.rs       #     VisualDecoder (deconv reconstruction)
+|   |       +-- modules.rs       #     Identity, H0Init, AttentionStep
+|   |       +-- train.rs         #     Training loop, config, profiling
+|   |       +-- loss.rs          #     Batched attention/diversity losses
+|   |       +-- data.rs          #     PNG loader, batched data pipeline
+|   |       +-- synthetic.rs     #     Random images for smoke tests
+|   +-- Cargo.toml               #   Depends on flodl (path = "../rdl/flodl")
++-- python/                      # Python/PyTorch implementation (reference)
+|   +-- fbrl/                    #   Core package (model, losses, training)
+|   +-- configs/                 #   YAML training configs
 |   +-- runs/                    #   Archived models + results
++-- goDl/                        # Go/goDl implementation (archived)
 +-- docs/                        # Research documentation (shared)
-|   +-- letters.md               #   Single-letter experiments in depth
-|   +-- bigrams.md               #   Bigram experiments in depth
-|   +-- words.md                 #   Word experiments in depth
-|   +-- motor.md                 #   Motor trace experiments in depth
-|   +-- usage.md                 #   CLI reference + Makefile docs
+|   +-- letters.md               #   Single-letter experiments
+|   +-- words.md                 #   Word experiments
+|   +-- motor.md                 #   Motor trace experiments
+|   +-- trajectory-thesis.md     #   Trajectory-native framework vision
+|   +-- go-retrospective.md      #   Go→Rust pivot: lessons and results
 |   +-- glossary.md              #   Deep learning terms and concepts
-+-- thoughts/                    # Research notes
-+-- docker-compose.yml           # Services: python (+ go, later)
-+-- Makefile                     # Orchestrates both implementations
++-- thoughts/                    # Research notes and hypotheses
++-- Dockerfile                   # nvidia/cuda + libtorch + Rust
++-- docker-compose.yml           # Dev container
++-- Makefile                     # Build, test, train (all Docker-based)
 ```
 
 ## Reference
 
+- [Trajectory Thesis](docs/trajectory-thesis.md) — Why neural networks are trajectory generators, and why the tools matter
+- [Go Retrospective](docs/go-retrospective.md) — Lessons from Go/goDl, what we did differently in Rust
 - [Research Hypotheses](thoughts/hypotheses.md) — Core intuitions and testable predictions
 - [Word Read Phase](thoughts/word_read_phase.md) — Why free read fixations degenerate and how to fix it
 - [Glossary](docs/glossary.md) — Deep learning terms as they appear in this project

@@ -162,19 +162,19 @@ see. At 98% GPU utilization the model spilled 1.4GB over the card's 6GB budget.
 
 The architecture was validated. The runtime was not.
 
-### rDl — the Rust rewrite
+### floDl — the Rust rewrite
 
 Rust solves the memory problem at the language level. The Drop trait gives
 deterministic cleanup: when a Tensor goes out of scope, its VRAM is freed
 immediately. No GC, no finalizers, no 4-phase workarounds. The borrow checker
 prevents use-after-free at compile time. FFI to libtorch is zero-cost.
 
-rDl ports the graph engine, observation system, and flow constructs from goDl.
+floDl ports the graph engine, observation system, and flow constructs from goDl.
 What changes is everything underneath:
 
 - **libtorch's native autograd** handles tensor operations and backward passes.
   The same kernels, the same accumulation order, the same numerical behavior
-  as PyTorch. A model expressed in rDl and an equivalent model in PyTorch
+  as PyTorch. A model expressed in floDl and an equivalent model in PyTorch
   produce the same numbers, no framework discrepancy to debug.
 - **RAII replaces garbage collection.** One-phase cleanup instead of four.
   Tensor drop frees VRAM. Variable drop frees its gradient function and saved
@@ -184,7 +184,7 @@ What changes is everything underneath:
   that make FBRL expressible carry over unchanged.
 
 The split is clean: libtorch owns the math (and must match PyTorch exactly),
-rDl owns the trajectory orchestration (and has no equivalent in PyTorch).
+floDl owns the trajectory orchestration (and has no equivalent in PyTorch).
 
 ---
 

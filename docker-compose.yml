@@ -2,19 +2,26 @@ services:
   dev:
     build:
       context: .
-      dockerfile: Dockerfile.cpu
     image: fbrl-dev
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - CARGO_HOME=/tmp/cargo
+      - LD_LIBRARY_PATH=/usr/local/libtorch/lib
     volumes:
       - .:/workspace
-      # Mount flodl source for path dependency
-      - ../rdl:/rdl
-      # Cache Rust build artifacts and registry between runs
-      - cargo-registry:/root/.cargo/registry
-      - cargo-git:/root/.cargo/git
-    working_dir: /workspace
+      # Persist Rust caches across --rm runs (bind mount, not named volume)
+      - ./.cargo-cache/registry:/tmp/cargo/registry
+      - ./.cargo-cache/git:/tmp/cargo/git
+    working_dir: /workspace/letter
+    ports:
+      - "3000:3000"
+    runtime: nvidia
     stdin_open: true
     tty: true
-
-volumes:
-  cargo-registry:
-  cargo-git:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

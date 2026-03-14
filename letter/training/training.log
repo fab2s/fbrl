@@ -1,0 +1,7 @@
+# fbrl letter training
+# epochs=5  batch=32  lr=0.0010→0.0000  glimpses=8
+epoch   1  ltr=3.2738(5%)  case=0.7071(53%)  recon=0.0260  guide=-0.9795  div=0.1185  hit=27%  lr=0.001000  [52.886925117s]  ETA 228.86451149s
+epoch   2  ltr=2.5716(19%)  case=0.6601(62%)  recon=0.0176  guide=-1.1130  div=0.1299  hit=30%  lr=0.000905  [52.200230813s]  ETA 170.704224586s
+epoch   3  ltr=2.6837(15%)  case=0.6775(58%)  recon=0.0182  guide=-0.9578  div=0.1246  hit=25%  lr=0.000655  [51.907572999s]  ETA 111.921241601s
+epoch   4  ltr=2.1830(27%)  case=0.6113(68%)  recon=0.0164  guide=-1.1759  div=0.1637  hit=34%  lr=0.000345  [52.738485577s]  ETA 56.245431542s
+epoch   5  ltr=1.6513(48%)  case=0.4815(76%)  recon=0.0142  guide=-1.2219  div=0.1400  hit=37%  lr=0.000095  [52.663760873s]  ETA 0ns

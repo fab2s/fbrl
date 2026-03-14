@@ -3,6 +3,7 @@ services:
   python:
     build:
       context: .
+    user: "${UID:-1000}:${GID:-1000}"
     entrypoint: ["tail", "-f", "/dev/null"]
     volumes:
       - ./data:/app/data

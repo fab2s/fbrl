@@ -1,0 +1,37 @@
+# fbrl CPU-only image — for CI and development without GPU.
+# Same base as flodl: Ubuntu 24.04 + Rust + libtorch CPU.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    curl \
+    unzip \
+    ca-certificates \
+    git \
+    gcc \
+    g++ \
+    pkg-config \
+    graphviz \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- Rust (installed globally so non-root user can access) ---
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
+    && chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
+# --- libtorch (CPU-only) ---
+ARG LIBTORCH_VERSION=2.10.0
+RUN wget -q https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip \
+    && unzip -q libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip -d /usr/local \
+    && rm libtorch-shared-with-deps-${LIBTORCH_VERSION}+cpu.zip
+
+ENV LIBTORCH_PATH="/usr/local/libtorch"
+ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib"
+ENV LIBRARY_PATH="${LIBTORCH_PATH}/lib"
+
+WORKDIR /workspace

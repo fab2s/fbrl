@@ -1,0 +1,18 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu
+    image: fbrl-dev-cpu
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      - CARGO_HOME=/tmp/cargo
+    volumes:
+      - .:/workspace
+      # Mount flodl source for path dependency
+      - ../../rdl:/rdl
+    working_dir: /workspace
+    ports:
+      - "3000:3000"
+    stdin_open: true
+    tty: true
