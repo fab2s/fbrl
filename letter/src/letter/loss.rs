@@ -2,7 +2,7 @@
 //! diversity, reconstruction, and non-differentiable diagnostics.
 
 use flodl::autograd::{Variable, grid_sample};
-use flodl::nn::mse_loss;
+use flodl::nn::{mse_loss, gaussian_blur_2d};
 use flodl::tensor::{Result, Tensor, TensorOptions};
 
 /// Guides fixation locations toward image content.
@@ -25,43 +25,13 @@ pub fn attention_guide_loss(
         return Ok(Variable::new(z, false));
     }
 
-    let img_data = image.data();
-    let shape = img_data.shape(); // [B, C, H, W]
+    let shape = image.shape(); // [B, C, H, W]
     let h = shape[2];
     let w = shape[3];
-    let device = img_data.device();
-
     let blur_sigma = blur_sigma_ratio * (h.min(w) as f64);
 
-    // Build 1D Gaussian kernel.
-    let k = (4.0 * blur_sigma) as usize | 1;
-    let half_k = k / 2;
-    let mut kernel_data = vec![0.0f32; k];
-    let mut k_sum = 0.0f64;
-    for (i, val) in kernel_data.iter_mut().enumerate() {
-        let x = (i as f64) - (half_k as f64);
-        let v = (-x * x / (2.0 * blur_sigma * blur_sigma)).exp();
-        *val = v as f32;
-        k_sum += v;
-    }
-    for val in &mut kernel_data {
-        *val /= k_sum as f32;
-    }
-
-    // Separable blur: convolve rows then columns.
-    let gauss = Tensor::from_f32(&kernel_data, &[k as i64], device)?;
-    let kernel_h = gauss.reshape(&[1, 1, k as i64, 1])?;
-    let kernel_w = gauss.reshape(&[1, 1, 1, k as i64])?;
-
-    let guide = img_data.conv2d(
-        &kernel_h, None,
-        [1, 1], [half_k as i64, 0], [1, 1], 1,
-    )?;
-    let guide = guide.conv2d(
-        &kernel_w, None,
-        [1, 1], [0, half_k as i64], [1, 1], 1,
-    )?;
-    let guide_var = Variable::new(guide, false);
+    // Blur image to create a soft "scent field" (no gradients through the guide).
+    let guide_var = gaussian_blur_2d(&Variable::new(image.data(), false), blur_sigma)?;
 
     // Stack all fixations and sample in one grid_sample call.
     let stacked = Variable::stack(locations, 1)?;     // [B, T, 2]
@@ -140,7 +110,7 @@ pub fn fixation_hit_rate(
     let mut n = 0usize;
 
     for loc in locations {
-        let grid = loc.data().unsqueeze(1)?.unsqueeze(2)?;
+        let grid = loc.data().unsqueeze_many(&[1, 2])?;
         let sampled = img_data.grid_sample(&grid, 0, 0, true)?;
         let vals = sampled.to_f32_vec()?;
         for v in &vals {

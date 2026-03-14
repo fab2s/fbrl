@@ -13,6 +13,7 @@
 
 mod data;
 mod decoder;
+pub mod eval;
 mod glimpse;
 mod loss;
 mod model;

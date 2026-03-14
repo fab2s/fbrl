@@ -84,6 +84,7 @@ dependencies = [
 name = "flodl"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "flodl-sys",
  "indexmap",
 ]

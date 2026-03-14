@@ -98,7 +98,7 @@ pub fn load_letter_dataset(dir: &str) -> Result<LetterDataset> {
 }
 
 /// Load a grayscale PNG as a [1, H, W] float32 tensor in [0, 1].
-fn load_gray_png(path: &Path) -> Result<Tensor> {
+pub fn load_gray_png(path: &Path) -> Result<Tensor> {
     let file = fs::File::open(path)
         .map_err(|e| TensorError::new(&format!("open {}: {e}", path.display())))?;
     let decoder = png::Decoder::new(file);
@@ -267,7 +267,7 @@ impl<'a> LetterLoader<'a> {
         // Stack into batch tensors.
         let img_batch = Tensor::stack(&images, 0)?;
         let clean_batch = Tensor::stack(&cleans, 0)?;
-        let letter_idx = Tensor::from_i64(&letter_data, &[b as i64])?;
+        let letter_idx = Tensor::from_i64(&letter_data, &[b as i64], Device::CPU)?;
         let case_label = Tensor::from_f32(&case_data, &[b as i64, 1], Device::CPU)?;
 
         // Move to target device if set.

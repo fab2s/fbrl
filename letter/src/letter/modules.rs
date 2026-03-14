@@ -5,10 +5,9 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use flodl::autograd::Variable;
-use flodl::nn::{Identity, Linear, Module, NamedInputModule, Parameter};
+use flodl::nn::{Linear, Module, NamedInputModule, Parameter};
 use flodl::tensor::{Result, Tensor, TensorOptions};
 
-// Re-export Identity so model.rs etc. can use it from here.
 pub use flodl::Identity;
 
 /// H0Init ignores its input and returns the learned initial hidden state

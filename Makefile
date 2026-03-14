@@ -5,7 +5,7 @@
 # The override mounts the parent so flodl path dependency resolves.
 
 COMPOSE = docker compose
-RUN     = $(COMPOSE) run --rm dev
+RUN     = $(COMPOSE) run --rm --service-ports dev
 FEATURES ?= cuda
 
 .PHONY: image build test test-release check clippy doc shell train-letter clean kill
@@ -42,12 +42,24 @@ clippy: image
 doc: image
 	$(RUN) cargo doc --features $(FEATURES) --no-deps --document-private-items
 
+# Force flodl recompilation (touch shim to bust cargo cache, then build)
+rebuild: image
+	@touch ../rdl/flodl-sys/shim.cpp 2>/dev/null || true
+	$(RUN) cargo build --release --features $(FEATURES)
+
 # Train letter model
 # Usage: make train-letter SYNTHETIC=64 EPOCHS=2
-#        make train-letter DATA=path/to/data EPOCHS=100 SAVE=runs/v1
+#        make train-letter DATA=path/to/data EPOCHS=100 SAVE=runs/v1 MONITOR=3000
 SAVE ?= training
-train-letter: image
-	$(RUN) cargo run --release --features $(FEATURES) -- $(if $(DATA),--data $(DATA)) $(if $(SYNTHETIC),--synthetic $(SYNTHETIC)) $(if $(SAVE),--save $(SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(LR),--lr $(LR)) $(if $(PROFILE),--profile)
+train-letter: rebuild
+	$(RUN) cargo run --release --features $(FEATURES) -- $(if $(DATA),--data $(DATA)) $(if $(SYNTHETIC),--synthetic $(SYNTHETIC)) $(if $(SAVE),--save $(SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(LR),--lr $(LR)) $(if $(MONITOR),--monitor $(MONITOR))
+
+# Evaluate trained model
+# Usage: make eval-letter RUN=runs/v1 TEST=../python/data/letter_test
+eval-letter: rebuild
+	$(RUN) cargo run --release --features $(FEATURES) -- --eval $(RUN_DIR) --test-data $(TEST) $(if $(EVAL_SAVE),--save $(EVAL_SAVE))
+RUN_DIR ?= runs/v1
+TEST ?= ../python/data/letter_test
 
 # Interactive shell
 shell: image

@@ -149,17 +149,14 @@ fn make_grid(
     let grid_y = Tensor::linspace(-delta_h, delta_h, patch_h, opts)?;
     let grid_x = Tensor::linspace(-delta_w, delta_w, patch_w, opts)?;
 
-    // Meshgrid via expand.
-    let gx = grid_x.reshape(&[1, patch_w])?.expand(&[patch_h, patch_w])?;
-    let gy = grid_y.reshape(&[patch_h, 1])?.expand(&[patch_h, patch_w])?;
-
-    // Stack [gx, gy] -> [patch_h, patch_w, 2].
-    let base_grid = Tensor::stack(&[&gx, &gy], 2)?; // [patch_h, patch_w, 2]
+    // Meshgrid + stack → [patch_h, patch_w, 2] as (x, y).
+    let grids = Tensor::meshgrid(&[&grid_y, &grid_x])?;
+    let base_grid = Tensor::stack(&[&grids[1], &grids[0]], 2)?;
     let base_grid = base_grid.unsqueeze(0)?;          // [1, patch_h, patch_w, 2]
     let base_grid = base_grid.expand(&[b, patch_h, patch_w, 2])?;
     let grid_var = Variable::new(base_grid, false);
 
     // Shift by location: [B, 2] -> [B, 1, 1, 2] for broadcast.
-    let loc_reshaped = location.unsqueeze(1)?.unsqueeze(2)?;
+    let loc_reshaped = location.unsqueeze_many(&[1, 2])?;
     grid_var.add(&loc_reshaped)
 }

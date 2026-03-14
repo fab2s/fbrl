@@ -289,20 +289,9 @@ pub fn train_letter(
             cb(&stats);
         }
 
-        // Push to live monitor.
+        // Push to live monitor (graph already has all metrics from record_scalar + flush).
         if let Some(ref mut m) = monitor {
-            m.log(epoch, epoch_dur, &[
-                ("letter_ce", stats.letter_loss),
-                ("letter_acc", stats.letter_acc),
-                ("case_ce", stats.case_loss),
-                ("case_acc", stats.case_acc),
-                ("recon_mse", stats.recon_loss),
-                ("guide", stats.guide_loss),
-                ("diversity", stats.div_loss),
-                ("total", stats.total_loss),
-                ("hit_rate", stats.hit_rate),
-                ("lr", stats.lr),
-            ]);
+            m.log(epoch, epoch_dur, &model.graph);
         }
 
         // Append to streaming log.
@@ -323,7 +312,7 @@ pub fn train_letter(
         if !cfg.save_dir.is_empty() && cfg.checkpoint_interval > 0
             && (epoch + 1) % cfg.checkpoint_interval == 0
         {
-            let path = format!("{}/checkpoint_epoch_{}.fdl", cfg.save_dir, epoch + 1);
+            let path = format!("{}/checkpoint_epoch_{}.fdl.gz", cfg.save_dir, epoch + 1);
             flodl::save_parameters_file(&path, &params)?;
         }
     }
@@ -336,7 +325,7 @@ pub fn train_letter(
     // Save final outputs.
     if !cfg.save_dir.is_empty() {
         let params = model.parameters();
-        flodl::save_parameters_file(&format!("{}/model_final.fdl", cfg.save_dir), &params)?;
+        flodl::save_parameters_file(&format!("{}/model_final.fdl.gz", cfg.save_dir), &params)?;
         if let Err(e) = model.graph.plot_html(
             &format!("{}/training.html", cfg.save_dir), metric_tags,
         ) {
@@ -360,10 +349,10 @@ pub fn train_letter(
                 "recon_mse": model.graph.trend("recon_mse").latest(),
             },
             "files": {
-                "model": "model_final.fdl",
+                "model": "model_final.fdl.gz",
                 "dashboard": if cfg.monitor_port.is_some() { "dashboard.html" } else { "" },
             },
-            "parent": null::<String>,
+            "parent": null,
         });
         if let Err(e) = fs::write(
             format!("{}/manifest.json", cfg.save_dir),
