@@ -75,6 +75,8 @@ pub struct ScanStep {
     scan_xs: Vec<Parameter>,
     location: RefCell<Option<Variable>>,
     step_idx: RefCell<usize>,
+    content_head: Option<Linear>,
+    content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
 }
 
 impl ScanStep {
@@ -82,6 +84,8 @@ impl ScanStep {
         sensor: impl Module + 'static,
         controller: Rc<Controller>,
         n_scan: usize,
+        content_head: Option<Linear>,
+        content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
     ) -> Result<Self> {
         let mut scan_xs = Vec::with_capacity(n_scan);
         for i in 0..n_scan {
@@ -103,6 +107,8 @@ impl ScanStep {
             scan_xs,
             location: RefCell::new(None),
             step_idx: RefCell::new(0),
+            content_head,
+            content_logits,
         })
     }
 
@@ -125,6 +131,12 @@ impl ScanStep {
 
             self.controller.gru.forward_step(&glimpse, Some(h))?
         };
+
+        // Content head: predict whether scan location has ink.
+        if let (Some(head), Some(buf)) = (&self.content_head, &self.content_logits) {
+            let logit = head.forward(&new_h)?; // [B, 1]
+            buf.borrow_mut().push(logit);
+        }
 
         // Location: learnable x, free y from loc_head
         let raw = self.controller.loc_head.forward(&new_h)?.tanh_act()?;
@@ -156,6 +168,9 @@ impl Module for ScanStep {
     fn reset(&self) {
         *self.location.borrow_mut() = None;
         *self.step_idx.borrow_mut() = 0;
+        if let Some(buf) = &self.content_logits {
+            buf.borrow_mut().clear();
+        }
     }
 
     fn detach_state(&self) {
@@ -166,10 +181,13 @@ impl Module for ScanStep {
     }
 
     fn parameters(&self) -> Vec<Parameter> {
-        // Only scan-specific params: sensor + scan_xs.
+        // Only scan-specific params: sensor + scan_xs + content_head.
         // GRU and loc_head are shared — collected by AttentionStep.
         let mut params = self.sensor.parameters();
         params.extend(self.scan_xs.iter().cloned());
+        if let Some(head) = &self.content_head {
+            params.extend(head.parameters());
+        }
         params
     }
 

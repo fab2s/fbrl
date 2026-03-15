@@ -4,9 +4,7 @@ Can a recurrent foveal attention mechanism learn to "read" text by placing strat
 
 This project trains a vision model that sees the world through a tiny patch window (12x12 pixels — under 1% of the image). A GRU-based controller decides where to look next, building up a latent representation over a sequence of glimpses. The model must learn *where* to look, not just *what* it sees.
 
-This is an active research project — driven by curiosity about whether a biologically-inspired attention mechanism can develop reading strategies that mirror human eye movements.
-
-The project has two implementations: the original **Python/PyTorch** prototype that proved the architecture (100% letter accuracy), and a **Rust/floDl** port that serves as the first real-world benchmark for [floDl](https://github.com/fab2s/flodl), a graph-native deep learning framework built on libtorch. A Go implementation (goDl) validated the graph API but [hit fundamental GC/VRAM limits](docs/go-retrospective.md).
+Built on [floDl](https://github.com/fab2s/flodl), a graph-native deep learning framework in Rust. The architecture was first proven in a [Python/PyTorch prototype](python/README.md) that reached 100% accuracy on letters, bigrams, and words — then ported to Rust as floDl's first real-world benchmark. A Go attempt (goDl) validated the graph API but [hit fundamental GC/VRAM limits](docs/go-retrospective.md).
 
 ### Why "Feedback Recursive Loop"?
 
@@ -22,7 +20,7 @@ Modeled on how your eye actually works. The **fovea** is a tiny spot at the cent
 |---------|-------|
 | Fovea (tiny sharp patch) | `GlimpseSensor` — 12x12 pixel window |
 | Peripheral vision | Nothing — even more constrained than biology |
-| Saccades (eye movements) | `AttentionController` — GRU decides next (x,y) fixation |
+| Saccades (eye movements) | `Controller` — GRU decides next (x,y) fixation |
 | Brain integrating fixations | GRU hidden state accumulating information |
 | Conscious perception | Latent vector — the final representation |
 
@@ -30,7 +28,7 @@ A standard CNN sees the entire image at once. Foveal attention forces the model 
 
 ## Research Lines
 
-The project has four experiment tracks, each building on discoveries from the previous:
+Four experiment tracks, each building on discoveries from the previous:
 
 ### [Single Letters](docs/letters.md) — the foundation
 
@@ -46,7 +44,7 @@ Two letters on 128x128. Achieved 98-99% accuracy but revealed a fundamental trut
 
 ### [Motor Traces](docs/motor.md) — learning to write
 
-Read-Write-Render-Re-Read: the encoder produces a latent, a motor decoder writes a pen trajectory, a renderer draws it, the encoder re-reads it. If the re-read matches the original, the motor has learned to write. Currently training v3 from scratch with void repulsion and an enhanced loss stack (latent matching, render matching, centerline trajectories).
+Read-Write-Render-Re-Read: the encoder produces a latent, a motor decoder writes a pen trajectory, a renderer draws it, the encoder re-reads it. If the re-read matches the original, the motor has learned to write.
 
 ## Key Discoveries
 
@@ -62,91 +60,79 @@ These insights emerged iteratively — each shaped the next experiment.
 
 **Canvas scale determines reading strategy** — The geometry of the task must make cheating impossible. No amount of loss engineering can force sequential reading if the foveal window can see enough from center. ([details](docs/bigrams.md#the-canvas-scale-finding))
 
-## What's Next
+## Architecture
 
-The architecture is converging toward a **semantic OCR** system:
+The Rust implementation lives in `letter/` and is built on floDl's `FlowBuilder` graph engine.
 
-- **Interleaved words v2**: retry with void repulsion reads, now validated on single letters
-- **Multi-font words**: generalization across visual styles
-- **Semantic layer**: learn letter transition probabilities and word-level priors. The cross-attention readout already produces per-position representations — a small model on their concatenation could learn "is this a real word?" as an auxiliary loss. Visual ambiguity resolved by language structure, the way human reading works.
-- **Variable-length words**: mixed lengths with language model priors. Does the model skip predictable letters and spend more glimpses on rare words?
-- **Meta-attention**: hierarchical saccade planning — a coarse controller finds word boundaries, deploys the fine letter-reader within each region
+```
+Input: image [B, 1, 128, 128] + case_label [B, 1]
+  |
+  H0Init (learnable initial hidden state)
+  |
+  ScanStep (1x) -- wide patch (12x18), learnable x, free y
+  |                 shared Controller (GRU + loc_head)
+  |
+  AttentionStep (6x) -- fine patch (12x12), free (x,y)
+  |                      same shared Controller
+  |
+  +-> letterHead (Linear -> 26 classes)
+  +-> caseHead   (Linear -> 2 classes)
+  +-> VisualDecoder (deconv reconstruction -> [B, 1, 128, 128])
+```
+
+Key modules: `GlimpseSensor` (grid_sample + CNN), `Controller` (shared GRU + location head via `Rc`), `VisualDecoder` (transposed convolutions + BatchNorm).
 
 ## Quick Start
 
-### Rust/floDl (active development)
+All commands run inside Docker — libtorch and Rust toolchain are container-only.
 
 ```bash
-# All commands run inside Docker (libtorch is container-only)
-make build                           # Build Docker image
-make test                            # Run unit tests (CUDA)
-make train-letter DATA=../python/data/letters EPOCHS=100
-make train-letter SYNTHETIC=64 EPOCHS=2  # Quick smoke test
-make shell                           # Interactive container shell
+make build                                              # Build Docker image
+make test                                               # Run unit tests (CUDA)
+make train-letter DATA=../python/data/letters MONITOR=3000  # Train with live dashboard
+make train-letter SYNTHETIC=64 EPOCHS=2                 # Quick smoke test
+make eval-letter RUN_DIR=runs/v1                        # Evaluate a trained model
+make shell                                              # Interactive container shell
 ```
 
-### Python/PyTorch (reference implementation)
-
-```bash
-make build up                        # Build and start Docker container
-
-# Single-letter pipeline
-make generate && make generate-test  # Training + test data
-make train DEVICE=cuda               # Train (configs/letter.yaml)
-make test DEVICE=cuda                # Evaluate
-make atlas DEVICE=cuda               # Interactive attention atlas (HTML)
-
-# Word pipeline
-make generate-words && make generate-words-test
-make train-words DEVICE=cuda TRANSFER=data/letter_models/model_final.pth
-
-# Override any config value
-make train-words EPOCHS=300 BATCH=64 DEVICE=cuda
-```
-
-Training parameters live in YAML configs (`python/configs/*.yaml`). CLI args override config values.
-
-See [docs/usage.md](docs/usage.md) for full CLI reference and Makefile documentation.
+The live monitor dashboard is served at `localhost:3000` during training.
 
 ## Requirements
 
-**Rust/floDl**: Docker with NVIDIA GPU. libtorch 2.10 (cu126) is installed in the container — no local torch installation needed. Rust stable toolchain (also in-container).
+Docker with NVIDIA GPU runtime. The container includes libtorch 2.10 (cu126) and the Rust toolchain — nothing to install on the host.
 
-**Python**: PyTorch 2.5.1 — pinned for Pascal-era GPU compatibility (GTX 1080 Ti). PyTorch 2.6+ dropped CUDA support for Pascal.
+All results achieved on a single **GTX 1060 6GB** (Pascal, 2016). floDl works out of the box on Pascal-era hardware via libtorch — no version pinning required. The Python/PyTorch prototype needed PyTorch 2.5.1 specifically because 2.6+ dropped Pascal CUDA support.
 
 ## Project Structure
 
 ```
 fbrl/
 +-- letter/                      # Rust/floDl implementation (active)
-|   +-- src/
-|   |   +-- lib.rs               #   Crate root
-|   |   +-- main.rs              #   CLI entry point
-|   |   +-- letter/
-|   |       +-- model.rs         #     LetterModel (FlowBuilder graph)
-|   |       +-- glimpse.rs       #     GlimpseSensor (multi-scale grid_sample + CNN)
-|   |       +-- decoder.rs       #     VisualDecoder (deconv reconstruction)
-|   |       +-- modules.rs       #     Identity, H0Init, AttentionStep
-|   |       +-- train.rs         #     Training loop, config, profiling
-|   |       +-- loss.rs          #     Batched attention/diversity losses
-|   |       +-- data.rs          #     PNG loader, batched data pipeline
-|   |       +-- synthetic.rs     #     Random images for smoke tests
-|   +-- Cargo.toml               #   Depends on flodl (path = "../rdl/flodl")
-+-- python/                      # Python/PyTorch implementation (reference)
-|   +-- fbrl/                    #   Core package (model, losses, training)
-|   +-- configs/                 #   YAML training configs
-|   +-- runs/                    #   Archived models + results
+|   +-- src/letter/
+|   |   +-- model.rs             #   LetterModel (FlowBuilder graph)
+|   |   +-- modules.rs           #   Controller, ScanStep, AttentionStep, H0Init
+|   |   +-- glimpse.rs           #   GlimpseSensor (grid_sample + CNN)
+|   |   +-- decoder.rs           #   VisualDecoder (deconv reconstruction)
+|   |   +-- train.rs             #   Training loop, config, Monitor integration
+|   |   +-- eval.rs              #   Inference, accuracy report, HTML attention atlas
+|   |   +-- loss.rs              #   Attention guide, diversity, hit rate
+|   |   +-- data.rs              #   PNG loader, batched pipeline
+|   +-- runs/                    #   Training runs + eval results
+|   +-- Cargo.toml               #   Depends on flodl (path dependency)
++-- python/                      # PyTorch reference implementation (archived)
+|   +-- README.md                #   Python-specific docs + experiment history
+|   +-- runs/                    #   Archived models: letters v1-v8, bigrams, words, motor
 +-- goDl/                        # Go/goDl implementation (archived)
-+-- docs/                        # Research documentation (shared)
++-- docs/                        # Research documentation
 |   +-- letters.md               #   Single-letter experiments
+|   +-- bigrams.md               #   Bigram experiments
 |   +-- words.md                 #   Word experiments
 |   +-- motor.md                 #   Motor trace experiments
-|   +-- trajectory-thesis.md     #   Trajectory-native framework vision
-|   +-- go-retrospective.md      #   Go→Rust pivot: lessons and results
-|   +-- glossary.md              #   Deep learning terms and concepts
+|   +-- trajectory-thesis.md     #   Why neural networks are trajectory generators
+|   +-- go-retrospective.md     #   Go->Rust pivot: lessons learned
 +-- thoughts/                    # Research notes and hypotheses
-+-- Dockerfile                   # nvidia/cuda + libtorch + Rust
-+-- docker-compose.yml           # Dev container
++-- Dockerfile                   # nvidia/cuda:12.6.3 + libtorch 2.10 + Rust
++-- docker-compose.yml           # GPU dev container
 +-- Makefile                     # Build, test, train (all Docker-based)
 ```
 
@@ -157,4 +143,4 @@ fbrl/
 - [Research Hypotheses](thoughts/hypotheses.md) — Core intuitions and testable predictions
 - [Word Read Phase](thoughts/word_read_phase.md) — Why free read fixations degenerate and how to fix it
 - [Glossary](docs/glossary.md) — Deep learning terms as they appear in this project
-- [Usage Reference](docs/usage.md) — Full CLI reference and Makefile documentation
+- [Python Reference](python/README.md) — PyTorch prototype, experiment history, archived runs

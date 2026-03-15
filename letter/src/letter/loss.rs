@@ -105,27 +105,116 @@ pub fn fixation_hit_rate(
     }
 
     let img_data = image.data();
-    let mut hits = 0usize;
-    let mut total_intensity = 0.0f64;
-    let mut n = 0usize;
 
-    for loc in locations {
-        let grid = loc.data().unsqueeze_many(&[1, 2])?;
-        let sampled = img_data.grid_sample(&grid, 0, 0, true)?;
-        let vals = sampled.to_f32_vec()?;
-        for v in &vals {
-            total_intensity += *v as f64;
-            if *v as f64 > threshold {
-                hits += 1;
-            }
-            n += 1;
-        }
-    }
+    // Stack all locations and sample in one grid_sample call.
+    let loc_tensors: Vec<Tensor> = locations.iter().map(|l| l.data()).collect();
+    let loc_refs: Vec<&Tensor> = loc_tensors.iter().collect();
+    let stacked = Tensor::stack(&loc_refs, 1)?;           // [B, T, 2]
+    let grid = stacked.unsqueeze(2)?;                     // [B, T, 1, 2]
+    let sampled = img_data.grid_sample(&grid, 0, 0, true)?; // [B, 1, T, 1]
 
+    // Single GPU→CPU transfer.
+    let vals = sampled.to_f32_vec()?;
+    let n = vals.len();
     if n == 0 {
         return Ok((0.0, 0.0));
     }
+    let hits = vals.iter().filter(|&&v| v as f64 > threshold).count();
+    let total_intensity: f64 = vals.iter().map(|&v| v as f64).sum();
     Ok((hits as f64 / n as f64, total_intensity / n as f64))
+}
+
+/// Penalizes fixations that land in empty space (void repulsion).
+///
+/// For each location, extracts the full patch (matching GlimpseSensor resolution)
+/// and checks whether any ink is present. Penalty is active only in void — once
+/// ink is found, gradient saturates to zero. This avoids the center-pull problem
+/// of attention guides while still preventing fixations from sitting in empty space.
+///
+/// image: [B, 1, H, W] clean image.
+/// locations: fixation positions.
+/// patch_h, patch_w: glimpse patch size (must match GlimpseSensor).
+/// threshold: ink detection threshold (0.1 typical).
+/// base_grid: optional cached [1, ph, pw, 2] grid — pass None to build fresh.
+pub fn void_repulsion_loss(
+    image: &Variable,
+    locations: &[Variable],
+    patch_h: i64,
+    patch_w: i64,
+    threshold: f64,
+) -> Result<Variable> {
+    void_repulsion_with_grid(image, locations, patch_h, patch_w, threshold, None)
+}
+
+/// Void repulsion with optional cached base grid (avoids rebuilding per call).
+pub fn void_repulsion_with_grid(
+    image: &Variable,
+    locations: &[Variable],
+    patch_h: i64,
+    patch_w: i64,
+    threshold: f64,
+    cached_grid: Option<&Tensor>,
+) -> Result<Variable> {
+    if locations.is_empty() {
+        let device = image.data().device();
+        let z = Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?;
+        return Ok(Variable::new(z, false));
+    }
+
+    let base_grid = match cached_grid {
+        Some(g) => g.clone(),
+        None => {
+            let shape = image.shape();
+            build_void_grid(patch_h, patch_w, shape[2], shape[3], image.device())?
+        }
+    };
+
+    let inv_threshold = 1.0 / threshold;
+    let t = locations.len();
+    let b = locations[0].shape()[0];
+
+    // Batch all locations: tile image T times, stack all grids, one grid_sample.
+    // image: [B, 1, H, W] → [B*T, 1, H, W]
+    let img_tiled = image.repeat(&[t as i64, 1, 1, 1])?;
+
+    // Build offset grids for all locations and concatenate in one kernel.
+    let expanded = base_grid.expand(&[b, patch_h, patch_w, 2])?;
+    let grid_var = Variable::new(expanded, false);
+    let grids: Vec<Variable> = locations.iter()
+        .map(|loc| grid_var.add(&loc.unsqueeze_many(&[1, 2]).unwrap()).unwrap())
+        .collect();
+    let grid_refs: Vec<&Variable> = grids.iter().collect();
+    let all_grids = Variable::cat_many(&grid_refs, 0)?; // [B*T, ph, pw, 2]
+
+    // Single grid_sample for all locations: [B*T, 1, ph, pw]
+    let sampled = grid_sample(&img_tiled, &all_grids, 0, 0, true)?;
+
+    // Max pixel per patch: [B*T, ph*pw] → max_dim(1) → [B*T]
+    let flat = sampled.flatten(1, -1)?;
+    let patch_max = flat.max_dim(1, false)?;
+
+    // Saturating penalty: 0 in void, 1 when ink found.
+    let saturation = patch_max.mul_scalar(inv_threshold)?.clamp(0.0, 1.0)?;
+
+    // Negate mean: -1.0 when all patches have ink, 0.0 when all void.
+    saturation.mean()?.mul_scalar(-1.0)
+}
+
+/// Build a base sampling grid for void repulsion.
+/// Returns [1, patch_h, patch_w, 2].
+pub fn build_void_grid(
+    patch_h: i64, patch_w: i64,
+    img_h: i64, img_w: i64,
+    device: flodl::tensor::Device,
+) -> Result<Tensor> {
+    let opts = TensorOptions { device, ..Default::default() };
+    let delta_h = patch_h as f64 / img_h as f64;
+    let delta_w = patch_w as f64 / img_w as f64;
+    let grid_y = Tensor::linspace(-delta_h, delta_h, patch_h, opts)?;
+    let grid_x = Tensor::linspace(-delta_w, delta_w, patch_w, opts)?;
+    let grids = Tensor::meshgrid(&[&grid_y, &grid_x])?;
+    let base_grid = Tensor::stack(&[&grids[1], &grids[0]], 2)?;
+    base_grid.unsqueeze(0)
 }
 
 /// Reconstruction loss: MSE between reconstructed and target.

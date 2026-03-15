@@ -148,7 +148,11 @@ class LossTracker:
 
 
 class TrainingLogger:
-    """Manages the per-epoch training log file."""
+    """Manages the per-epoch training log file.
+
+    Buffers all lines in memory and writes once on close() to avoid
+    per-epoch disk I/O during training (use docker logs for live monitoring).
+    """
 
     def __init__(self, save_dir, header, start_epoch=0):
         self.log_path = os.path.join(save_dir, 'training.log')
@@ -157,18 +161,20 @@ class TrainingLogger:
                 os.path.getmtime(self.log_path)
             ).strftime('%Y%m%d_%H%M%S')
             os.rename(self.log_path, os.path.join(save_dir, f'training_{ts}.log'))
-        self._file = open(self.log_path, 'a')
+        self._lines = []
+        self._resuming = start_epoch > 0
         if start_epoch == 0:
-            self._file.write(header + '\n')
-            self._file.write('-' * len(header) + '\n')
-            self._file.flush()
+            self._lines.append(header)
+            self._lines.append('-' * len(header))
 
     def write_line(self, line):
-        self._file.write(line + '\n')
-        self._file.flush()
+        self._lines.append(line)
 
     def close(self):
-        self._file.close()
+        mode = 'a' if self._resuming else 'w'
+        with open(self.log_path, mode) as f:
+            for line in self._lines:
+                f.write(line + '\n')
         print(f"Training log saved to {self.log_path}")
 
 

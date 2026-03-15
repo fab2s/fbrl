@@ -4,28 +4,31 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use flodl::tensor::{Device, Result, Tensor, TensorError};
+use flodl::tensor::{cuda_available, Device, Result, Tensor, TensorError};
 use serde::Deserialize;
 
 /// One rendered letter with metadata.
 pub struct LetterSample {
-    pub image: Tensor,       // [1, H, W] noisy image
-    pub clean: Tensor,       // [1, H, W] clean image (for attention guide)
-    pub letter_idx: i64,     // 0-25 (A=0, B=1, ...)
-    pub case_label: f32,     // 0.0=upper, 1.0=lower
+    pub image: Tensor,           // [1, H, W] noisy image
+    pub clean: Tensor,           // [1, H, W] clean image (for attention guide)
+    pub letter_idx: i64,         // 0-25 (A=0, B=1, ...)
+    pub case_label: f32,         // 0.0=upper, 1.0=lower
+    pub partner_clean: Tensor,   // [1, H, W] opposite-case clean image (for recode loss)
 }
 
 /// Stacked mini-batch ready for training.
 pub struct LetterBatch {
-    pub image: Tensor,       // [B, 1, H, W]
-    pub clean: Tensor,       // [B, 1, H, W]
-    pub letter_idx: Tensor,  // [B] int64
-    pub case_label: Tensor,  // [B, 1] float32
+    pub image: Tensor,           // [B, 1, H, W]
+    pub clean: Tensor,           // [B, 1, H, W]
+    pub letter_idx: Tensor,      // [B] int64
+    pub case_label: Tensor,      // [B, 1] float32
+    pub partner_clean: Tensor,   // [B, 1, H, W] opposite-case clean images
 }
 
 /// Holds all samples in memory.
 pub struct LetterDataset {
     pub samples: Vec<LetterSample>,
+    pub has_partners: bool,
 }
 
 impl LetterDataset {
@@ -56,7 +59,16 @@ pub fn load_letter_dataset(dir: &str) -> Result<LetterDataset> {
 
     // Cache clean images (shared across noisy variants).
     let mut clean_cache: HashMap<PathBuf, Tensor> = HashMap::new();
-    let mut samples = Vec::with_capacity(meta.len());
+
+    // First pass: load all samples, build clean-by-identity lookup for partners.
+    struct RawSample {
+        image: Tensor,
+        clean: Tensor,
+        letter_idx: i64,
+        case_label: f32,
+    }
+    let mut raw_samples = Vec::with_capacity(meta.len());
+    let mut clean_by_id: HashMap<(i64, bool), Tensor> = HashMap::new(); // (letter_idx, is_lower)
 
     for entry in meta.values() {
         let img_path = resolve_data_path(dir_path, &entry.image);
@@ -78,14 +90,32 @@ pub fn load_letter_dataset(dir: &str) -> Result<LetterDataset> {
             _ => continue,
         };
         let letter_idx = (ch - b'A') as i64;
+        let is_lower = entry.case == "lower";
+        let case_label = if is_lower { 1.0f32 } else { 0.0f32 };
 
-        let case_label = if entry.case == "lower" { 1.0f32 } else { 0.0f32 };
+        clean_by_id.entry((letter_idx, is_lower))
+            .or_insert_with(|| clean_tensor.clone());
 
+        raw_samples.push(RawSample { image: img_tensor, clean: clean_tensor, letter_idx, case_label });
+    }
+
+    // Second pass: resolve partner clean images (opposite case, same letter).
+    let mut has_partners = true;
+    let mut samples = Vec::with_capacity(raw_samples.len());
+    for raw in raw_samples {
+        let is_lower = raw.case_label > 0.5;
+        let partner_clean = if let Some(p) = clean_by_id.get(&(raw.letter_idx, !is_lower)) {
+            p.clone()
+        } else {
+            has_partners = false;
+            Tensor::zeros(&raw.clean.shape(), Default::default())?
+        };
         samples.push(LetterSample {
-            image: img_tensor,
-            clean: clean_tensor,
-            letter_idx,
-            case_label,
+            image: raw.image,
+            clean: raw.clean,
+            letter_idx: raw.letter_idx,
+            case_label: raw.case_label,
+            partner_clean,
         });
     }
 
@@ -93,8 +123,9 @@ pub fn load_letter_dataset(dir: &str) -> Result<LetterDataset> {
         return Err(TensorError::new(&format!("no valid samples found in {dir}")));
     }
 
-    eprintln!("Loaded {} samples from {}", samples.len(), dir);
-    Ok(LetterDataset { samples })
+    eprintln!("Loaded {} samples from {}{}", samples.len(), dir,
+        if has_partners { "" } else { " (some missing partners)" });
+    Ok(LetterDataset { samples, has_partners })
 }
 
 /// Load a grayscale PNG as a [1, H, W] float32 tensor in [0, 1].
@@ -253,6 +284,7 @@ impl<'a> LetterLoader<'a> {
         // Collect per-sample data.
         let mut images = Vec::with_capacity(b);
         let mut cleans = Vec::with_capacity(b);
+        let mut partners = Vec::with_capacity(b);
         let mut letter_data = Vec::with_capacity(b);
         let mut case_data = Vec::with_capacity(b);
 
@@ -260,6 +292,7 @@ impl<'a> LetterLoader<'a> {
             let s = &self.ds.samples[idx];
             images.push(&s.image);
             cleans.push(&s.clean);
+            partners.push(&s.partner_clean);
             letter_data.push(s.letter_idx);
             case_data.push(s.case_label);
         }
@@ -267,21 +300,28 @@ impl<'a> LetterLoader<'a> {
         // Stack into batch tensors.
         let img_batch = Tensor::stack(&images, 0)?;
         let clean_batch = Tensor::stack(&cleans, 0)?;
+        let partner_batch = Tensor::stack(&partners, 0)?;
         let letter_idx = Tensor::from_i64(&letter_data, &[b as i64], Device::CPU)?;
         let case_label = Tensor::from_f32(&case_data, &[b as i64, 1], Device::CPU)?;
 
-        // Move to target device if set.
+        // Move to target device if set. Pin memory first for async transfer on CUDA.
         let batch = if let Some(device) = self.device {
+            let use_pin = device.is_cuda() && cuda_available();
+            let pin = |t: Tensor| -> Result<Tensor> {
+                if use_pin { t.pin_memory() } else { Ok(t) }
+            };
             LetterBatch {
-                image: img_batch.to_device(device)?,
-                clean: clean_batch.to_device(device)?,
-                letter_idx: letter_idx.to_device(device)?,
-                case_label: case_label.to_device(device)?,
+                image: pin(img_batch)?.to_device(device)?,
+                clean: pin(clean_batch)?.to_device(device)?,
+                partner_clean: pin(partner_batch)?.to_device(device)?,
+                letter_idx: pin(letter_idx)?.to_device(device)?,
+                case_label: pin(case_label)?.to_device(device)?,
             }
         } else {
             LetterBatch {
                 image: img_batch,
                 clean: clean_batch,
+                partner_clean: partner_batch,
                 letter_idx,
                 case_label,
             }

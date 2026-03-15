@@ -61,6 +61,28 @@ eval-letter: rebuild
 RUN_DIR ?= runs/v1
 TEST ?= ../python/data/letter_test
 
+# Profile with nsys (1 epoch, captures CUDA kernels + CPU activity)
+# Output: runs/profile/rust_profile.nsys-rep + stats on stderr
+profile-letter: rebuild
+	$(RUN) bash -c 'mkdir -p runs/profile && nsys profile \
+		--stats=true \
+		--force-overwrite=true \
+		--trace=cuda,nvtx \
+		--sample=none \
+		-o runs/profile/rust_profile \
+		cargo run --release --features $(FEATURES) -- \
+		$(if $(DATA),--data $(DATA)) --save runs/profile --epochs 1 \
+		$(if $(BATCH),--batch-size $(BATCH)) --monitor 0'
+
+# Profile Python for comparison (1 epoch, same model)
+profile-python: image
+	$(RUN) bash -c 'which python3 && nsys profile \
+		--stats=true \
+		--force-overwrite=true \
+		--cuda-memory-usage=true \
+		-o runs/profile/python_profile \
+		python3 -c "$$PYTHON_PROFILE_SCRIPT"'
+
 # Interactive shell
 shell: image
 	$(COMPOSE) run --rm dev bash

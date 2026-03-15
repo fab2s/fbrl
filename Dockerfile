@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     pkg-config \
     graphviz \
+    cuda-nsight-systems-12-6 \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Layer 3: Rust (installed globally so non-root user can access) ---

@@ -16,10 +16,11 @@ pub fn new_synthetic_dataset(n: usize) -> Result<LetterDataset> {
 
         samples.push(LetterSample {
             clean: img.clone(),
-            image: img,
+            image: img.clone(),
             letter_idx,
             case_label,
+            partner_clean: img,
         });
     }
-    Ok(LetterDataset { samples })
+    Ok(LetterDataset { samples, has_partners: true })
 }

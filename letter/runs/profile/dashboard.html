@@ -162,7 +162,7 @@ animation:pulse 2s ease-in-out infinite}
 <div class="tooltip" id="tooltip"></div>
 
 <script>
-const ARCHIVE_DATA=[{"epoch":1,"total":1,"duration":49.5817,"metrics":{"recode":0.02577190,"case_acc":0.53479023,"total":1.43796988,"recon_mse":0.02549158,"letter_acc":0.07115385,"hit_rate":0.11468531,"lr":0.00100000,"guide":-1.22778645,"content":0.60028887,"void":-1.52109163,"case_ce":0.70649339,"diversity":0.04747077,"letter_ce":3.08147590},"resources":{"cpu":9.2,"ram_used":4131393536,"ram_total":20971704320,"gpu":88.0,"vram_used":3121348608,"vram_total":6442188800}}];
+const ARCHIVE_DATA=[{"epoch":1,"total":1,"duration":83.4912,"metrics":{"diversity":0.03540456,"case_ce":0.71147561,"guide":-1.26653092,"case_acc":0.51389862,"recode":0.02760344,"void":-1.49154334,"content":0.57033327,"letter_acc":0.11293707,"recon_mse":0.02550506,"lr":0.00100000,"total":1.17963011,"hit_rate":0.06830669,"letter_ce":2.85254905},"resources":{"cpu":9.3,"ram_used":4882833408,"ram_total":20971704320,"gpu":80.0,"vram_used":3679191040,"vram_total":6442188800}}];
 const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
@@ -174,16 +174,16 @@ const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 785.81)">
 <title>G</title>
 <polygon fill="white" stroke="transparent" points="-4,4 -4,-785.81 440,-785.81 440,4 -4,4"/>
-<text text-anchor="middle" x="218" y="-766.61" font-family="Helvetica,sans-Serif" font-size="14.00">Forward: 8ms</text>
+<text text-anchor="middle" x="218" y="-766.61" font-family="Helvetica,sans-Serif" font-size="14.00">Forward: 10ms</text>
 <g id="clust1" class="cluster">
 <title>cluster_level_0</title>
 <polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="134,-634.89 134,-750.81 403,-750.81 403,-634.89 134,-634.89"/>
-<text text-anchor="middle" x="268.5" y="-735.61" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 0 &#160;10µs &#160;x0.4</text>
+<text text-anchor="middle" x="268.5" y="-735.61" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 0 &#160;8µs &#160;x0.1</text>
 </g>
 <g id="clust2" class="cluster">
 <title>cluster_level_1</title>
 <polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="52,-532.89 52,-615.89 167,-615.89 167,-532.89 52,-532.89"/>
-<text text-anchor="middle" x="109.5" y="-600.69" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 1 &#160;105µs</text>
+<text text-anchor="middle" x="109.5" y="-600.69" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 1 &#160;118µs</text>
 </g>
 <g id="clust3" class="cluster">
 <title>cluster_level_2</title>
@@ -198,12 +198,12 @@ const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <g id="clust5" class="cluster">
 <title>cluster_level_4</title>
 <polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="152,-172.89 152,-267.89 270,-267.89 270,-172.89 152,-172.89"/>
-<text text-anchor="middle" x="211" y="-252.69" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 4 &#160;43µs</text>
+<text text-anchor="middle" x="211" y="-252.69" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 4 &#160;140µs</text>
 </g>
 <g id="clust6" class="cluster">
 <title>cluster_level_5</title>
 <polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="8,-8 8,-144.89 428,-144.89 428,-8 8,-8"/>
-<text text-anchor="middle" x="218" y="-129.69" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 5 &#160;1ms &#160;x1.0</text>
+<text text-anchor="middle" x="218" y="-129.69" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 5 &#160;3ms &#160;x1.0</text>
 </g>
 <!-- identity_1 -->
 <g id="node1" class="node">
@@ -211,14 +211,14 @@ const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <polygon fill="#27ad5f" stroke="black" points="142.36,-669.48 194,-642.93 245.64,-669.48 245.59,-712.43 142.41,-712.43 142.36,-669.48"/>
 <text text-anchor="middle" x="194" y="-690.55" font-family="Helvetica,sans-Serif" font-size="11.00">identity</text>
 <text text-anchor="middle" x="194" y="-678.55" font-family="Helvetica,sans-Serif" font-size="11.00">#image</text>
-<text text-anchor="middle" x="194" y="-666.55" font-family="Helvetica,sans-Serif" font-size="11.00">3us</text>
+<text text-anchor="middle" x="194" y="-666.55" font-family="Helvetica,sans-Serif" font-size="11.00">1us</text>
 </g>
 <!-- h0_init_3 -->
 <g id="node3" class="node">
 <title>h0_init_3</title>
 <polygon fill="#2fad5c" stroke="black" points="157.5,-584.89 66.5,-584.89 66.5,-540.89 157.5,-540.89 157.5,-584.89"/>
 <text text-anchor="middle" x="112" y="-572.09" font-family="Helvetica,sans-Serif" font-size="11.00">h0_init</text>
-<text text-anchor="middle" x="112" y="-560.09" font-family="Helvetica,sans-Serif" font-size="11.00">102us</text>
+<text text-anchor="middle" x="112" y="-560.09" font-family="Helvetica,sans-Serif" font-size="11.00">116us</text>
 <text text-anchor="middle" x="112" y="-548.09" font-family="Helvetica,sans-Serif" font-size="11.00">[256 params]</text>
 </g>
 <!-- identity_1&#45;&gt;h0_init_3 -->
@@ -230,13 +230,13 @@ const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!-- loop_4 -->
 <g id="node4" class="node">
 <title>loop_4</title>
-<polygon fill="#9da332" stroke="black" points="221.5,-473.89 116.5,-473.89 112.5,-469.89 112.5,-417.89 217.5,-417.89 221.5,-421.89 221.5,-473.89"/>
+<polygon fill="#93a436" stroke="black" points="221.5,-473.89 116.5,-473.89 112.5,-469.89 112.5,-417.89 217.5,-417.89 221.5,-421.89 221.5,-473.89"/>
 <polyline fill="none" stroke="black" points="217.5,-469.89 112.5,-469.89 "/>
 <polyline fill="none" stroke="black" points="217.5,-469.89 217.5,-417.89 "/>
 <polyline fill="none" stroke="black" points="217.5,-469.89 221.5,-473.89 "/>
 <text text-anchor="middle" x="167" y="-461.09" font-family="Helvetica,sans-Serif" font-size="11.00">loop</text>
 <text text-anchor="middle" x="167" y="-449.09" font-family="Helvetica,sans-Serif" font-size="11.00">#scan</text>
-<text text-anchor="middle" x="167" y="-437.09" font-family="Helvetica,sans-Serif" font-size="11.00">1.46ms</text>
+<text text-anchor="middle" x="167" y="-437.09" font-family="Helvetica,sans-Serif" font-size="11.00">1.43ms</text>
 <text text-anchor="middle" x="167" y="-425.09" font-family="Helvetica,sans-Serif" font-size="11.00">[224.9K params]</text>
 </g>
 <!-- identity_1&#45;&gt;loop_4 -->
@@ -255,7 +255,7 @@ const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <polyline fill="none" stroke="black" points="261.5,-346.89 265.5,-350.89 "/>
 <text text-anchor="middle" x="211" y="-338.09" font-family="Helvetica,sans-Serif" font-size="11.00">loop</text>
 <text text-anchor="middle" x="211" y="-326.09" font-family="Helvetica,sans-Serif" font-size="11.00">#read</text>
-<text text-anchor="middle" x="211" y="-314.09" font-family="Helvetica,sans-Serif" font-size="11.00">5.03ms</text>
+<text text-anchor="middle" x="211" y="-314.09" font-family="Helvetica,sans-Serif" font-size="11.00">5.40ms</text>
 <text text-anchor="middle" x="211" y="-302.09" font-family="Helvetica,sans-Serif" font-size="11.00">[619.9K params]</text>
 </g>
 <!-- identity_1&#45;&gt;loop_5 -->
@@ -276,10 +276,10 @@ const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!-- visual_decoder_9 -->
 <g id="node9" class="node">
 <title>visual_decoder_9</title>
-<polygon fill="#98a334" stroke="black" points="419.8,-80.05 329,-113.84 238.2,-80.05 238.29,-25.39 419.71,-25.39 419.8,-80.05"/>
+<polygon fill="#dd9d1a" stroke="black" points="419.8,-80.05 329,-113.84 238.2,-80.05 238.29,-25.39 419.71,-25.39 419.8,-80.05"/>
 <text text-anchor="middle" x="329" y="-80.15" font-family="Helvetica,sans-Serif" font-size="11.00">visual_decoder</text>
 <text text-anchor="middle" x="329" y="-68.15" font-family="Helvetica,sans-Serif" font-size="11.00">#recon</text>
-<text text-anchor="middle" x="329" y="-56.15" font-family="Helvetica,sans-Serif" font-size="11.00">1.40ms</text>
+<text text-anchor="middle" x="329" y="-56.15" font-family="Helvetica,sans-Serif" font-size="11.00">2.41ms</text>
 <text text-anchor="middle" x="329" y="-44.15" font-family="Helvetica,sans-Serif" font-size="11.00">[33.9M params]</text>
 </g>
 <!-- input_case_2&#45;&gt;visual_decoder_9 -->
@@ -304,10 +304,10 @@ const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!-- linear_6 -->
 <g id="node6" class="node">
 <title>linear_6</title>
-<polygon fill="#2aad5e" stroke="black" points="262,-236.89 160,-236.89 160,-180.89 262,-180.89 262,-236.89"/>
+<polygon fill="#31ad5c" stroke="black" points="262,-236.89 160,-236.89 160,-180.89 262,-180.89 262,-236.89"/>
 <text text-anchor="middle" x="211" y="-224.09" font-family="Helvetica,sans-Serif" font-size="11.00">linear</text>
 <text text-anchor="middle" x="211" y="-212.09" font-family="Helvetica,sans-Serif" font-size="11.00">#latent</text>
-<text text-anchor="middle" x="211" y="-200.09" font-family="Helvetica,sans-Serif" font-size="11.00">40us</text>
+<text text-anchor="middle" x="211" y="-200.09" font-family="Helvetica,sans-Serif" font-size="11.00">133us</text>
 <text text-anchor="middle" x="211" y="-188.09" font-family="Helvetica,sans-Serif" font-size="11.00">[65.8K params]</text>
 </g>
 <!-- loop_5&#45;&gt;linear_6 -->
@@ -319,10 +319,10 @@ const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!-- linear_7 -->
 <g id="node7" class="node">
 <title>linear_7</title>
-<polygon fill="#29ad5e" stroke="black" points="111.5,-92.95 16.5,-92.95 16.5,-36.95 111.5,-36.95 111.5,-92.95"/>
+<polygon fill="#2ead5d" stroke="black" points="111.5,-92.95 16.5,-92.95 16.5,-36.95 111.5,-36.95 111.5,-92.95"/>
 <text text-anchor="middle" x="64" y="-80.15" font-family="Helvetica,sans-Serif" font-size="11.00">linear</text>
 <text text-anchor="middle" x="64" y="-68.15" font-family="Helvetica,sans-Serif" font-size="11.00">#heads_0</text>
-<text text-anchor="middle" x="64" y="-56.15" font-family="Helvetica,sans-Serif" font-size="11.00">36us</text>
+<text text-anchor="middle" x="64" y="-56.15" font-family="Helvetica,sans-Serif" font-size="11.00">94us</text>
 <text text-anchor="middle" x="64" y="-44.15" font-family="Helvetica,sans-Serif" font-size="11.00">[6.7K params]</text>
 </g>
 <!-- linear_6&#45;&gt;linear_7 -->
@@ -334,10 +334,10 @@ const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!-- linear_8 -->
 <g id="node8" class="node">
 <title>linear_8</title>
-<polygon fill="#29ad5e" stroke="black" points="220.5,-92.95 129.5,-92.95 129.5,-36.95 220.5,-36.95 220.5,-92.95"/>
+<polygon fill="#2cad5d" stroke="black" points="220.5,-92.95 129.5,-92.95 129.5,-36.95 220.5,-36.95 220.5,-92.95"/>
 <text text-anchor="middle" x="175" y="-80.15" font-family="Helvetica,sans-Serif" font-size="11.00">linear</text>
 <text text-anchor="middle" x="175" y="-68.15" font-family="Helvetica,sans-Serif" font-size="11.00">#heads_1</text>
-<text text-anchor="middle" x="175" y="-56.15" font-family="Helvetica,sans-Serif" font-size="11.00">34us</text>
+<text text-anchor="middle" x="175" y="-56.15" font-family="Helvetica,sans-Serif" font-size="11.00">74us</text>
 <text text-anchor="middle" x="175" y="-44.15" font-family="Helvetica,sans-Serif" font-size="11.00">[514 params]</text>
 </g>
 <!-- linear_6&#45;&gt;linear_8 -->
@@ -362,10 +362,10 @@ const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 </g>
 </svg>
 `;
-const ARCHIVE_COMPLETE="Complete (49.6s)";
+const ARCHIVE_COMPLETE="Complete (1m 23s)";
 const ARCHIVE_LABEL="LetterModel";
 const ARCHIVE_HASH="3d986f6946d97d610a4cc60afc34d0ec10b4d87c87624300e0026b2e72e8d36a";
-const ARCHIVE_META={"batch_size":52,"blur_sigma_ratio":0.16,"checkpoint_interval":50,"content_weight":0.5,"diversity_sigma":0.1,"diversity_weight":1.0,"epochs":1,"latent_dim":256,"lr":0.001,"max_grad_norm":5.0,"min_lr":0.0,"n_classes":26,"n_read":6,"n_scales":1,"n_scan":1,"patch_size":12,"read_guide_weight":0.0,"read_vy":1.0,"recode_weight":1.0,"recon_weight":1.0,"save_dir":"runs/v1","scan_guide_weight":8.0,"scan_patch_w":18,"scan_void_weight":1.5,"scan_vy":0.3,"void_weight":0.5};
+const ARCHIVE_META={"batch_size":52,"blur_sigma_ratio":0.16,"checkpoint_interval":50,"content_weight":0.5,"diversity_sigma":0.1,"diversity_weight":1.0,"epochs":1,"latent_dim":256,"lr":0.001,"max_grad_norm":5.0,"min_lr":0.0,"n_classes":26,"n_read":6,"n_scales":1,"n_scan":1,"patch_size":12,"read_guide_weight":0.0,"read_vy":1.0,"recode_weight":1.0,"recon_weight":1.0,"save_dir":"runs/profile","scan_guide_weight":8.0,"scan_patch_w":18,"scan_void_weight":1.5,"scan_vy":0.3,"void_weight":0.5};
 const ARCHIVE_HARDWARE="Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz (16 threads, 19GB) | NVIDIA GeForce GTX 1060 6GB (5GB)";
 </script>
 <script>

@@ -1,5 +1,6 @@
 //! Foveal attention sensor — extracts multi-resolution patches via grid_sample.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use flodl::autograd::{Variable, grid_sample};
@@ -22,6 +23,10 @@ pub struct GlimpseSensor {
     glimpse_fc: Linear,
     location_fc: Linear,
     combine_fc: Linear,
+
+    /// Cached base grids per scale, lazily initialized on first forward.
+    /// Each is [1, patch_h, patch_w, 2] — expanded and offset per call.
+    base_grids: RefCell<Option<Vec<Tensor>>>,
 }
 
 impl GlimpseSensor {
@@ -54,6 +59,7 @@ impl GlimpseSensor {
             glimpse_fc: Linear::new(128, latent_dim)?,
             location_fc: Linear::new(2, 128)?,
             combine_fc: Linear::new(latent_dim + 128, latent_dim)?,
+            base_grids: RefCell::new(None),
         })
     }
 
@@ -62,14 +68,27 @@ impl GlimpseSensor {
     /// Returns: [B, latent_dim].
     fn sense(&self, image: &Variable, location: &Variable) -> Result<Variable> {
         let img_shape = image.shape();
+        let b = location.shape()[0];
         let h = img_shape[2];
         let w = img_shape[3];
         let dev = image.device();
 
+        // Build or reuse cached base grids (one per scale).
+        let mut cache = self.base_grids.borrow_mut();
+        if cache.is_none() {
+            let grids = self.scales.iter().map(|&scale| {
+                build_base_grid(scale, self.patch_h, self.patch_w, h, w, dev)
+            }).collect::<Result<Vec<_>>>()?;
+            *cache = Some(grids);
+        }
+        let base_grids = cache.as_ref().unwrap();
+
         // Extract one patch per scale via differentiable grid_sample.
+        let loc_offset = location.unsqueeze_many(&[1, 2])?; // [B, 1, 1, 2]
         let mut combined: Option<Variable> = None;
-        for &scale in &self.scales {
-            let grid = make_grid(location, scale, self.patch_h, self.patch_w, h, w, dev)?;
+        for base in base_grids {
+            let expanded = base.expand(&[b, self.patch_h, self.patch_w, 2])?;
+            let grid = Variable::new(expanded, false).add(&loc_offset)?;
             let patch = grid_sample(image, &grid, 0, 0, true)?;
             combined = Some(match combined {
                 None => patch,
@@ -127,36 +146,25 @@ impl NamedInputModule for GlimpseSensor {
     }
 }
 
-/// Build a sampling grid for grid_sample, centered on location.
-/// Returns a Variable of shape [B, patch_h, patch_w, 2].
-fn make_grid(
-    location: &Variable,
+/// Build a base sampling grid centered at the origin (no location offset).
+/// Returns a Tensor of shape [1, patch_h, patch_w, 2].
+fn build_base_grid(
     scale: usize,
     patch_h: i64,
     patch_w: i64,
     img_h: i64,
     img_w: i64,
     device: Device,
-) -> Result<Variable> {
-    let b = location.shape()[0];
+) -> Result<Tensor> {
     let opts = TensorOptions { device, ..Default::default() };
 
-    // Normalized extent in [-1, 1] coords.
     let delta_h = (scale as f64) * (patch_h as f64) / (img_h as f64);
     let delta_w = (scale as f64) * (patch_w as f64) / (img_w as f64);
 
-    // Build centered grid on target device (no gradient needed for the base grid).
     let grid_y = Tensor::linspace(-delta_h, delta_h, patch_h, opts)?;
     let grid_x = Tensor::linspace(-delta_w, delta_w, patch_w, opts)?;
 
-    // Meshgrid + stack → [patch_h, patch_w, 2] as (x, y).
     let grids = Tensor::meshgrid(&[&grid_y, &grid_x])?;
     let base_grid = Tensor::stack(&[&grids[1], &grids[0]], 2)?;
-    let base_grid = base_grid.unsqueeze(0)?;          // [1, patch_h, patch_w, 2]
-    let base_grid = base_grid.expand(&[b, patch_h, patch_w, 2])?;
-    let grid_var = Variable::new(base_grid, false);
-
-    // Shift by location: [B, 2] -> [B, 1, 1, 2] for broadcast.
-    let loc_reshaped = location.unsqueeze_many(&[1, 2])?;
-    grid_var.add(&loc_reshaped)
+    base_grid.unsqueeze(0) // [1, patch_h, patch_w, 2]
 }

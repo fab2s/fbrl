@@ -77,6 +77,10 @@ fn run_train(args: &[String]) {
             "--read-guide-weight" => { cfg.read_guide_weight = next_arg(args, &mut i).parse().expect("--read-guide-weight F"); }
             "--diversity-weight" => { cfg.diversity_weight = next_arg(args, &mut i).parse().expect("--diversity-weight F"); }
             "--recon-weight" => { cfg.recon_weight = next_arg(args, &mut i).parse().expect("--recon-weight F"); }
+            "--recode-weight" => { cfg.recode_weight = next_arg(args, &mut i).parse().expect("--recode-weight F"); }
+            "--content-weight" => { cfg.content_weight = next_arg(args, &mut i).parse().expect("--content-weight F"); }
+            "--scan-vy" => { cfg.scan_vy = next_arg(args, &mut i).parse().expect("--scan-vy F"); }
+            "--read-vy" => { cfg.read_vy = next_arg(args, &mut i).parse().expect("--read-vy F"); }
 
             // Checkpointing & monitoring.
             "--checkpoint-interval" => { cfg.checkpoint_interval = next_arg(args, &mut i).parse().expect("--checkpoint-interval N"); }
@@ -121,11 +125,13 @@ fn run_train(args: &[String]) {
     train_letter(&cfg, &ds, Some(&|s: &EpochStats| {
         eprintln!(
             "Epoch {:3}  Ltr {:.4}({:.0}%)  Case {:.4}({:.0}%)  Recon {:.4}  \
-             Guide {:.4}  Div {:.4}  Hit {:.0}%  lr {:.6}  [{:?}  ETA {:?}]",
+             Recode {:.4}  Content {:.4}  Guide {:.4}  Void {:.4}  Div {:.4}  \
+             Hit {:.0}%  lr {:.6}  [{:?}  ETA {:?}]",
             s.epoch + 1,
             s.letter_loss, s.letter_acc * 100.0,
             s.case_loss, s.case_acc * 100.0,
-            s.recon_loss, s.guide_loss, s.div_loss,
+            s.recon_loss, s.recode_loss, s.content_loss,
+            s.guide_loss, s.void_loss, s.div_loss,
             s.hit_rate * 100.0, s.lr,
             s.duration, s.eta,
         );
@@ -190,6 +196,10 @@ fn usage() {
     eprintln!("  --read-guide-weight <F>  read attention guide (default: 0.0)");
     eprintln!("  --diversity-weight <F>   fixation diversity (default: 1.0)");
     eprintln!("  --recon-weight <F>       reconstruction (default: 1.0)");
+    eprintln!("  --recode-weight <F>      recode loss (default: 1.0)");
+    eprintln!("  --content-weight <F>     scan content BCE (default: 0.5)");
+    eprintln!("  --scan-vy <F>            scan diversity VY (default: 0.3)");
+    eprintln!("  --read-vy <F>            read diversity VY (default: 1.5)");
     eprintln!();
     eprintln!("Other:");
     eprintln!("  --checkpoint-interval <N> save every N epochs (default: 50)");

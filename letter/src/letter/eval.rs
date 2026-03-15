@@ -170,8 +170,8 @@ pub fn eval_letter(
 
     let device = if cuda_available() {
         eprintln!("Using CUDA");
-        model.graph.set_device(Device::CUDA);
-        Device::CUDA
+        model.graph.set_device(Device::CUDA(0));
+        Device::CUDA(0)
     } else {
         eprintln!("Using CPU");
         Device::CPU

@@ -4,17 +4,17 @@ use std::fs;
 use std::io::Write;
 use std::time::Instant;
 
-use flodl::autograd::Variable;
+use flodl::autograd::{Variable, grid_sample};
 use flodl::nn::{
-    cross_entropy_loss, mse_loss, clip_grad_norm,
-    Adam, CosineScheduler, Optimizer,
+    cross_entropy_loss, mse_loss, bce_with_logits_loss, clip_grad_norm,
+    Adam, CosineScheduler, Module, Optimizer,
 };
 use flodl::monitor::Monitor;
-use flodl::tensor::{cuda_available, Device, DType, Result, Tensor, TensorError};
+use flodl::tensor::{cuda_available, Device, DType, Result, Tensor, TensorError, TensorOptions};
 use serde::{Serialize, Deserialize};
 
 use super::data::{LetterDataset, LetterLoader};
-use super::loss::{attention_guide_loss, fixation_diversity_loss, fixation_hit_rate};
+use super::loss::{attention_guide_loss, build_void_grid, fixation_diversity_loss, fixation_hit_rate, void_repulsion_with_grid};
 use super::model::LetterModel;
 
 /// Hyperparameters for letter model training.
@@ -39,12 +39,16 @@ pub struct LetterConfig {
     // Loss weights.
     pub scan_guide_weight: f64,
     pub read_guide_weight: f64,
+    pub scan_void_weight: f64,
+    pub void_weight: f64,
     pub diversity_weight: f64,
     pub recon_weight: f64,
     pub recode_weight: f64,
+    pub content_weight: f64,
     pub blur_sigma_ratio: f64,
     pub diversity_sigma: f64,
-    pub diversity_vy: f64,
+    pub scan_vy: f64,
+    pub read_vy: f64,
 
     // Checkpointing.
     #[serde(default)]
@@ -68,7 +72,7 @@ impl Default for LetterConfig {
             n_scales: 1,
             latent_dim: 256,
 
-            batch_size: 32,
+            batch_size: 52,
             epochs: 100,
             lr: 0.001,
             min_lr: 0.0,
@@ -76,12 +80,16 @@ impl Default for LetterConfig {
 
             scan_guide_weight: 8.0,
             read_guide_weight: 0.0,
+            scan_void_weight: 1.5,
+            void_weight: 0.5,
             diversity_weight: 1.0,
             recon_weight: 1.0,
-            recode_weight: 0.0,
+            recode_weight: 1.0,
+            content_weight: 0.5,
             blur_sigma_ratio: 0.16,
             diversity_sigma: 0.1,
-            diversity_vy: 1.0,
+            scan_vy: 0.3,
+            read_vy: 1.0,
 
             save_dir: "training".into(),
             checkpoint_interval: 50,
@@ -101,7 +109,10 @@ pub struct EpochStats {
     pub letter_acc: f64,
     pub case_acc: f64,
     pub recon_loss: f64,
+    pub recode_loss: f64,
+    pub content_loss: f64,
     pub guide_loss: f64,
+    pub void_loss: f64,
     pub div_loss: f64,
     pub total_loss: f64,
     pub hit_rate: f64,
@@ -124,8 +135,9 @@ pub fn train_letter(
     // Move model to CUDA if available.
     let device = if cuda_available() {
         eprintln!("Using CUDA");
-        model.graph.set_device(Device::CUDA);
-        Device::CUDA
+        flodl::tensor::set_cudnn_benchmark(true);
+        model.graph.set_device(Device::CUDA(0));
+        Device::CUDA(0)
     } else {
         eprintln!("Using CPU");
         Device::CPU
@@ -139,10 +151,11 @@ pub fn train_letter(
     let mut loader = LetterLoader::new(ds, cfg.batch_size, true);
     loader.set_device(device);
 
-    // Ensure save directory exists.
+    // Ensure save directory exists and rotate prior run artifacts.
     if !cfg.save_dir.is_empty() {
         fs::create_dir_all(&cfg.save_dir)
             .map_err(|e| TensorError::new(&format!("create save dir: {e}")))?;
+        rotate_prior_run(&cfg.save_dir);
     }
 
     // Open streaming log.
@@ -176,8 +189,19 @@ pub fn train_letter(
 
     let metric_tags: &[&str] = &[
         "letter_ce", "case_ce", "letter_acc", "case_acc",
-        "recon_mse", "guide", "diversity", "total", "hit_rate", "lr",
+        "recon_mse", "recode", "content", "guide", "void", "diversity",
+        "total", "hit_rate", "lr",
     ];
+
+    // Pre-build void repulsion grids (image dims are constant across training).
+    let img_shape = ds.samples[0].image.shape();
+    let (img_h, img_w) = (img_shape[1], img_shape[2]);
+    let scan_void_grid = if cfg.scan_void_weight > 0.0 {
+        Some(build_void_grid(cfg.patch_size, cfg.scan_patch_w, img_h, img_w, device)?)
+    } else { None };
+    let read_void_grid = if cfg.void_weight > 0.0 {
+        Some(build_void_grid(cfg.patch_size, cfg.patch_size, img_h, img_w, device)?)
+    } else { None };
 
     for epoch in 0..cfg.epochs {
         // Enable profiling on the last epoch so finish_with() captures node timings.
@@ -197,6 +221,7 @@ pub fn train_letter(
             let img_var = Variable::new(batch.image, false);
             let case_var = Variable::new(batch.case_label.clone(), false);
             let clean_var = Variable::new(batch.clean, false);
+            let partner_clean_var = Variable::new(batch.partner_clean, false);
 
             let result = model.forward(&img_var, &case_var)?;
 
@@ -211,26 +236,101 @@ pub fn train_letter(
             // Reconstruction loss.
             let recon_loss = mse_loss(&result.recon, &img_var)?;
 
-            // Attention losses — separate guide weights for scan vs read.
-            let scan_guide = attention_guide_loss(
-                &clean_var, &result.scan_locations, cfg.blur_sigma_ratio,
-            )?;
-            let read_guide = attention_guide_loss(
-                &clean_var, &result.read_locations, cfg.blur_sigma_ratio,
-            )?;
+            // Recode loss: decode latent with flipped case, compare to partner clean.
+            let recode_loss = if cfg.recode_weight > 0.0 && ds.has_partners {
+                let b = batch.case_label.shape()[0];
+                let ones_t = Tensor::from_f32(
+                    &vec![1.0f32; b as usize], &[b, 1], device,
+                )?;
+                let ones_var = Variable::new(ones_t, false);
+                let flipped_case = ones_var.sub(&case_var)?;
+                let z_recode = result.latent.cat(&flipped_case, 1)?;
+                let recode = model.decoder.forward(&z_recode)?;
+                mse_loss(&recode, &partner_clean_var)?
+            } else {
+                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
+            };
 
-            // Diversity across all locations combined.
-            let all_locs: Vec<Variable> = result.scan_locations.iter()
-                .chain(result.read_locations.iter()).cloned().collect();
-            let div_loss = fixation_diversity_loss(
-                &all_locs, cfg.diversity_sigma, cfg.diversity_vy,
+            // Content loss: BCE on whether scan fixation has ink.
+            let content_loss = if cfg.content_weight > 0.0 && cfg.n_scan > 0 {
+                let scan_logits = model.content_logits();
+                let scan_locs = &result.scan_locations;
+                if !scan_logits.is_empty() {
+                    let zero = Variable::new(
+                        Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false,
+                    );
+                    let mut loss_sum = zero;
+                    for (loc, logit) in scan_locs.iter().zip(scan_logits.iter()) {
+                        let grid = loc.unsqueeze(1)?.unsqueeze(2)?; // [B, 1, 1, 2]
+                        let sampled = grid_sample(&clean_var, &grid, 0, 0, true)?;
+                        let label_t = sampled.data().reshape(&[-1, 1])?
+                            .gt_scalar(0.1)?.to_dtype(DType::Float32)?;
+                        let label = Variable::new(label_t, false);
+                        let step_loss = bce_with_logits_loss(logit, &label)?;
+                        loss_sum = loss_sum.add(&step_loss)?;
+                    }
+                    loss_sum.mul_scalar(1.0 / scan_logits.len() as f64)?
+                } else {
+                    Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
+                }
+            } else {
+                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
+            };
+
+            // Attention losses — separate guide weights for scan vs read.
+            let scan_guide = if cfg.scan_guide_weight > 0.0 {
+                attention_guide_loss(
+                    &clean_var, &result.scan_locations, cfg.blur_sigma_ratio,
+                )?
+            } else {
+                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
+            };
+            let read_guide = if cfg.read_guide_weight > 0.0 {
+                attention_guide_loss(
+                    &clean_var, &result.read_locations, cfg.blur_sigma_ratio,
+                )?
+            } else {
+                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
+            };
+
+            // Void repulsion — penalize fixations landing in empty space.
+            let scan_void = if cfg.scan_void_weight > 0.0 {
+                void_repulsion_with_grid(
+                    &clean_var, &result.scan_locations,
+                    cfg.patch_size, cfg.scan_patch_w, 0.1,
+                    scan_void_grid.as_ref(),
+                )?
+            } else {
+                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
+            };
+            let read_void = if cfg.void_weight > 0.0 {
+                void_repulsion_with_grid(
+                    &clean_var, &result.read_locations,
+                    cfg.patch_size, cfg.patch_size, 0.1,
+                    read_void_grid.as_ref(),
+                )?
+            } else {
+                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
+            };
+
+            // Split diversity: separate scan/read with different VY scaling.
+            let scan_div = fixation_diversity_loss(
+                &result.scan_locations, cfg.diversity_sigma, cfg.scan_vy,
             )?;
+            let read_div = fixation_diversity_loss(
+                &result.read_locations, cfg.diversity_sigma, cfg.read_vy,
+            )?;
+            let div_loss = scan_div.add(&read_div)?;
 
             // Total loss.
             let total = letter_loss.add(&case_loss)?;
             let total = total.add(&recon_loss.mul_scalar(cfg.recon_weight)?)?;
+            let total = total.add(&recode_loss.mul_scalar(cfg.recode_weight)?)?;
+            let total = total.add(&content_loss.mul_scalar(cfg.content_weight)?)?;
             let total = total.add(&scan_guide.mul_scalar(cfg.scan_guide_weight)?)?;
             let total = total.add(&read_guide.mul_scalar(cfg.read_guide_weight)?)?;
+            let total = total.add(&scan_void.mul_scalar(cfg.scan_void_weight)?)?;
+            let total = total.add(&read_void.mul_scalar(cfg.void_weight)?)?;
             let total = total.add(&div_loss.mul_scalar(cfg.diversity_weight)?)?;
 
             optimizer.zero_grad();
@@ -242,6 +342,8 @@ pub fn train_letter(
             model.graph.detach_state();
 
             // Record metrics.
+            let all_locs: Vec<Variable> = result.scan_locations.iter()
+                .chain(result.read_locations.iter()).cloned().collect();
             let (hr, _) = fixation_hit_rate(&clean_var, &all_locs, 0.3)?;
             let letter_acc = accuracy(&result.letter_logits.data(), &letter_idx)?;
             let case_acc_val = accuracy(&result.case_logits.data(), &case_idx)?;
@@ -251,9 +353,14 @@ pub fn train_letter(
             model.graph.record_scalar("letter_acc", letter_acc);
             model.graph.record_scalar("case_acc", case_acc_val);
             model.graph.record_scalar("recon_mse", recon_loss.item()?);
+            model.graph.record_scalar("recode", recode_loss.item()?);
+            model.graph.record_scalar("content", content_loss.item()?);
             model.graph.record_scalar("guide",
                 scan_guide.item()? * cfg.scan_guide_weight
                 + read_guide.item()? * cfg.read_guide_weight);
+            model.graph.record_scalar("void",
+                scan_void.item()? * cfg.scan_void_weight
+                + read_void.item()? * cfg.void_weight);
             model.graph.record_scalar("diversity", div_loss.item()?);
             model.graph.record_scalar("total", total.item()?);
             model.graph.record_scalar("hit_rate", hr);
@@ -282,7 +389,10 @@ pub fn train_letter(
             letter_acc: model.graph.trend("letter_acc").latest(),
             case_acc: model.graph.trend("case_acc").latest(),
             recon_loss: model.graph.trend("recon_mse").latest(),
+            recode_loss: model.graph.trend("recode").latest(),
+            content_loss: model.graph.trend("content").latest(),
             guide_loss: model.graph.trend("guide").latest(),
+            void_loss: model.graph.trend("void").latest(),
             div_loss: model.graph.trend("diversity").latest(),
             total_loss: model.graph.trend("total").latest(),
             hit_rate: model.graph.trend("hit_rate").latest(),
@@ -303,11 +413,12 @@ pub fn train_letter(
         // Append to streaming log.
         if let Some(ref mut f) = log_file {
             writeln!(f,
-                "epoch {:3}  ltr={:.4}({:.0}%)  case={:.4}({:.0}%)  recon={:.4}  guide={:.4}  div={:.4}  hit={:.0}%  lr={:.6}  [{:?}]  ETA {:?}",
+                "epoch {:3}  ltr={:.4}({:.0}%)  case={:.4}({:.0}%)  recon={:.4}  recode={:.4}  content={:.4}  guide={:.4}  void={:.4}  div={:.4}  hit={:.0}%  lr={:.6}  [{:?}]  ETA {:?}",
                 epoch + 1,
                 stats.letter_loss, stats.letter_acc * 100.0,
                 stats.case_loss, stats.case_acc * 100.0,
-                stats.recon_loss, stats.guide_loss, stats.div_loss,
+                stats.recon_loss, stats.recode_loss, stats.content_loss,
+                stats.guide_loss, stats.void_loss, stats.div_loss,
                 stats.hit_rate * 100.0, stats.lr,
                 stats.duration, stats.eta,
             ).ok();
@@ -378,9 +489,67 @@ fn case_idx_from_float(case_label: &Tensor) -> Result<Tensor> {
 }
 
 /// Compute classification accuracy from logits and target indices (on-device).
+
 fn accuracy(logits: &Tensor, targets: &Tensor) -> Result<f64> {
     let preds = logits.argmax(1, false)?;
     preds.eq_tensor(targets)?.mean()?.item()
+}
+
+/// Rotate prior run artifacts in place by appending a timestamp suffix.
+///
+/// Renames `training.log` → `training_YYYYMMDD_HHMMSS.log`, etc.
+/// Also rotates `manifest.json`, `dashboard.html`, and `*.fdl.gz` checkpoints.
+/// No-op if no log file exists.
+fn rotate_prior_run(save_dir: &str) {
+    let log_path = format!("{save_dir}/training.log");
+    if !std::path::Path::new(&log_path).exists() {
+        return;
+    }
+
+    // Timestamp from the log file's modification time, fallback to now.
+    let ts = fs::metadata(&log_path)
+        .and_then(|m| m.modified())
+        .unwrap_or_else(|_| std::time::SystemTime::now());
+    let secs = ts.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+    let (s, mi, h) = (secs % 60, (secs / 60) % 60, (secs / 3600) % 24);
+    let days = secs / 86400;
+    let (y, mo, d) = civil_from_days(days as i64);
+    let stamp = format!("{y:04}{mo:02}{d:02}_{h:02}{mi:02}{s:02}");
+
+    // Files with extensions: rename base_STAMP.ext
+    let ext_files = [
+        "training.log", "training.csv", "training.html",
+        "manifest.json", "dashboard.html",
+    ];
+    for name in &ext_files {
+        let src = format!("{save_dir}/{name}");
+        if std::path::Path::new(&src).exists() {
+            let rotated = if let Some(dot) = name.rfind('.') {
+                format!("{save_dir}/{}_{stamp}.{}", &name[..dot], &name[dot + 1..])
+            } else {
+                format!("{save_dir}/{name}_{stamp}")
+            };
+            let _ = fs::rename(&src, &rotated);
+        }
+    }
+
+    eprintln!("Rotated prior run artifacts with suffix _{stamp}");
+}
+
+/// Convert days since Unix epoch to (year, month, day). Civil calendar.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    // Algorithm from Howard Hinnant (public domain).
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 #[cfg(test)]
@@ -410,11 +579,11 @@ mod tests {
         train_letter(&cfg, &ds, Some(&|s: &EpochStats| {
             eprintln!(
                 "epoch {:2}  ltr={:.4}({:.0}%)  case={:.4}({:.0}%)  recon={:.4}  \
-                 guide={:.4}  div={:.4}  total={:.4}  hit={:.0}%  lr={:.6}  [{:?}]  ETA {:?}",
+                 guide={:.4}  void={:.4}  div={:.4}  total={:.4}  hit={:.0}%  lr={:.6}  [{:?}]  ETA {:?}",
                 s.epoch + 1,
                 s.letter_loss, s.letter_acc * 100.0,
                 s.case_loss, s.case_acc * 100.0,
-                s.recon_loss, s.guide_loss, s.div_loss,
+                s.recon_loss, s.guide_loss, s.void_loss, s.div_loss,
                 s.total_loss, s.hit_rate * 100.0, s.lr,
                 s.duration, s.eta,
             );

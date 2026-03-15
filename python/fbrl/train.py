@@ -108,13 +108,30 @@ def train_model(cfg):
 
     # Log file
     content_hdr = f"  {'content':>7s}" if n_scan_glimpses > 0 else ""
+    vram_hdr = f"  {'vram':>7s}" if use_cuda else ""
     header = (f"{'epoch':>5s}  {'recon':>6s}  {'ltr':>6s}  {'case':>6s}  {'attn':>7s}  {'div':>6s}  "
-              f"{'hit':>6s}  {'recode':>6s}{content_hdr}  {'lr':>8s}  time")
+              f"{'hit':>6s}  {'recode':>6s}{content_hdr}  {'lr':>8s}{vram_hdr}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
+
+    # --- Profiling infrastructure (epoch 0 only) ---
+    prof = {k: 0.0 for k in [
+        'forward', 'cls_recon', 'recode', 'content', 'attn_void_div',
+        'total_sum', 'zero_grad', 'backward', 'clip', 'step', 'detach_metrics',
+    ]}
+    def sync():
+        if use_cuda:
+            torch.cuda.synchronize()
 
     for epoch in range(start_epoch, end_epoch):
         epoch_start = time.time()
         tracker.reset_epoch()
+        if use_cuda:
+            torch.cuda.reset_peak_memory_stats()
+        probe = (epoch == start_epoch)
+        if probe:
+            for k in prof:
+                prof[k] = 0.0
+        n_batches = 0
 
         for img, clean, letters, cases, _fonts, partner_clean in dataloader:
             img = img.to(device)
@@ -125,12 +142,47 @@ def train_model(cfg):
             case_idx = torch.tensor([0 if c == 'upper' else 1 for c in cases], device=device)
             case_float = case_idx.float().unsqueeze(1)
 
+            if probe: sync()
+            t0 = time.perf_counter()
+
             recon, letter_logits, case_logits, locations, latent, scan_content_logits = model(img, case_float)
             actual_n_scan = len(scan_content_logits)
+
+            if probe: sync(); prof['forward'] += time.perf_counter() - t0
+            t1 = time.perf_counter()
 
             recon_loss = criterion(recon, img)
             letter_cls_loss = F.cross_entropy(letter_logits, letter_idx)
             case_cls_loss = F.cross_entropy(case_logits, case_idx)
+
+            if probe: sync(); prof['cls_recon'] += time.perf_counter() - t1
+            t2 = time.perf_counter()
+
+            # Recode (measured before other losses to match Rust order).
+            recode_loss_val = 0.0
+            if dataset.has_partners and recode_weight > 0:
+                flipped_case = 1.0 - case_float
+                recode_img = model.decoder(latent, flipped_case)
+                recode_loss = criterion(recode_img, partner_clean)
+                recode_loss_val = recode_loss.item()
+
+            if probe: sync(); prof['recode'] += time.perf_counter() - t2
+            t3 = time.perf_counter()
+
+            content_loss = torch.tensor(0.0, device=device)
+            if content_weight > 0 and actual_n_scan > 0:
+                bce = torch.nn.BCEWithLogitsLoss()
+                scan_locs = locations[1:actual_n_scan + 1]
+                for loc, logit in zip(scan_locs, scan_content_logits):
+                    grid = loc.view(img.shape[0], 1, 1, 2)
+                    sampled = F.grid_sample(clean, grid, align_corners=True,
+                                            padding_mode='zeros')
+                    label = (sampled.view(-1, 1) > 0.1).float()
+                    content_loss = content_loss + bce(logit, label)
+                content_loss = content_loss / actual_n_scan
+
+            if probe: sync(); prof['content'] += time.perf_counter() - t3
+            t4 = time.perf_counter()
 
             if actual_n_scan > 0:
                 scan_attn = attention_content_loss(clean, locations[:actual_n_scan + 1],
@@ -152,18 +204,6 @@ def train_model(cfg):
                 div_loss = fixation_diversity_loss(locations, sigma=diversity_sigma,
                                                    vy=diversity_vy)
 
-            content_loss = torch.tensor(0.0, device=device)
-            if content_weight > 0 and actual_n_scan > 0:
-                bce = torch.nn.BCEWithLogitsLoss()
-                scan_locs = locations[1:actual_n_scan + 1]
-                for loc, logit in zip(scan_locs, scan_content_logits):
-                    grid = loc.view(img.shape[0], 1, 1, 2)
-                    sampled = F.grid_sample(clean, grid, align_corners=True,
-                                            padding_mode='zeros')
-                    label = (sampled.view(-1, 1) > 0.1).float()
-                    content_loss = content_loss + bce(logit, label)
-                content_loss = content_loss / actual_n_scan
-
             void_loss = torch.tensor(0.0, device=device)
             if scan_void_weight > 0 and actual_n_scan > 0:
                 scan_sample_locs = locations[1:actual_n_scan + 1]
@@ -171,26 +211,57 @@ def train_model(cfg):
                 void_loss = void_loss + scan_void_weight * void_repulsion(
                     clean, scan_sample_locs, scan_ph, scan_pw)
             if void_weight > 0:
-                read_sample_locs = locations[actual_n_scan + 1:-1]
+                read_sample_locs = locations[actual_n_scan + 1:]
                 void_loss = void_loss + void_weight * void_repulsion(
                     clean, read_sample_locs, patch_size, patch_size)
+
+            if probe: sync(); prof['attn_void_div'] += time.perf_counter() - t4
+            t5 = time.perf_counter()
 
             total_loss = (recon_loss + letter_cls_loss + case_cls_loss
                           + attn_loss + diversity_weight * div_loss
                           + content_weight * content_loss + void_loss)
 
-            recode_loss_val = 0.0
             if dataset.has_partners and recode_weight > 0:
-                flipped_case = 1.0 - case_float
-                recode_img = model.decoder(latent, flipped_case)
-                recode_loss = criterion(recode_img, partner_clean)
                 total_loss = total_loss + recode_weight * recode_loss
-                recode_loss_val = recode_loss.item()
+
+            if probe: sync(); prof['total_sum'] += time.perf_counter() - t5
+
+            if probe and n_batches == 0:
+                # Count autograd nodes via BFS over grad_fn graph.
+                seen = set()
+                queue = [total_loss.grad_fn]
+                while queue:
+                    fn = queue.pop(0)
+                    if fn is None or id(fn) in seen:
+                        continue
+                    seen.add(id(fn))
+                    for child, _ in fn.next_functions:
+                        queue.append(child)
+                print(f"--- Autograd graph (batch 0) ---")
+                print(f"  total loss: {len(seen)} nodes")
+
+            t6 = time.perf_counter()
 
             optimizer.zero_grad()
+
+            if probe: sync(); prof['zero_grad'] += time.perf_counter() - t6
+            t7 = time.perf_counter()
+
             total_loss.backward()
+
+            if probe: sync(); prof['backward'] += time.perf_counter() - t7
+            t8 = time.perf_counter()
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+
+            if probe: sync(); prof['clip'] += time.perf_counter() - t8
+            t9 = time.perf_counter()
+
             optimizer.step()
+
+            if probe: sync(); prof['step'] += time.perf_counter() - t9
+            t10 = time.perf_counter()
 
             with torch.no_grad():
                 hr, hi = fixation_hit_rate(clean, locations)
@@ -201,6 +272,24 @@ def train_model(cfg):
                            void=void_loss,
                            recode=recode_loss_val, hit_rate=hr, hit_intensity=hi)
 
+            if probe: sync(); prof['detach_metrics'] += time.perf_counter() - t10
+            n_batches += 1
+
+        if probe:
+            total_probed = sum(prof.values())
+            print(f"=== Epoch 0 profile ({n_batches} batches, {total_probed:.3f}s probed) ===")
+            for k, v in prof.items():
+                pct = v / total_probed * 100 if total_probed > 0 else 0
+                print(f"  {k:16s} {v:8.3f}s  ({pct:.1f}%)")
+            if use_cuda:
+                alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
+                reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
+                free, total = torch.cuda.mem_get_info()
+                used_mb = (total - free) / 1024**2
+                total_mb = total / 1024**2
+                print(f"  VRAM: alloc={alloc_mb:.0f}MB  reserved={reserved_mb:.0f}MB  "
+                      f"device_used={used_mb:.0f}MB/{total_mb:.0f}MB")
+
         avgs = tracker.end_epoch()
         epoch_time = time.time() - epoch_start
         elapsed = time.time() - train_start
@@ -210,19 +299,22 @@ def train_model(cfg):
 
         content_str = f"  Cont {avgs['content']:.4f}" if n_scan_glimpses > 0 else ""
         void_str = f"  Void {avgs['void']:.4f}" if (void_weight > 0 or scan_void_weight > 0) else ""
+        vram_mb = torch.cuda.max_memory_allocated() / 1024**2 if use_cuda else 0
+        vram_str = f"  VRAM {vram_mb:.0f}MB" if use_cuda else ""
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avgs['recon']:.4f}  Ltr {avgs['letter_cls']:.4f}  "
               f"Case {avgs['case_cls']:.4f}  Attn {avgs['attn']:.4f}  "
               f"Div {avgs['div']:.4f}{content_str}{void_str}  Hit {avgs['hit_rate']:.0%}  "
               f"Recode {avgs['recode']:.4f}  "
-              f"lr {current_lr:.6f}  "
+              f"lr {current_lr:.6f}{vram_str}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
         content_log = f"  {avgs['content']:>7.4f}" if n_scan_glimpses > 0 else ""
+        vram_log = f"  {vram_mb:>6.0f}MB" if use_cuda else ""
         logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {avgs['letter_cls']:>6.4f}  "
                           f"{avgs['case_cls']:>6.4f}  {avgs['attn']:>7.4f}  {avgs['div']:>6.4f}  "
-                          f"{avgs['hit_rate']:>6.4f}  {avgs['recode']:>6.4f}{content_log}  {current_lr:>8.6f}  "
-                          f"{epoch_time:.1f}s")
+                          f"{avgs['hit_rate']:>6.4f}  {avgs['recode']:>6.4f}{content_log}  {current_lr:>8.6f}"
+                          f"{vram_log}  {epoch_time:.1f}s")
         scheduler.step()
 
         if (epoch + 1 - start_epoch) % checkpoint_interval == 0:
