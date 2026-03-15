@@ -60,6 +60,7 @@ impl LetterModel {
         let decoder = VisualDecoder::new(latent_dim + 1, 128, 128)?;
 
         let mut builder = FlowBuilder::from(Identity)
+            .label("LetterModel")
             .tag("image")
             .input(&["case"])
             .through(H0Init::new(latent_dim)?);

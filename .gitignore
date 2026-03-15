@@ -2,3 +2,4 @@ target/
 .*/
 __pycache__/
 docker-compose.override.yml
+**/checkpoint_epoch_*.fdl.gz

@@ -66,7 +66,7 @@ impl Default for LetterConfig {
             patch_size: 12,
             scan_patch_w: 18,
             n_scales: 1,
-            latent_dim: 128,
+            latent_dim: 256,
 
             batch_size: 32,
             epochs: 100,
@@ -165,6 +165,7 @@ pub fn train_letter(
             eprintln!("warning: monitor server: {e}");
         }
         m.watch(&model.graph);
+        m.set_metadata(serde_json::to_value(cfg).unwrap_or_default());
         if !cfg.save_dir.is_empty() {
             m.save_html(&format!("{}/dashboard.html", cfg.save_dir));
         }
@@ -179,6 +180,11 @@ pub fn train_letter(
     ];
 
     for epoch in 0..cfg.epochs {
+        // Enable profiling on the last epoch so finish_with() captures node timings.
+        if epoch + 1 == cfg.epochs {
+            model.graph.enable_profiling();
+        }
+
         loader.reset();
         let epoch_start = Instant::now();
         let mut n_batches = 0usize;
@@ -313,7 +319,7 @@ pub fn train_letter(
             && (epoch + 1) % cfg.checkpoint_interval == 0
         {
             let path = format!("{}/checkpoint_epoch_{}.fdl.gz", cfg.save_dir, epoch + 1);
-            flodl::save_parameters_file(&path, &params)?;
+            model.graph.save_checkpoint(&path)?;
         }
     }
 
@@ -324,8 +330,9 @@ pub fn train_letter(
 
     // Save final outputs.
     if !cfg.save_dir.is_empty() {
-        let params = model.parameters();
-        flodl::save_parameters_file(&format!("{}/model_final.fdl.gz", cfg.save_dir), &params)?;
+        model.graph.save_checkpoint(
+            &format!("{}/model_final.fdl.gz", cfg.save_dir),
+        )?;
         if let Err(e) = model.graph.plot_html(
             &format!("{}/training.html", cfg.save_dir), metric_tags,
         ) {
