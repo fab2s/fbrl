@@ -4,6 +4,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
 import os
+import json
+import platform
+import resource
 import time
 
 from fbrl import _resolve_device
@@ -105,12 +108,15 @@ def train_model(cfg):
 
     end_epoch = start_epoch + epochs
     train_start = time.time()
+    epoch_times = []
+    vram_probe = {}
 
     # Log file
     content_hdr = f"  {'content':>7s}" if n_scan_glimpses > 0 else ""
     vram_hdr = f"  {'vram':>7s}" if use_cuda else ""
+    rss_hdr = f"  {'rss':>7s}"
     header = (f"{'epoch':>5s}  {'recon':>6s}  {'ltr':>6s}  {'case':>6s}  {'attn':>7s}  {'div':>6s}  "
-              f"{'hit':>6s}  {'recode':>6s}{content_hdr}  {'lr':>8s}{vram_hdr}  time")
+              f"{'hit':>6s}  {'recode':>6s}{content_hdr}  {'lr':>8s}{vram_hdr}{rss_hdr}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
 
     # --- Profiling infrastructure (epoch 0 only) ---
@@ -287,6 +293,12 @@ def train_model(cfg):
                 free, total = torch.cuda.mem_get_info()
                 used_mb = (total - free) / 1024**2
                 total_mb = total / 1024**2
+                vram_probe = {
+                    'alloc_mb': round(alloc_mb),
+                    'reserved_mb': round(reserved_mb),
+                    'device_used_mb': round(used_mb),
+                    'device_total_mb': round(total_mb),
+                }
                 print(f"  VRAM: alloc={alloc_mb:.0f}MB  reserved={reserved_mb:.0f}MB  "
                       f"device_used={used_mb:.0f}MB/{total_mb:.0f}MB")
 
@@ -297,10 +309,24 @@ def train_model(cfg):
         eta = format_eta(elapsed, done, epochs - done)
         current_lr = scheduler.get_last_lr()[0]
 
+        # Per-epoch memory snapshot.
+        vram_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2 if use_cuda else 0
+        if use_cuda:
+            free, total_dev = torch.cuda.mem_get_info()
+            vram_used_mb = (total_dev - free) / 1024**2
+        else:
+            vram_used_mb = 0
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+
+        epoch_rec = {'time_s': round(epoch_time, 2), 'rss_mb': round(rss_mb)}
+        if use_cuda:
+            epoch_rec['vram_alloc_mb'] = round(vram_alloc_mb)
+            epoch_rec['vram_used_mb'] = round(vram_used_mb)
+        epoch_times.append(epoch_rec)
+
         content_str = f"  Cont {avgs['content']:.4f}" if n_scan_glimpses > 0 else ""
         void_str = f"  Void {avgs['void']:.4f}" if (void_weight > 0 or scan_void_weight > 0) else ""
-        vram_mb = torch.cuda.max_memory_allocated() / 1024**2 if use_cuda else 0
-        vram_str = f"  VRAM {vram_mb:.0f}MB" if use_cuda else ""
+        vram_str = f"  VRAM {vram_alloc_mb:.0f}MB" if use_cuda else ""
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avgs['recon']:.4f}  Ltr {avgs['letter_cls']:.4f}  "
               f"Case {avgs['case_cls']:.4f}  Attn {avgs['attn']:.4f}  "
@@ -310,11 +336,12 @@ def train_model(cfg):
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
         content_log = f"  {avgs['content']:>7.4f}" if n_scan_glimpses > 0 else ""
-        vram_log = f"  {vram_mb:>6.0f}MB" if use_cuda else ""
+        vram_log = f"  {vram_used_mb:>6.0f}MB" if use_cuda else ""
+        rss_log = f"  {rss_mb:>6.0f}MB"
         logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {avgs['letter_cls']:>6.4f}  "
                           f"{avgs['case_cls']:>6.4f}  {avgs['attn']:>7.4f}  {avgs['div']:>6.4f}  "
                           f"{avgs['hit_rate']:>6.4f}  {avgs['recode']:>6.4f}{content_log}  {current_lr:>8.6f}"
-                          f"{vram_log}  {epoch_time:.1f}s")
+                          f"{vram_log}{rss_log}  {epoch_time:.1f}s")
         scheduler.step()
 
         if (epoch + 1 - start_epoch) % checkpoint_interval == 0:
@@ -375,6 +402,41 @@ def train_model(cfg):
     total_min, total_s = divmod(int(total_time), 60)
     print(f"Training complete in {total_min}m{total_s:02d}s. "
           f"Model and graph saved in {save_dir}")
+
+    # --- Benchmark report ---
+    peak_rss_mb = max(e['rss_mb'] for e in epoch_times)
+    bench = {
+        'framework': 'pytorch',
+        'torch_version': torch.__version__,
+        'python_version': platform.python_version(),
+        'model': 'letter',
+        'config': {
+            'n_scan': n_scan_glimpses,
+            'n_read': n_glimpses,
+            'latent_dim': cfg.latent_dim,
+            'batch_size': batch_size,
+            'epochs': epochs,
+        },
+        'ram_peak_rss_mb': round(peak_rss_mb),
+        'total_time_s': round(total_time, 1),
+        'avg_epoch_s': round(total_time / epochs, 1),
+        'epoch_times_s': [e['time_s'] for e in epoch_times],
+    }
+    if use_cuda:
+        bench['gpu'] = torch.cuda.get_device_name(0)
+        bench['vram'] = dict(vram_probe)  # epoch 0 probe: alloc, reserved, device_used, device_total
+
+    bench_path = os.path.join(save_dir, 'benchmark.json')
+    with open(bench_path, 'w') as f:
+        json.dump(bench, f, indent=2)
+
+    gpu_str = f"\nGPU:         {bench['gpu']}" if use_cuda else ""
+    vram_str = (f"\nVRAM:        {bench['vram']['alloc_mb']} MB alloc, "
+                f"{bench['vram']['device_used_mb']} MB device") if use_cuda else ""
+    print(f"\n--- Benchmark ---{gpu_str}{vram_str}")
+    print(f"RAM:         {bench['ram_peak_rss_mb']} MB peak RSS")
+    print(f"Avg epoch:   {bench['avg_epoch_s']}s  ({epochs} epochs, {bench['total_time_s']}s total)")
+    print(f"Saved:       {bench_path}")
 
 
 # --- Attention Pre-Check ---

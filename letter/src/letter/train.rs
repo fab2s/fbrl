@@ -11,6 +11,7 @@ use flodl::nn::{
 };
 use flodl::monitor::Monitor;
 use flodl::tensor::{cuda_available, Device, DType, Result, Tensor, TensorError, TensorOptions};
+use flodl::CpuWorker;
 use serde::{Serialize, Deserialize};
 
 use super::data::{LetterDataset, LetterLoader};
@@ -187,6 +188,9 @@ pub fn train_letter(
         None
     };
 
+    // Background worker for async checkpointing.
+    let mut worker = CpuWorker::new();
+
     let metric_tags: &[&str] = &[
         "letter_ce", "case_ce", "letter_acc", "case_acc",
         "recon_mse", "recode", "content", "guide", "void", "diversity",
@@ -202,6 +206,9 @@ pub fn train_letter(
     let read_void_grid = if cfg.void_weight > 0.0 {
         Some(build_void_grid(cfg.patch_size, cfg.patch_size, img_h, img_w, device)?)
     } else { None };
+
+    let train_start = Instant::now();
+    let mut epoch_times: Vec<f64> = Vec::with_capacity(cfg.epochs);
 
     for epoch in 0..cfg.epochs {
         // Enable profiling on the last epoch so finish_with() captures node timings.
@@ -379,6 +386,7 @@ pub fn train_letter(
         model.graph.flush(&[]);
 
         let epoch_dur = epoch_start.elapsed();
+        epoch_times.push((epoch_dur.as_secs_f64() * 100.0).round() / 100.0);
         let eta_secs = model.graph.eta(cfg.epochs);
         let eta = std::time::Duration::from_secs_f64(eta_secs);
 
@@ -425,12 +433,21 @@ pub fn train_letter(
             f.flush().ok();
         }
 
-        // Checkpoint.
+        // Async checkpoint — skip if worker still saving the previous one.
         if !cfg.save_dir.is_empty() && cfg.checkpoint_interval > 0
             && (epoch + 1) % cfg.checkpoint_interval == 0
         {
-            let path = format!("{}/checkpoint_epoch_{}.fdl.gz", cfg.save_dir, epoch + 1);
-            model.graph.save_checkpoint(&path)?;
+            if worker.is_idle() {
+                let path = format!("{}/checkpoint_epoch_{}.fdl.gz", cfg.save_dir, epoch + 1);
+                let snap = model.graph.snapshot_cpu()?;
+                worker.submit(move || {
+                    if let Err(e) = snap.save_file(&path) {
+                        eprintln!("warning: async checkpoint: {e}");
+                    }
+                });
+            } else {
+                eprintln!("epoch {}: skipping checkpoint (worker busy)", epoch + 1);
+            }
         }
     }
 
@@ -441,9 +458,15 @@ pub fn train_letter(
 
     // Save final outputs.
     if !cfg.save_dir.is_empty() {
-        model.graph.save_checkpoint(
-            &format!("{}/model_final.fdl.gz", cfg.save_dir),
-        )?;
+        // Submit final checkpoint to worker, then generate artifacts while it saves.
+        let final_path = format!("{}/model_final.fdl.gz", cfg.save_dir);
+        let snap = model.graph.snapshot_cpu()?;
+        worker.submit(move || {
+            if let Err(e) = snap.save_file(&final_path) {
+                eprintln!("warning: final checkpoint: {e}");
+            }
+        });
+
         if let Err(e) = model.graph.plot_html(
             &format!("{}/training.html", cfg.save_dir), metric_tags,
         ) {
@@ -478,6 +501,61 @@ pub fn train_letter(
         ) {
             eprintln!("warning: write manifest: {e}");
         }
+
+        // Benchmark report.
+        let total_time = train_start.elapsed().as_secs_f64();
+        let rss_mb = (flodl::tensor::rss_kb() as f64 / 1024.0).round() as i64;
+        let mut bench = serde_json::json!({
+            "framework": "flodl",
+            "model": "letter",
+            "config": {
+                "n_scan": cfg.n_scan,
+                "n_read": cfg.n_read,
+                "latent_dim": cfg.latent_dim,
+                "batch_size": cfg.batch_size,
+                "epochs": cfg.epochs,
+            },
+            "ram_peak_rss_mb": rss_mb,
+            "total_time_s": (total_time * 10.0).round() / 10.0,
+            "avg_epoch_s": ((total_time / cfg.epochs as f64) * 10.0).round() / 10.0,
+            "epoch_times_s": epoch_times,
+        });
+        if device != Device::CPU {
+            if let Ok((used, total)) = flodl::tensor::cuda_memory_info() {
+                let gpu = flodl::tensor::cuda_device_name().unwrap_or_default();
+                bench["gpu"] = serde_json::json!(gpu);
+                bench["vram"] = serde_json::json!({
+                    "device_used_mb": (used as f64 / 1024.0 / 1024.0).round() as i64,
+                    "device_total_mb": (total as f64 / 1024.0 / 1024.0).round() as i64,
+                });
+            }
+        }
+        let bench_path = format!("{}/benchmark.json", cfg.save_dir);
+        if let Err(e) = fs::write(
+            &bench_path,
+            serde_json::to_string_pretty(&bench).unwrap_or_default(),
+        ) {
+            eprintln!("warning: write benchmark: {e}");
+        }
+
+        // Print summary.
+        if let Some(gpu) = bench.get("gpu") {
+            eprintln!("\n--- Benchmark ---");
+            eprintln!("GPU:         {}", gpu.as_str().unwrap_or("?"));
+            if let Some(vram) = bench.get("vram") {
+                eprintln!("VRAM:        {} MB device",
+                    vram["device_used_mb"]);
+            }
+        } else {
+            eprintln!("\n--- Benchmark ---");
+        }
+        eprintln!("RAM:         {} MB peak RSS", bench["ram_peak_rss_mb"]);
+        eprintln!("Avg epoch:   {}s  ({} epochs, {}s total)",
+            bench["avg_epoch_s"], cfg.epochs, bench["total_time_s"]);
+        eprintln!("Saved:       {bench_path}");
+
+        // Wait for all background saves to complete.
+        worker.finish();
     }
 
     Ok(())
