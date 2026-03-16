@@ -45,6 +45,8 @@ struct MetaEntry {
     clean: String,
     letter: String,
     case: String,
+    #[serde(default)]
+    font: String,
 }
 
 /// Load a dataset from a Python-generated data directory.
@@ -66,9 +68,10 @@ pub fn load_letter_dataset(dir: &str) -> Result<LetterDataset> {
         clean: Tensor,
         letter_idx: i64,
         case_label: f32,
+        font: String,
     }
     let mut raw_samples = Vec::with_capacity(meta.len());
-    let mut clean_by_id: HashMap<(i64, bool), Tensor> = HashMap::new(); // (letter_idx, is_lower)
+    let mut clean_by_id: HashMap<(i64, bool, String), Tensor> = HashMap::new(); // (letter_idx, is_lower, font)
 
     for entry in meta.values() {
         let img_path = resolve_data_path(dir_path, &entry.image);
@@ -93,10 +96,11 @@ pub fn load_letter_dataset(dir: &str) -> Result<LetterDataset> {
         let is_lower = entry.case == "lower";
         let case_label = if is_lower { 1.0f32 } else { 0.0f32 };
 
-        clean_by_id.entry((letter_idx, is_lower))
+        let font = entry.font.clone();
+        clean_by_id.entry((letter_idx, is_lower, font.clone()))
             .or_insert_with(|| clean_tensor.clone());
 
-        raw_samples.push(RawSample { image: img_tensor, clean: clean_tensor, letter_idx, case_label });
+        raw_samples.push(RawSample { image: img_tensor, clean: clean_tensor, letter_idx, case_label, font });
     }
 
     // Second pass: resolve partner clean images (opposite case, same letter).
@@ -104,7 +108,7 @@ pub fn load_letter_dataset(dir: &str) -> Result<LetterDataset> {
     let mut samples = Vec::with_capacity(raw_samples.len());
     for raw in raw_samples {
         let is_lower = raw.case_label > 0.5;
-        let partner_clean = if let Some(p) = clean_by_id.get(&(raw.letter_idx, !is_lower)) {
+        let partner_clean = if let Some(p) = clean_by_id.get(&(raw.letter_idx, !is_lower, raw.font.clone())) {
             p.clone()
         } else {
             has_partners = false;

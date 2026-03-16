@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use flodl::autograd::Variable;
 use flodl::nn::{
-    BatchNorm2d, Conv2d, ConvTranspose2d, Linear, Module, NamedInputModule, Parameter,
+    BatchNorm2d, Buffer, Conv2d, ConvTranspose2d, Linear, Module, NamedInputModule, Parameter,
 };
 use flodl::tensor::{Device, Result};
 
@@ -92,6 +92,12 @@ impl Module for VisualDecoder {
         params.extend(self.bn2.parameters());
         params.extend(self.conv.parameters());
         params
+    }
+
+    fn buffers(&self) -> Vec<Buffer> {
+        let mut bufs = self.bn1.buffers();
+        bufs.extend(self.bn2.buffers());
+        bufs
     }
 
     fn set_training(&self, training: bool) {

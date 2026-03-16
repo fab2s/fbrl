@@ -6,7 +6,7 @@
     "content_weight": 0.5,
     "diversity_sigma": 0.1,
     "diversity_weight": 1.0,
-    "epochs": 1,
+    "epochs": 100,
     "latent_dim": 256,
     "lr": 0.001,
     "max_grad_norm": 5.0,
@@ -35,9 +35,9 @@
   "model": "letter",
   "parent": null,
   "results": {
-    "case_acc": 0.5347902261398055,
-    "letter_acc": 0.07115384938872674,
-    "letter_ce": 3.081475898352536,
-    "recon_mse": 0.025491577319123528
+    "case_acc": 1.0,
+    "letter_acc": 1.0,
+    "letter_ce": 0.00002506931751585481,
+    "recon_mse": 0.0038571174478751013
   }
 }

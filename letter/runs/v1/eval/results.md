@@ -1,54 +1,25 @@
-Letter: 535/572 (93.5%)
-Case:   572/572 (100.0%)
-Avg MSE:      0.0480
-Per-font:
-  default                  : Letter 88.5%  Case 100.0%  (52)
-  dejavu-sans              : Letter 90.4%  Case 100.0%  (52)
-  dejavu-sans-bold         : Letter 96.2%  Case 100.0%  (52)
-  dejavu-serif             : Letter 92.3%  Case 100.0%  (52)
-  dejavu-serif-bold        : Letter 98.1%  Case 100.0%  (52)
-  liberation-mono          : Letter 98.1%  Case 100.0%  (52)
-  liberation-mono-bold     : Letter 98.1%  Case 100.0%  (52)
-  liberation-narrow        : Letter 94.2%  Case 100.0%  (52)
-  liberation-sans          : Letter 88.5%  Case 100.0%  (52)
-  liberation-sans-bold     : Letter 92.3%  Case 100.0%  (52)
-  liberation-serif         : Letter 92.3%  Case 100.0%  (52)
+# Evaluation Results
 
-Errors (37):
-  C (upper) → predicted D (font: default)
-  C (upper) → predicted D (font: dejavu-sans)
-  C (upper) → predicted D (font: dejavu-serif)
-  C (upper) → predicted D (font: liberation-narrow)
-  C (upper) → predicted D (font: liberation-sans)
-  C (upper) → predicted D (font: liberation-serif)
-  E (upper) → predicted F (font: default)
-  E (upper) → predicted F (font: dejavu-sans-bold)
-  I (upper) → predicted T (font: liberation-mono)
-  I (upper) → predicted T (font: liberation-mono-bold)
-  I (lower) → predicted l (font: dejavu-sans)
-  I (lower) → predicted l (font: dejavu-sans-bold)
-  I (lower) → predicted l (font: liberation-narrow)
-  I (lower) → predicted l (font: liberation-sans)
-  I (lower) → predicted j (font: liberation-sans-bold)
-  J (lower) → predicted i (font: default)
-  L (lower) → predicted j (font: liberation-sans-bold)
-  O (upper) → predicted D (font: default)
-  O (upper) → predicted D (font: dejavu-sans)
-  O (upper) → predicted D (font: dejavu-serif)
-  O (upper) → predicted D (font: dejavu-serif-bold)
-  O (upper) → predicted D (font: liberation-narrow)
-  O (upper) → predicted D (font: liberation-sans)
-  O (upper) → predicted D (font: liberation-sans-bold)
-  O (upper) → predicted D (font: liberation-serif)
-  Q (upper) → predicted D (font: default)
-  Q (upper) → predicted D (font: dejavu-sans)
-  Q (upper) → predicted D (font: dejavu-serif)
-  Q (upper) → predicted D (font: liberation-sans)
-  Q (upper) → predicted D (font: liberation-serif)
-  T (upper) → predicted I (font: liberation-sans)
-  T (upper) → predicted I (font: liberation-sans-bold)
-  U (upper) → predicted D (font: default)
-  U (upper) → predicted D (font: dejavu-sans)
-  U (upper) → predicted D (font: dejavu-serif)
-  U (upper) → predicted D (font: liberation-sans)
-  U (upper) → predicted D (font: liberation-serif)
+| Metric | Value |
+|--------|-------|
+| Letter | 572/572 (100.0%) |
+| Case | 572/572 (100.0%) |
+| Avg MSE | 0.0006 |
+
+## Per-font
+
+| Font | Letter | Case | N |
+|------|--------|------|---|
+| default | 100.0% | 100.0% | 52 |
+| dejavu-sans | 100.0% | 100.0% | 52 |
+| dejavu-sans-bold | 100.0% | 100.0% | 52 |
+| dejavu-serif | 100.0% | 100.0% | 52 |
+| dejavu-serif-bold | 100.0% | 100.0% | 52 |
+| liberation-mono | 100.0% | 100.0% | 52 |
+| liberation-mono-bold | 100.0% | 100.0% | 52 |
+| liberation-narrow | 100.0% | 100.0% | 52 |
+| liberation-sans | 100.0% | 100.0% | 52 |
+| liberation-sans-bold | 100.0% | 100.0% | 52 |
+| liberation-serif | 100.0% | 100.0% | 52 |
+
+No errors.

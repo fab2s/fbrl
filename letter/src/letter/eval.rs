@@ -281,18 +281,23 @@ fn generate_report(results: &[SampleResult]) -> String {
     let avg_mse: f64 = results.iter().map(|r| r.recon_mse).sum::<f64>() / total as f64;
 
     let mut s = String::with_capacity(4096);
-    let _ = writeln!(s, "Letter: {}/{} ({:.1}%)", letter_correct, total,
+    let _ = writeln!(s, "# Evaluation Results\n");
+    let _ = writeln!(s, "| Metric | Value |");
+    let _ = writeln!(s, "|--------|-------|");
+    let _ = writeln!(s, "| Letter | {}/{} ({:.1}%) |", letter_correct, total,
         letter_correct as f64 / total as f64 * 100.0);
-    let _ = writeln!(s, "Case:   {}/{} ({:.1}%)", case_correct, total,
+    let _ = writeln!(s, "| Case | {}/{} ({:.1}%) |", case_correct, total,
         case_correct as f64 / total as f64 * 100.0);
-    let _ = writeln!(s, "Avg MSE:      {:.4}", avg_mse);
+    let _ = writeln!(s, "| Avg MSE | {:.4} |", avg_mse);
 
     // Per-font breakdown.
     let mut fonts: Vec<String> = results.iter().map(|r| r.font.clone()).collect();
     fonts.sort();
     fonts.dedup();
 
-    let _ = writeln!(s, "Per-font:");
+    let _ = writeln!(s, "\n## Per-font\n");
+    let _ = writeln!(s, "| Font | Letter | Case | N |");
+    let _ = writeln!(s, "|------|--------|------|---|");
     for font in &fonts {
         let font_results: Vec<&SampleResult> = results.iter()
             .filter(|r| &r.font == font)
@@ -300,7 +305,7 @@ fn generate_report(results: &[SampleResult]) -> String {
         let n = font_results.len();
         let fl = font_results.iter().filter(|r| r.pred_letter_idx == r.letter_idx).count();
         let fc = font_results.iter().filter(|r| r.case_correct).count();
-        let _ = writeln!(s, "  {:25}: Letter {:.1}%  Case {:.1}%  ({})",
+        let _ = writeln!(s, "| {} | {:.1}% | {:.1}% | {} |",
             font, fl as f64 / n as f64 * 100.0, fc as f64 / n as f64 * 100.0, n);
     }
 
@@ -311,10 +316,12 @@ fn generate_report(results: &[SampleResult]) -> String {
     if errors.is_empty() {
         let _ = writeln!(s, "\nNo errors.");
     } else {
-        let _ = writeln!(s, "\nErrors ({}):", errors.len());
+        let _ = writeln!(s, "\n## Errors ({})\n", errors.len());
+        let _ = writeln!(s, "| Letter | Case | Predicted | Font |");
+        let _ = writeln!(s, "|--------|------|-----------|------|");
         for r in &errors {
             let pred = idx_to_letter(r.pred_letter_idx, &r.case_str);
-            let _ = writeln!(s, "  {} ({}) → predicted {} (font: {})",
+            let _ = writeln!(s, "| {} | {} | {} | {} |",
                 r.letter, r.case_str, pred, r.font);
         }
     }
@@ -448,6 +455,22 @@ fn generate_atlas(results: &[SampleResult]) -> String {
                 let img_b64 = base64_encode(&r.image_png);
                 let _ = write!(html, "<image href=\"data:image/png;base64,{}\" width=\"128\" height=\"128\"/>\n", img_b64);
             }
+            // Build full trajectory: scan locs then read locs.
+            let all_locs: Vec<([f64; 2], bool)> = r.scan_locs.iter().map(|l| (*l, true))
+                .chain(r.read_locs.iter().map(|l| (*l, false))).collect();
+
+            // Draw trajectory lines first (behind dots).
+            for pair in all_locs.windows(2) {
+                let (p0, _) = pair[0];
+                let (p1, _) = pair[1];
+                let x0 = (p0[0] + 1.0) / 2.0 * 128.0;
+                let y0 = (p0[1] + 1.0) / 2.0 * 128.0;
+                let x1 = (p1[0] + 1.0) / 2.0 * 128.0;
+                let y1 = (p1[1] + 1.0) / 2.0 * 128.0;
+                let _ = write!(html, "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#fff\" stroke-width=\"1\" opacity=\"0.4\"/>\n",
+                    x0, y0, x1, y1);
+            }
+
             // Scan fixations (blue).
             for (i, loc) in r.scan_locs.iter().enumerate() {
                 let px = (loc[0] + 1.0) / 2.0 * 128.0;
