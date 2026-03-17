@@ -1,0 +1,43 @@
+{
+  "config": {
+    "batch_size": 52,
+    "blur_sigma_ratio": 0.16,
+    "checkpoint_interval": 50,
+    "content_weight": 0.5,
+    "diversity_sigma": 0.1,
+    "diversity_weight": 1.0,
+    "epochs": 100,
+    "latent_dim": 256,
+    "lr": 0.001,
+    "max_grad_norm": 5.0,
+    "min_lr": 0.0,
+    "n_classes": 26,
+    "n_read": 6,
+    "n_scales": 1,
+    "n_scan": 1,
+    "patch_size": 12,
+    "read_guide_weight": 0.0,
+    "read_vy": 1.0,
+    "recode_weight": 1.0,
+    "recon_weight": 1.0,
+    "save_dir": "training",
+    "scan_guide_weight": 8.0,
+    "scan_patch_w": 18,
+    "scan_void_weight": 1.5,
+    "scan_vy": 0.3,
+    "void_weight": 0.5
+  },
+  "files": {
+    "dashboard": "dashboard.html",
+    "model": "model_final.fdl.gz"
+  },
+  "framework": "flodl",
+  "model": "letter",
+  "parent": null,
+  "results": {
+    "case_acc": 1.0,
+    "letter_acc": 1.0,
+    "letter_ce": 0.000014291289392076579,
+    "recon_mse": 0.0038358539300547404
+  }
+}
