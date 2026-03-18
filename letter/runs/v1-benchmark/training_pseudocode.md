@@ -107,7 +107,7 @@ for epoch in 0..100:
 
 | Aspect | Detail |
 |--------|--------|
-| Framework | flodl (Rust on libtorch 2.10+cu126), native autograd |
+| Framework | flodl 0.1.1 (Rust on libtorch 2.10+cu126), native autograd |
 | Checkpoints | `snapshot_cpu` → gzip → background thread (non-blocking) |
 | Logging | Streaming to file per-epoch + live monitor dashboard |
 | Data loading | Native PNG decode → Tensor, pre-batched in memory |

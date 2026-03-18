@@ -1,4 +1,4 @@
 git: n/a
-date: 2026-03-16T22:51:21.791290+00:00
+date: 2026-03-18T02:04:53.945076+00:00
 make: make train CONFIG=runs/letters/v7-void-repulsion/config.yaml DEVICE=auto CKPT=50
 cli: vision_training.py train --config runs/letters/v7-void-repulsion/config.yaml --device auto --checkpoint_interval 50
