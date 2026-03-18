@@ -159,8 +159,9 @@ impl LetterModel {
         self.graph.parameters()
     }
 
-    /// Propagate training mode.
-    pub fn set_training(&self, training: bool) {
-        self.graph.set_training(training);
-    }
+    /// Set training mode.
+    pub fn train(&self) { self.graph.train(); }
+
+    /// Set eval mode.
+    pub fn eval(&self) { self.graph.eval(); }
 }

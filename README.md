@@ -87,12 +87,20 @@ Key modules: `GlimpseSensor` (grid_sample + CNN), `Controller` (shared GRU + loc
 All commands run inside Docker — libtorch and Rust toolchain are container-only.
 
 ```bash
-make build                                              # Build Docker image
-make test                                               # Run unit tests (CUDA)
-make train-letter DATA=../python/data/letters MONITOR=3000  # Train with live dashboard
-make train-letter SYNTHETIC=64 EPOCHS=2                 # Quick smoke test
-make eval-letter RUN_DIR=runs/v1                        # Evaluate a trained model
-make shell                                              # Interactive container shell
+# Generate training data (requires the Python container)
+cd python && make up && make generate && cd ..
+
+# Train with live dashboard
+make train-letter DATA=../python/data/letters MONITOR=3000
+
+# Quick smoke test (synthetic data, no Python needed)
+make train-letter SYNTHETIC=64 EPOCHS=2
+
+# Evaluate a trained model
+make eval-letter RUN_DIR=runs/v1
+
+# Run unit tests
+make test
 ```
 
 The live monitor dashboard is served at `localhost:3000` during training.
@@ -100,6 +108,8 @@ The live monitor dashboard is served at `localhost:3000` during training.
 ## Requirements
 
 Docker with NVIDIA GPU runtime. The container includes libtorch 2.10 (cu126) and the Rust toolchain — nothing to install on the host.
+
+For local development against a local flodl checkout, create `letter/.cargo/config.toml` (gitignored) with a `[patch.crates-io]` pointing to your local path. See Cargo's [overriding dependencies](https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html).
 
 All results achieved on a single **GTX 1060 6GB** (Pascal, 2016). floDl works out of the box on Pascal-era hardware via libtorch — no version pinning required. The Python/PyTorch prototype needed PyTorch 2.5.1 specifically because 2.6+ dropped Pascal CUDA support.
 
@@ -118,7 +128,7 @@ fbrl/
 |   |   +-- loss.rs              #   Attention guide, diversity, hit rate
 |   |   +-- data.rs              #   PNG loader, batched pipeline
 |   +-- runs/                    #   Training runs + eval results
-|   +-- Cargo.toml               #   Depends on flodl (path dependency)
+|   +-- Cargo.toml               #   Depends on flodl (crates.io)
 +-- python/                      # PyTorch reference implementation (archived)
 |   +-- README.md                #   Python-specific docs + experiment history
 |   +-- runs/                    #   Archived models: letters v1-v8, bigrams, words, motor

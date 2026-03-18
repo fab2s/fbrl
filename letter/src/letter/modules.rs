@@ -146,12 +146,12 @@ impl ScanStep {
         }
 
         // Location: learnable x, free y from loc_head
-        let raw = self.controller.loc_head.forward(&new_h)?.tanh_act()?;
+        let raw = self.controller.loc_head.forward(&new_h)?.tanh()?;
         let y = raw.select(1, 1)?.unsqueeze(1)?; // [B, 1]
 
         let idx = *self.step_idx.borrow();
         let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
-        let x = scan_x.variable.tanh_act()?.expand(&[h.shape()[0], 1])?; // [B, 1]
+        let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?; // [B, 1]
         *self.step_idx.borrow_mut() = idx + 1;
 
         let new_loc = x.cat(&y, 1)?; // [B, 2]
@@ -297,7 +297,7 @@ impl AttentionStep {
         }; // loc_guard dropped here
 
         // Update location
-        let new_loc = self.controller.loc_head.forward(&new_h)?.tanh_act()?;
+        let new_loc = self.controller.loc_head.forward(&new_h)?.tanh()?;
         *self.location.borrow_mut() = Some(new_loc);
 
         Ok(new_h)
@@ -449,14 +449,14 @@ impl CombinedStep {
         // Location update.
         let new_loc = if is_scan {
             // Scan: learnable x, free y from loc_head.
-            let raw = self.controller.loc_head.forward(&new_h)?.tanh_act()?;
+            let raw = self.controller.loc_head.forward(&new_h)?.tanh()?;
             let y = raw.select(1, 1)?.unsqueeze(1)?;
             let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
-            let x = scan_x.variable.tanh_act()?.expand(&[h.shape()[0], 1])?;
+            let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?;
             x.cat(&y, 1)?
         } else {
             // Read: free (x, y).
-            self.controller.loc_head.forward(&new_h)?.tanh_act()?
+            self.controller.loc_head.forward(&new_h)?.tanh()?
         };
 
         *self.location.borrow_mut() = Some(new_loc);

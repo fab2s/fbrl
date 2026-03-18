@@ -180,7 +180,7 @@ pub fn eval_letter(
     let report = model.graph.load_checkpoint(&model_path.to_string_lossy())?;
     eprintln!("Checkpoint: {} loaded, {} skipped, {} missing",
         report.loaded.len(), report.skipped.len(), report.missing.len());
-    model.set_training(false);
+    model.eval();
 
     // Load test data.
     let samples = load_test_dataset(test_data_dir)?;

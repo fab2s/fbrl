@@ -147,7 +147,7 @@ pub fn train_letter(
     let params = model.parameters();
     let mut optimizer = Adam::new(&params, cfg.lr);
     let scheduler = CosineScheduler::new(cfg.lr, cfg.min_lr, cfg.epochs);
-    model.set_training(true);
+    model.train();
 
     let mut loader = LetterLoader::new(ds, cfg.batch_size, true);
     loader.set_device(device);
