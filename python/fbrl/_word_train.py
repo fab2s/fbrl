@@ -7,6 +7,7 @@ from torch.amp import autocast, GradScaler
 import numpy as np
 import os
 import time
+import resource
 
 import random
 from torch.nn.utils import clip_grad_norm_
@@ -259,9 +260,11 @@ def train_word_model(cfg):
         print("AMP enabled: FP16 forward passes, GradScaler for backward")
 
     pos_hdrs = '  '.join(f'{"pos"+str(p+1):>6s}' for p in range(n_positions))
+    vram_hdr = f"  {'vram':>7s}  {'spill':>6s}  {'gpu':>4s}" if device.type == 'cuda' else ""
     header = (f"{'epoch':>5s}  {'recon':>6s}  {pos_hdrs}  {'s_attn':>7s}  {'r_attn':>7s}  "
               f"{'div':>6s}  {'content':>7s}  {'isolat':>6s}  {'hit':>6s}  "
-              f"{'lr_attn':>8s}  {'lr_cls':>8s}  {'lr_rcon':>8s}  {'scaff':>6s}  time")
+              f"{'lr_attn':>8s}  {'lr_cls':>8s}  {'lr_rcon':>8s}  {'scaff':>6s}"
+              f"{vram_hdr}  time")
     logger = TrainingLogger(save_dir, header, start_epoch)
 
     for epoch in range(start_epoch, end_epoch):
@@ -453,6 +456,32 @@ def train_word_model(cfg):
         done = epoch - start_epoch + 1
         eta = format_eta(elapsed, done, epochs - done)
 
+        # GPU/VRAM snapshot.
+        use_cuda = device.type == 'cuda'
+        if use_cuda:
+            vram_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
+            free, total_dev = torch.cuda.mem_get_info()
+            vram_device_mb = (total_dev - free) / 1024**2
+            vram_total_mb = total_dev / 1024**2
+            vram_spill_mb = max(0, vram_alloc_mb - vram_total_mb)
+            # Sample GPU utilization via nvidia-smi every 10 epochs.
+            if (epoch - start_epoch) % 10 == 0:
+                try:
+                    import subprocess
+                    nv = subprocess.check_output(
+                        ['nvidia-smi', '--query-gpu=utilization.gpu',
+                         '--format=csv,noheader,nounits'],
+                        timeout=5).decode().strip()
+                    gpu_util = int(nv.split('\n')[0])
+                except Exception:
+                    gpu_util = -1
+            else:
+                gpu_util = -1
+        else:
+            vram_alloc_mb = vram_used_mb = vram_total_mb = 0
+            gpu_util = -1
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+
         if multi_head:
             lr_attn = attn_sched.get_last_lr()[0]
             lr_cls = cls_sched.get_last_lr()[0]
@@ -469,19 +498,26 @@ def train_word_model(cfg):
                             for p in range(n_positions))
         scaff_str = f"  scaff {scaffold_weight:.2f}" if scaffold_epochs > 0 else ""
         iso_str = f"  Iso {avgs['isolation']:.4f}" if isolation_weight > 0 else ""
+        gpu_str = f" GPU:{gpu_util}%" if gpu_util >= 0 else ""
+        spill_str = f"+{vram_spill_mb:.0f}MB spill" if vram_spill_mb > 0 else ""
+        vram_str = f"  VRAM {vram_device_mb:.0f}/{vram_total_mb:.0f}MB {spill_str}{gpu_str}" if use_cuda else ""
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avgs['recon']:.4f}  {pos_str}  "
               f"Attn {avgs['attn']:.4f}  "
               f"Div {avgs['div']:.4f}  Cont {avgs['content']:.4f}{iso_str}  Hit {avgs['hit_rate']:.0%}  "
-              f"{lr_str}{scaff_str}  "
+              f"{lr_str}{scaff_str}{vram_str}  "
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
         pos_log = '  '.join(f'{avgs[f"pos{p+1}_cls"]:>6.4f}' for p in range(n_positions))
+        gpu_log = f"  {gpu_util:>3d}%" if gpu_util >= 0 else "     "
+        spill_log = f"  {vram_spill_mb:>5.0f}MB" if use_cuda else ""
+        vram_log = f"  {vram_device_mb:>6.0f}MB{spill_log}{gpu_log}" if use_cuda else ""
         logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {pos_log}  "
                           f"{scan_attn.item():>7.4f}  {read_attn.item():>7.4f}  "
                           f"{avgs['div']:>6.4f}  {avgs['content']:>7.4f}  {avgs['isolation']:>6.4f}  "
                           f"{avgs['hit_rate']:>6.4f}  {lr_attn:>8.6f}  {lr_cls:>8.6f}  "
-                          f"{lr_recon:>8.6f}  {scaffold_weight:>6.4f}  {epoch_time:.1f}s")
+                          f"{lr_recon:>8.6f}  {scaffold_weight:>6.4f}"
+                          f"{vram_log}  {epoch_time:.1f}s")
 
         if multi_head:
             attn_sched.step()
@@ -612,5 +648,20 @@ def train_word_model(cfg):
 
     total_time = time.time() - train_start
     total_min, total_s = divmod(int(total_time), 60)
+    avg_epoch = total_time / max(1, epochs)
+    print(f"\n--- Benchmark ---")
+    if device.type == 'cuda':
+        gpu_name = torch.cuda.get_device_name()
+        alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
+        free, total_dev = torch.cuda.mem_get_info()
+        device_mb = (total_dev - free) / 1024**2
+        total_mb = total_dev / 1024**2
+        spill_mb = max(0, alloc_mb - total_mb)
+        print(f"GPU:         {gpu_name}")
+        print(f"VRAM:        {device_mb:.0f}/{total_mb:.0f} MB device, {alloc_mb:.0f} MB peak alloc"
+              f"{f', {spill_mb:.0f} MB spill' if spill_mb > 0 else ''}")
+    rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    print(f"RAM:         {rss_mb:.0f} MB peak RSS")
+    print(f"Avg epoch:   {avg_epoch:.1f}s  ({epochs} epochs, {total_time:.1f}s total)")
     print(f"Training complete in {total_min}m{total_s:02d}s. "
           f"Model and graph saved in {save_dir}")

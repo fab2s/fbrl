@@ -1,7 +1,8 @@
-//! Graph-compatible modules for the attention pipeline.
+//! Graph-compatible modules for the word attention pipeline.
 //!
-//! v2: ScanStep and AttentionStep each own their GRU and loc_head.
-//! No shared Controller — clean sub-graph boundaries for word transfer.
+//! ScanStep: prescribed x-positions with content head (discovers letter locations).
+//! ReadStep: free attention that collects hidden states for cross-attention readout.
+//! Both own their GRU and loc_head independently.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,8 +14,7 @@ use flodl::tensor::{Result, Tensor, TensorOptions};
 
 pub use flodl::Identity;
 
-/// H0Init ignores its input and returns the learned initial hidden state
-/// expanded to match the batch dimension.
+/// H0Init: learned initial hidden state expanded to batch dimension.
 pub struct H0Init {
     h0: Parameter,
     hidden_dim: i64,
@@ -44,17 +44,12 @@ impl Module for H0Init {
     }
 }
 
-/// One-way handoff: scan writes its final location here, read picks it up
-/// as its initial position (detached, so no gradient flows back to scan).
-pub type LocationHandoff = Rc<RefCell<Option<Variable>>>;
-
-/// ScanStep: wide-patch scan with learnable x-position, learned y.
-/// Produces coarse overview fixations guided by attention_guide_loss.
+/// ScanStep: wide-patch scan with prescribed x-positions.
 ///
-/// Owns its own GRU and loc_head (independent from AttentionStep).
-///
-/// Location update: x = tanh(scan_x[step]), y = tanh(loc_head(h))[y].
-/// The x-sweep is learned but constrained, y is free.
+/// 8 scan steps across a 256-wide word canvas. Each step:
+/// - x = tanh(scan_xs[step_idx])  (learnable, constrained)
+/// - y = tanh(loc_head(h))[y]     (free, from GRU)
+/// - content_head(h)              (BCE: does this location have ink?)
 pub struct ScanStep {
     sensor: Rc<dyn Module>,
     gru: flodl::GRUCell,
@@ -64,7 +59,6 @@ pub struct ScanStep {
     step_idx: RefCell<usize>,
     content_head: Option<Linear>,
     content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
-    handoff: LocationHandoff,
 }
 
 impl ScanStep {
@@ -74,24 +68,27 @@ impl ScanStep {
         n_scan: usize,
         content_head: Option<Linear>,
         content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
-        handoff: LocationHandoff,
     ) -> Result<Self> {
         let gru = flodl::GRUCell::new(hidden_dim, hidden_dim)?;
         let loc_head = Linear::new(hidden_dim, 2)?;
 
+        // Prescribed x-positions spread across [-0.5, 0.5] via atanh.
         let mut scan_xs = Vec::with_capacity(n_scan);
         for i in 0..n_scan {
-            let init_val = if n_scan == 1 {
+            let x_target = if n_scan == 1 {
                 0.0
             } else {
                 -0.5 + (i as f64) / (n_scan as f64 - 1.0)
             };
-            let t = Tensor::from_f32(&[init_val as f32], &[1], flodl::tensor::Device::CPU)?;
+            // atanh(x) so that tanh(param) recovers x_target.
+            let atanh_val = (0.5 * ((1.0 + x_target) / (1.0 - x_target)).ln()) as f32;
+            let t = Tensor::from_f32(&[atanh_val], &[1], flodl::tensor::Device::CPU)?;
             scan_xs.push(Parameter {
                 variable: Variable::new(t, true),
                 name: format!("scan_x_{i}"),
             });
         }
+
         Ok(ScanStep {
             sensor: Rc::new(sensor),
             gru,
@@ -101,7 +98,6 @@ impl ScanStep {
             step_idx: RefCell::new(0),
             content_head,
             content_logits,
-            handoff,
         })
     }
 
@@ -127,24 +123,20 @@ impl ScanStep {
 
         // Content head: predict whether scan location has ink.
         if let (Some(head), Some(buf)) = (&self.content_head, &self.content_logits) {
-            let logit = head.forward(&new_h)?; // [B, 1]
-            buf.borrow_mut().push(logit);
+            buf.borrow_mut().push(head.forward(&new_h)?);
         }
 
-        // Location: learnable x, free y from loc_head
+        // Location: prescribed x, free y.
         let raw = self.loc_head.forward(&new_h)?.tanh()?;
-        let y = raw.select(1, 1)?.unsqueeze(1)?; // [B, 1]
+        let y = raw.select(1, 1)?.unsqueeze(1)?;
 
         let idx = *self.step_idx.borrow();
         let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
-        let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?; // [B, 1]
+        let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?;
         *self.step_idx.borrow_mut() = idx + 1;
 
-        let new_loc = x.cat(&y, 1)?; // [B, 2]
-        *self.location.borrow_mut() = Some(new_loc.clone());
-
-        // Write detached copy to handoff — read phase picks this up as initial position.
-        *self.handoff.borrow_mut() = Some(new_loc.detach());
+        let new_loc = x.cat(&y, 1)?;
+        *self.location.borrow_mut() = Some(new_loc);
 
         Ok(new_h)
     }
@@ -157,9 +149,7 @@ impl Module for ScanStep {
         self.step(input, input)
     }
 
-    fn as_named_input(&self) -> Option<&dyn NamedInputModule> {
-        Some(self)
-    }
+    fn as_named_input(&self) -> Option<&dyn NamedInputModule> { Some(self) }
 
     fn reset(&self) {
         *self.location.borrow_mut() = None;
@@ -207,70 +197,58 @@ impl NamedInputModule for ScanStep {
     }
 }
 
-/// AttentionStep: the read loop body with its own GRU and loc_head.
+/// ReadStep: focused read that collects hidden states for cross-attention readout.
 ///
-/// Receives h as stream, image via ref, manages location as internal state.
-/// Free (x,y) positioning.
-///
-/// When a `LocationHandoff` is provided, the first read step starts at the
-/// scan's final position (detached) instead of (0,0).
-pub struct AttentionStep {
+/// Free (x,y) positioning. Each step's hidden state is pushed to a shared buffer
+/// that CrossAttentionReadout consumes after the loop.
+pub struct ReadStep {
     sensor: Rc<dyn Module>,
     gru: flodl::GRUCell,
     loc_head: Linear,
     location: RefCell<Option<Variable>>,
-    handoff: Option<LocationHandoff>,
+    /// Collected hidden states [B, latent_dim] — one per read step.
+    read_states: Rc<RefCell<Vec<Variable>>>,
 }
 
-impl AttentionStep {
+impl ReadStep {
     pub fn new(
         sensor: impl Module + 'static,
         hidden_dim: i64,
-        handoff: Option<LocationHandoff>,
+        read_states: Rc<RefCell<Vec<Variable>>>,
     ) -> Result<Self> {
-        Ok(AttentionStep {
+        Ok(ReadStep {
             sensor: Rc::new(sensor),
             gru: flodl::GRUCell::new(hidden_dim, hidden_dim)?,
             loc_head: Linear::new(hidden_dim, 2)?,
             location: RefCell::new(None),
-            handoff,
+            read_states,
         })
     }
 
     fn step(&self, h: &Variable, image: &Variable) -> Result<Variable> {
         let new_h = {
-            // Lazy init: use scan handoff if available, otherwise zeros.
             if self.location.borrow().is_none() {
-                let init_loc = self.handoff.as_ref()
-                    .and_then(|h| h.borrow_mut().take());
-                let loc = match init_loc {
-                    Some(scan_loc) => scan_loc,
-                    None => {
-                        let batch = h.shape()[0];
-                        let device = h.data().device();
-                        Variable::new(
-                            Tensor::zeros(&[batch, 2], TensorOptions { device, ..Default::default() })?,
-                            false,
-                        )
-                    }
-                };
-                *self.location.borrow_mut() = Some(loc);
+                let batch = h.shape()[0];
+                let device = h.data().device();
+                let zeros = Tensor::zeros(&[batch, 2], TensorOptions { device, ..Default::default() })?;
+                *self.location.borrow_mut() = Some(Variable::new(zeros, false));
             }
 
             let loc_guard = self.location.borrow();
             let loc = loc_guard.as_ref().unwrap();
 
-            // Sensor extracts glimpse at current location
             let mut refs = HashMap::new();
             refs.insert("location".to_string(), loc.clone());
             let glimpse = self.sensor.as_named_input().unwrap()
                 .forward_named(image, &refs)?;
 
-            // GRU update
             self.gru.forward_step(&glimpse, Some(h))?
-        }; // loc_guard dropped here
+        };
 
-        // Update location
+        // Collect hidden state for cross-attention readout.
+        self.read_states.borrow_mut().push(new_h.clone());
+
+        // Free (x, y) location update.
         let new_loc = self.loc_head.forward(&new_h)?.tanh()?;
         *self.location.borrow_mut() = Some(new_loc);
 
@@ -278,20 +256,18 @@ impl AttentionStep {
     }
 }
 
-impl Module for AttentionStep {
-    fn name(&self) -> &str { "attention_step" }
+impl Module for ReadStep {
+    fn name(&self) -> &str { "read_step" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
         self.step(input, input)
     }
 
-    fn as_named_input(&self) -> Option<&dyn NamedInputModule> {
-        Some(self)
-    }
+    fn as_named_input(&self) -> Option<&dyn NamedInputModule> { Some(self) }
 
     fn reset(&self) {
         *self.location.borrow_mut() = None;
-        // Handoff is NOT cleared here — it persists from scan to read within a forward pass.
+        self.read_states.borrow_mut().clear();
     }
 
     fn detach_state(&self) {
@@ -317,13 +293,13 @@ impl Module for AttentionStep {
     }
 }
 
-impl NamedInputModule for AttentionStep {
+impl NamedInputModule for ReadStep {
     fn forward_named(
         &self,
         input: &Variable,
         refs: &HashMap<String, Variable>,
     ) -> Result<Variable> {
-        let image = refs.get("image").expect("AttentionStep requires 'image' ref");
+        let image = refs.get("image").expect("ReadStep requires 'image' ref");
         self.step(input, image)
     }
 }

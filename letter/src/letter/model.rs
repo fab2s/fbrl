@@ -21,7 +21,7 @@ use flodl::tensor::{Device, Result};
 
 use super::decoder::VisualDecoder;
 use super::glimpse::GlimpseSensor;
-use super::modules::{CombinedStep, Controller, H0Init, Identity};
+use super::modules::{AttentionStep, H0Init, Identity, LocationHandoff, ScanStep};
 
 /// Wraps an Rc<VisualDecoder> so it can live in the graph while
 /// LetterModel retains a reference for recode.
@@ -60,13 +60,16 @@ pub struct LetterResult {
 }
 
 /// Single-letter model built as a computation graph.
+///
+/// v2: separate ScanStep and AttentionStep loops, each with own GRU.
+/// Traces are collected per-loop via separate tags ("scan" / "read").
 pub struct LetterModel {
     pub graph: Graph,
     /// Decoder reference for recode (shared with graph node via Rc).
     pub decoder: Rc<VisualDecoder>,
-    /// Content logits buffer shared with CombinedStep (populated during forward).
+    /// Content logits buffer shared with ScanStep (populated during forward).
     content_logits_buf: Rc<RefCell<Vec<Variable>>>,
-    /// Number of scan steps — used to split traces into scan/read.
+    /// Number of scan steps — used to know whether to look for scan traces.
     n_scan: usize,
 }
 
@@ -84,36 +87,44 @@ impl LetterModel {
         n_scales: usize,
         latent_dim: i64,
     ) -> Result<Self> {
-        let controller = Rc::new(Controller::new(latent_dim)?);
-
         let letter_head = Linear::new(latent_dim, n_classes as i64)?;
         let case_head = Linear::new(latent_dim, 2)?;
         let decoder = Rc::new(VisualDecoder::new(latent_dim + 1, 128, 128)?);
 
-        // Content head + shared buffer for scan ink detection (only when scanning).
         let content_logits_buf = Rc::new(RefCell::new(Vec::new()));
-        let content_head = if n_scan > 0 {
-            Some(Linear::new(latent_dim, 1)?)
-        } else {
-            None
-        };
+        let handoff: LocationHandoff = Rc::new(RefCell::new(None));
 
-        let total_steps = n_scan + n_read;
-        let scan_sensor = GlimpseSensor::new(patch_size, scan_patch_w, n_scales, latent_dim)?;
-        let read_sensor = GlimpseSensor::new(patch_size, patch_size, n_scales, latent_dim)?;
-
-        let combined = CombinedStep::new(
-            scan_sensor, read_sensor, controller,
-            n_scan, content_head, Some(content_logits_buf.clone()),
-        )?;
-
-        let graph = FlowBuilder::from(Identity)
+        // Build graph: H0Init → [ScanLoop] → ReadLoop → heads → decoder
+        let mut builder = FlowBuilder::from(Identity)
             .label("LetterModel")
             .tag("image")
             .input(&["case"])
-            .through(H0Init::new(latent_dim)?)
-            .loop_body(combined).for_n(total_steps)
-            .using(&["image"]).tag("attn")
+            .through(H0Init::new(latent_dim)?);
+
+        // Optional scan phase (own GRU + loc_head).
+        if n_scan > 0 {
+            let scan_sensor = GlimpseSensor::new(patch_size, scan_patch_w, n_scales, latent_dim)?;
+            let content_head = Linear::new(latent_dim, 1)?;
+            let scan_step = ScanStep::new(
+                scan_sensor, latent_dim, n_scan,
+                Some(content_head), Some(content_logits_buf.clone()),
+                handoff.clone(),
+            )?;
+            builder = builder
+                .loop_body(scan_step).for_n(n_scan)
+                .using(&["image"]).tag("scan");
+        }
+
+        // Read phase (own GRU + loc_head, picks up scan handoff if present).
+        let read_sensor = GlimpseSensor::new(patch_size, patch_size, n_scales, latent_dim)?;
+        let read_step = AttentionStep::new(
+            read_sensor, latent_dim,
+            if n_scan > 0 { Some(handoff) } else { None },
+        )?;
+
+        let graph = builder
+            .loop_body(read_step).for_n(n_read)
+            .using(&["image"]).tag("read")
             .through(Linear::new(latent_dim, latent_dim)?).tag("latent")
             .fork(letter_head).tag("heads_0")
             .fork(case_head).tag("heads_1")
@@ -130,14 +141,12 @@ impl LetterModel {
     pub fn forward(&self, img: &Variable, case_label: &Variable) -> Result<LetterResult> {
         self.graph.forward_multi(&[img.clone(), case_label.clone()])?;
 
-        // Split flat traces into scan and read portions.
-        let all_traces = self.graph.traces("attn").unwrap_or_default();
-        let (scan_locs, read_locs) = if self.n_scan > 0 && all_traces.len() > self.n_scan {
-            let (s, r) = all_traces.split_at(self.n_scan);
-            (s.to_vec(), r.to_vec())
+        let scan_locs = if self.n_scan > 0 {
+            self.graph.traces("scan").unwrap_or_default()
         } else {
-            (Vec::new(), all_traces)
+            Vec::new()
         };
+        let read_locs = self.graph.traces("read").unwrap_or_default();
 
         Ok(LetterResult {
             letter_logits: self.graph.tagged("heads_0").expect("heads_0"),

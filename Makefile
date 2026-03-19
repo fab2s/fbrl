@@ -6,9 +6,11 @@
 
 COMPOSE = docker compose
 RUN     = $(COMPOSE) run --rm --service-ports dev
+RUN_WORD = $(COMPOSE) run --rm --service-ports -w /workspace/fbrl/word dev
 FEATURES ?= cuda
 
-.PHONY: image build test test-release check clippy doc shell train-letter clean kill
+.PHONY: image build test test-release check clippy doc shell train-letter clean kill \
+        build-word check-word test-word smoke-word rebuild-word train-word
 
 # Build the Docker image
 image:
@@ -94,3 +96,33 @@ kill:
 # Clean up containers and volumes
 clean:
 	$(COMPOSE) down -v --rmi local
+
+# --- Word model ---
+
+# Build word crate (debug)
+build-word: image
+	$(RUN_WORD) cargo build --features $(FEATURES)
+
+# Check word crate
+check-word: image
+	$(RUN_WORD) cargo check --features $(FEATURES)
+
+# Test word crate
+test-word: image
+	$(RUN_WORD) cargo test --features $(FEATURES) -- --nocapture
+
+# Run word smoke test
+smoke-word: image
+	$(RUN_WORD) cargo run --features $(FEATURES)
+
+# Force recompile + build word (release)
+rebuild-word: image
+	@touch ../rdl/flodl-sys/shim.cpp 2>/dev/null || true
+	$(RUN_WORD) cargo build --release --features $(FEATURES)
+
+# Train word model
+# Usage: make train-word DATA=../python/data/words SAVE=runs/v1 MONITOR=3000
+#        make train-word DATA=../python/data/words TRANSFER=../letter/runs/v2/model_final.fdl.gz
+WORD_SAVE ?= training
+train-word: rebuild-word
+	$(RUN_WORD) cargo run --release --features $(FEATURES) -- $(if $(DATA),--data $(DATA)) $(if $(SYNTHETIC),--synthetic $(SYNTHETIC)) $(if $(WORD_SAVE),--save $(WORD_SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(TRANSFER),--transfer $(TRANSFER)) $(if $(ISOLATION),--isolation-data $(ISOLATION)) $(if $(MONITOR),--monitor $(MONITOR))

@@ -1,0 +1,24 @@
+[package]
+name = "fbrl-word"
+version = "0.1.0"
+edition = "2024"
+description = "Foveal attention word recognition built on flodl"
+license = "MIT"
+repository = "https://github.com/fab2s/fbrl"
+keywords = ["deep-learning", "attention", "foveal", "word-recognition"]
+categories = ["science"]
+
+[features]
+default = []
+cuda = ["flodl/cuda"]
+
+[dependencies]
+flodl = "0.1"
+png = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
