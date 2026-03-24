@@ -457,13 +457,17 @@ def train_word_model(cfg):
         eta = format_eta(elapsed, done, epochs - done)
 
         # GPU/VRAM snapshot.
+        # VRAM = peak reserved by caching allocator (includes free pool blocks).
+        # Spill = max(0, VRAM - physical VRAM) — what overflows to host RAM.
+        # Note: max_memory_reserved() tracks total CUDA memory grabbed by the
+        # caching allocator.  max_memory_allocated() only counts active tensors
+        # and underestimates pressure (never exceeds physical VRAM).
         use_cuda = device.type == 'cuda'
         if use_cuda:
-            vram_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
-            free, total_dev = torch.cuda.mem_get_info()
-            vram_device_mb = (total_dev - free) / 1024**2
+            vram_used_mb = torch.cuda.max_memory_reserved() / 1024**2
+            _, total_dev = torch.cuda.mem_get_info()
             vram_total_mb = total_dev / 1024**2
-            vram_spill_mb = max(0, vram_alloc_mb - vram_total_mb)
+            vram_spill_mb = max(0, vram_used_mb - vram_total_mb)
             # Sample GPU utilization via nvidia-smi every 10 epochs.
             if (epoch - start_epoch) % 10 == 0:
                 try:
@@ -478,7 +482,7 @@ def train_word_model(cfg):
             else:
                 gpu_util = -1
         else:
-            vram_alloc_mb = vram_used_mb = vram_total_mb = 0
+            vram_used_mb = vram_total_mb = 0
             gpu_util = -1
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
@@ -500,7 +504,7 @@ def train_word_model(cfg):
         iso_str = f"  Iso {avgs['isolation']:.4f}" if isolation_weight > 0 else ""
         gpu_str = f" GPU:{gpu_util}%" if gpu_util >= 0 else ""
         spill_str = f"+{vram_spill_mb:.0f}MB spill" if vram_spill_mb > 0 else ""
-        vram_str = f"  VRAM {vram_device_mb:.0f}/{vram_total_mb:.0f}MB {spill_str}{gpu_str}" if use_cuda else ""
+        vram_str = f"  VRAM {vram_used_mb:.0f}/{vram_total_mb:.0f}MB {spill_str}{gpu_str}" if use_cuda else ""
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avgs['recon']:.4f}  {pos_str}  "
               f"Attn {avgs['attn']:.4f}  "
@@ -511,7 +515,7 @@ def train_word_model(cfg):
         pos_log = '  '.join(f'{avgs[f"pos{p+1}_cls"]:>6.4f}' for p in range(n_positions))
         gpu_log = f"  {gpu_util:>3d}%" if gpu_util >= 0 else "     "
         spill_log = f"  {vram_spill_mb:>5.0f}MB" if use_cuda else ""
-        vram_log = f"  {vram_device_mb:>6.0f}MB{spill_log}{gpu_log}" if use_cuda else ""
+        vram_log = f"  {vram_used_mb:>6.0f}MB{spill_log}{gpu_log}" if use_cuda else ""
         logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {pos_log}  "
                           f"{scan_attn.item():>7.4f}  {read_attn.item():>7.4f}  "
                           f"{avgs['div']:>6.4f}  {avgs['content']:>7.4f}  {avgs['isolation']:>6.4f}  "
@@ -652,13 +656,12 @@ def train_word_model(cfg):
     print(f"\n--- Benchmark ---")
     if device.type == 'cuda':
         gpu_name = torch.cuda.get_device_name()
-        alloc_mb = torch.cuda.max_memory_allocated() / 1024**2
-        free, total_dev = torch.cuda.mem_get_info()
-        device_mb = (total_dev - free) / 1024**2
+        vram_mb = torch.cuda.max_memory_reserved() / 1024**2
+        _, total_dev = torch.cuda.mem_get_info()
         total_mb = total_dev / 1024**2
-        spill_mb = max(0, alloc_mb - total_mb)
+        spill_mb = max(0, vram_mb - total_mb)
         print(f"GPU:         {gpu_name}")
-        print(f"VRAM:        {device_mb:.0f}/{total_mb:.0f} MB device, {alloc_mb:.0f} MB peak alloc"
+        print(f"VRAM:        {vram_mb:.0f} MB"
               f"{f', {spill_mb:.0f} MB spill' if spill_mb > 0 else ''}")
     rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     print(f"RAM:         {rss_mb:.0f} MB peak RSS")

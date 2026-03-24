@@ -8,7 +8,7 @@ WORKDIR /app
 
 # Install Python deps with pip cache mount for fast rebuilds.
 # Heaviest / most stable first, lightest / most likely to change last.
-RUN --mount=type=cache,target=/root/.cache/pip pip install torch==2.5.1 torchaudio==2.5.1
+RUN --mount=type=cache,target=/root/.cache/pip pip install torch torchaudio
 RUN --mount=type=cache,target=/root/.cache/pip pip install torchcodec
 RUN --mount=type=cache,target=/root/.cache/pip pip install numpy
 RUN --mount=type=cache,target=/root/.cache/pip pip install 'matplotlib<3.8'

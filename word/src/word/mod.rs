@@ -1,33 +1,31 @@
-//! Word recognition domain — model, training, data, and losses.
+//! Word recognition domain — modules, training phases, data, and losses.
 //!
-//! Two-phase foveal attention pipeline:
+//! ## Training phases
 //!
+//! **Phase 2: SubScan + Letter**
 //! ```text
-//! image → H0Init → Loop(ScanStep, 8).Using("image").Tag("scan")
-//!       → Loop(ReadStep, 12).Using("image").Tag("read")
-//!       → CrossAttentionReadout → 4 × classifier + decoder
+//! word image → SubScan(bounded region) → position
+//!            → LetterModel.scan(from position) → LetterModel.read(frozen) → classify
 //! ```
 //!
-//! Scan discovers letter positions via prescribed x-coordinates.
-//! Read extracts per-letter features with free attention.
-//! CrossAttentionReadout produces per-position latents from grouped reads.
+//! **Phase 3: Full word model (future)**
+//! ```text
+//! word image → MetaScan → N regions
+//!            → each(N): SubScan → LetterModel → per-position classification
+//! ```
 
 pub mod data;
-mod decoder;
-mod glimpse;
+pub mod glimpse;
 pub mod loss;
-mod model;
-mod modules;
-mod readout;
-mod synthetic;
-mod train;
+pub mod subscan;
+pub mod synthetic;
+// pub mod subscan_train;  // step 2 training loop (TODO)
+// pub mod subscan_eval;   // step 2 evaluation (TODO)
+// pub mod model;          // full word model (step 3, future)
+// pub mod train;          // step 3 training loop (future)
+// pub mod eval;           // step 3 evaluation (future)
 
 pub use data::*;
-pub use decoder::*;
 pub use glimpse::*;
 pub use loss::*;
-pub use model::*;
-pub use modules::*;
-pub use readout::*;
 pub use synthetic::*;
-pub use train::*;

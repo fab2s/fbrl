@@ -310,23 +310,27 @@ def train_model(cfg):
         current_lr = scheduler.get_last_lr()[0]
 
         # Per-epoch memory snapshot.
-        vram_alloc_mb = torch.cuda.max_memory_allocated() / 1024**2 if use_cuda else 0
+        # reserved = total CUDA memory grabbed by caching allocator (correct for spill).
+        # allocated = active tensors only (underestimates pressure).
+        vram_reserved_mb = torch.cuda.max_memory_reserved() / 1024**2 if use_cuda else 0
         if use_cuda:
-            free, total_dev = torch.cuda.mem_get_info()
-            vram_used_mb = (total_dev - free) / 1024**2
+            _, total_dev = torch.cuda.mem_get_info()
+            vram_total_mb = total_dev / 1024**2
+            vram_spill_mb = max(0, vram_reserved_mb - vram_total_mb)
         else:
-            vram_used_mb = 0
+            vram_total_mb = vram_spill_mb = 0
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
         epoch_rec = {'time_s': round(epoch_time, 2), 'rss_mb': round(rss_mb)}
         if use_cuda:
-            epoch_rec['vram_alloc_mb'] = round(vram_alloc_mb)
-            epoch_rec['vram_used_mb'] = round(vram_used_mb)
+            epoch_rec['vram_reserved_mb'] = round(vram_reserved_mb)
+            epoch_rec['vram_spill_mb'] = round(vram_spill_mb)
         epoch_times.append(epoch_rec)
 
         content_str = f"  Cont {avgs['content']:.4f}" if n_scan_glimpses > 0 else ""
         void_str = f"  Void {avgs['void']:.4f}" if (void_weight > 0 or scan_void_weight > 0) else ""
-        vram_str = f"  VRAM {vram_alloc_mb:.0f}MB" if use_cuda else ""
+        spill_str = f"+{vram_spill_mb:.0f}MB spill" if vram_spill_mb > 0 else ""
+        vram_str = f"  VRAM {vram_reserved_mb:.0f}MB {spill_str}" if use_cuda else ""
         print(f"Epoch {epoch+1}/{end_epoch}: "
               f"Recon {avgs['recon']:.4f}  Ltr {avgs['letter_cls']:.4f}  "
               f"Case {avgs['case_cls']:.4f}  Attn {avgs['attn']:.4f}  "
@@ -336,7 +340,7 @@ def train_model(cfg):
               f"[{epoch_time:.1f}s  ETA {eta}]")
 
         content_log = f"  {avgs['content']:>7.4f}" if n_scan_glimpses > 0 else ""
-        vram_log = f"  {vram_used_mb:>6.0f}MB" if use_cuda else ""
+        vram_log = f"  {vram_reserved_mb:>6.0f}MB" if use_cuda else ""
         rss_log = f"  {rss_mb:>6.0f}MB"
         logger.write_line(f"{epoch+1:>5d}  {avgs['recon']:>6.4f}  {avgs['letter_cls']:>6.4f}  "
                           f"{avgs['case_cls']:>6.4f}  {avgs['attn']:>7.4f}  {avgs['div']:>6.4f}  "
@@ -431,8 +435,13 @@ def train_model(cfg):
         json.dump(bench, f, indent=2)
 
     gpu_str = f"\nGPU:         {bench['gpu']}" if use_cuda else ""
-    vram_str = (f"\nVRAM:        {bench['vram']['alloc_mb']} MB alloc, "
-                f"{bench['vram']['device_used_mb']} MB device") if use_cuda else ""
+    if use_cuda:
+        vram_v = bench['vram']
+        spill = max(0, vram_v['reserved_mb'] - vram_v['device_total_mb'])
+        spill_suffix = f", {spill} MB spill" if spill > 0 else ""
+        vram_str = f"\nVRAM:        {vram_v['reserved_mb']} MB reserved{spill_suffix}"
+    else:
+        vram_str = ""
     print(f"\n--- Benchmark ---{gpu_str}{vram_str}")
     print(f"RAM:         {bench['ram_peak_rss_mb']} MB peak RSS")
     print(f"Avg epoch:   {bench['avg_epoch_s']}s  ({epochs} epochs, {bench['total_time_s']}s total)")

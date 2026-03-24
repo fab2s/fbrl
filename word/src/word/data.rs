@@ -39,12 +39,38 @@ pub struct IsolationSample {
 }
 
 /// Isolation dataset: single-letter images indexed by (letter_idx, font).
+/// Supports random font selection matching Python's IsolationLetterDataset.
 pub struct IsolationDataset {
     pub samples: Vec<IsolationSample>,
+    /// Sample indices grouped by (letter_idx, font_idx) for random font selection.
+    by_letter_font: HashMap<(i64, usize), Vec<usize>>,
+    /// Sorted font list for random selection.
+    pub font_list: Vec<String>,
 }
 
 impl IsolationDataset {
     pub fn len(&self) -> usize { self.samples.len() }
+    pub fn is_empty(&self) -> bool { self.samples.is_empty() }
+
+    /// Get a random image for the given letter, choosing a random font.
+    /// Matches Python's `iso_font = random.choice(font_list); get_image(letter_idx, iso_font)`.
+    pub fn get_random_image(&self, letter_idx: i64, rng: &mut impl FnMut(usize) -> usize) -> &Tensor {
+        // Pick a random font.
+        let font_idx = rng(self.font_list.len());
+        if let Some(indices) = self.by_letter_font.get(&(letter_idx, font_idx)) {
+            let vi = rng(indices.len());
+            return &self.samples[indices[vi]].image;
+        }
+        // Fallback: try any font for this letter.
+        for fi in 0..self.font_list.len() {
+            if let Some(indices) = self.by_letter_font.get(&(letter_idx, fi)) {
+                let vi = rng(indices.len());
+                return &self.samples[indices[vi]].image;
+            }
+        }
+        // Last resort: first sample (should not happen with well-formed data).
+        &self.samples[0].image
+    }
 }
 
 // --- PNG loading ---
@@ -91,6 +117,7 @@ pub fn load_gray_png(path: &Path) -> Result<Tensor> {
 // --- Metadata ---
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct WordMetaEntry {
     image: String,
     clean: String,
@@ -171,6 +198,9 @@ pub fn load_word_dataset(dir: &str) -> Result<WordDataset> {
 }
 
 /// Load isolation dataset from a letter data directory.
+///
+/// Matches Python's IsolationLetterDataset: indexes images by (letter_idx, font)
+/// for random font selection during training.
 pub fn load_isolation_dataset(dir: &str) -> Result<IsolationDataset> {
     let dir_path = Path::new(dir);
     let meta_path = dir_path.join("metadata.json");
@@ -179,8 +209,16 @@ pub fn load_isolation_dataset(dir: &str) -> Result<IsolationDataset> {
     let meta: HashMap<String, LetterMetaEntry> = serde_json::from_str(&meta_str)
         .map_err(|e| TensorError::new(&format!("parse isolation metadata: {e}")))?;
 
-    let mut samples = Vec::with_capacity(meta.len());
+    // Collect all fonts and build (letter_idx, font) → images map.
+    let mut font_set = std::collections::BTreeSet::new();
+    let mut raw_entries: Vec<(i64, String, Tensor)> = Vec::new();
+
     for entry in meta.values() {
+        // Only lowercase (matching Python).
+        if entry.case != "lower" { continue; }
+
+        let Some(letter_idx) = letter_to_idx(&entry.letter) else { continue };
+
         // Use clean image for isolation (no noise).
         let path = if !entry.clean.is_empty() {
             resolve_data_path(dir_path, &entry.clean)
@@ -188,20 +226,34 @@ pub fn load_isolation_dataset(dir: &str) -> Result<IsolationDataset> {
             resolve_data_path(dir_path, &entry.image)
         };
 
-        // Skip if file doesn't exist.
         if !path.exists() { continue; }
 
-        let Some(letter_idx) = letter_to_idx(&entry.letter) else { continue };
+        let font = if entry.font.is_empty() { "default".to_string() } else { entry.font.clone() };
+        font_set.insert(font.clone());
+
         let img = load_gray_png(&path)?;
+        raw_entries.push((letter_idx, font, img));
+    }
+
+    let font_list: Vec<String> = font_set.into_iter().collect();
+    let font_idx_map: HashMap<String, usize> = font_list.iter()
+        .enumerate().map(|(i, f)| (f.clone(), i)).collect();
+
+    let mut by_letter_font: HashMap<(i64, usize), Vec<usize>> = HashMap::new();
+    let mut samples = Vec::new();
+
+    for (letter_idx, font, img) in raw_entries {
+        let fi = font_idx_map[&font];
+        let sample_idx = samples.len();
+        by_letter_font.entry((letter_idx, fi))
+            .or_default()
+            .push(sample_idx);
         samples.push(IsolationSample { image: img, letter_idx });
     }
 
-    // Deduplicate by letter_idx (clean images are shared across variants).
-    samples.sort_by_key(|s| s.letter_idx);
-    samples.dedup_by_key(|s| s.letter_idx);
-
-    eprintln!("IsolationDataset: {} unique letter images from {}", samples.len(), dir);
-    Ok(IsolationDataset { samples })
+    eprintln!("IsolationDataset: {} images, {} (letter, font) combos, {} font(s) from {}",
+        samples.len(), by_letter_font.len(), font_list.len(), dir);
+    Ok(IsolationDataset { samples, by_letter_font, font_list })
 }
 
 /// Resolve a possibly-relative image path from metadata.json.
