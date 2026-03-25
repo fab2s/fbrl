@@ -10,10 +10,11 @@ categories = ["science"]
 
 [features]
 default = []
-cuda = ["flodl/cuda"]
+cuda = ["flodl/cuda", "fbrl/cuda"]
 
 [dependencies]
 flodl = "0.1"
+fbrl = { path = "../letter" }
 png = "0.17"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

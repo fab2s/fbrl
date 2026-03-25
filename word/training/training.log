@@ -1,0 +1,30 @@
+# fbrl-word subscan training (step 2)
+# epochs=100  batch=32  subscan_lr=0.0010  scan_lr=0.0001
+epoch   1  ce=25.6061  recon=0.0318  div=0.0000  total=25.6379  acc=6.4%  noise=0.080  lr_sub=0.001000  lr_scan=0.000100  [15.419535584s]  ETA 1462.844159603s
+epoch   2  ce=23.9467  recon=0.0306  div=0.0000  total=23.9773  acc=5.7%  noise=0.082  lr_sub=0.001000  lr_scan=0.000100  [14.094447404s]  ETA 1549.55142355s
+epoch   3  ce=22.2141  recon=0.0293  div=0.0000  total=22.2435  acc=6.2%  noise=0.085  lr_sub=0.000999  lr_scan=0.000100  [15.252910022s]  ETA 1515.708409945s
+epoch   4  ce=20.4936  recon=0.0289  div=0.0000  total=20.5225  acc=5.9%  noise=0.087  lr_sub=0.000998  lr_scan=0.000100  [14.061150819s]  ETA 1462.554353714s
+epoch   5  ce=18.8924  recon=0.0291  div=0.0001  total=18.9216  acc=5.2%  noise=0.090  lr_sub=0.000996  lr_scan=0.000100  [13.424367133s]  ETA 1464.766690731s
+epoch   6  ce=16.3456  recon=0.0295  div=0.0001  total=16.3751  acc=5.1%  noise=0.092  lr_sub=0.000994  lr_scan=0.000099  [15.14035699s]  ETA 1445.008192778s
+epoch   7  ce=12.4488  recon=0.0330  div=0.0001  total=12.4819  acc=5.1%  noise=0.094  lr_sub=0.000991  lr_scan=0.000099  [14.291365365s]  ETA 1451.526876722s
+epoch   8  ce=8.5382  recon=0.0363  div=0.0001  total=8.5746  acc=5.5%  noise=0.097  lr_sub=0.000988  lr_scan=0.000099  [14.150828191s]  ETA 1419.175143242s
+epoch   9  ce=5.8301  recon=0.0415  div=0.0001  total=5.8718  acc=6.8%  noise=0.099  lr_sub=0.000984  lr_scan=0.000098  [13.455465097s]  ETA 1411.417992936s
+epoch  10  ce=4.9148  recon=0.0485  div=0.0001  total=4.9634  acc=8.9%  noise=0.102  lr_sub=0.000980  lr_scan=0.000098  [13.561733471s]  ETA 1378.382884741s
+epoch  11  ce=4.6637  recon=0.0561  div=0.0001  total=4.7199  acc=9.8%  noise=0.104  lr_sub=0.000976  lr_scan=0.000098  [13.378637265s]  ETA 1369.474755331s
+epoch  12  ce=4.3847  recon=0.0603  div=0.0001  total=4.4452  acc=10.5%  noise=0.106  lr_sub=0.000971  lr_scan=0.000097  [13.176325462s]  ETA 1337.881813526s
+epoch  13  ce=4.1803  recon=0.0638  div=0.0001  total=4.2443  acc=11.2%  noise=0.109  lr_sub=0.000965  lr_scan=0.000097  [13.903661933s]  ETA 1332.242483359s
+epoch  14  ce=4.0459  recon=0.0673  div=0.0002  total=4.1134  acc=11.6%  noise=0.111  lr_sub=0.000959  lr_scan=0.000096  [13.597611753s]  ETA 1306.396913767s
+epoch  15  ce=3.9594  recon=0.0716  div=0.0002  total=4.0313  acc=11.5%  noise=0.114  lr_sub=0.000953  lr_scan=0.000095  [13.404002863s]  ETA 1296.548016151s
+epoch  16  ce=3.9117  recon=0.0814  div=0.0002  total=3.9933  acc=10.9%  noise=0.116  lr_sub=0.000946  lr_scan=0.000095  [13.581430044s]  ETA 1272.521144807s
+epoch  17  ce=3.7785  recon=0.0850  div=0.0002  total=3.8637  acc=10.7%  noise=0.118  lr_sub=0.000939  lr_scan=0.000094  [13.441511801s]  ETA 1249.040303553s
+epoch  18  ce=3.6510  recon=0.0878  div=0.0002  total=3.7390  acc=10.8%  noise=0.121  lr_sub=0.000931  lr_scan=0.000093  [13.349462556s]  ETA 1238.679650678s
+epoch  19  ce=3.5552  recon=0.0914  div=0.0003  total=3.6470  acc=12.2%  noise=0.123  lr_sub=0.000923  lr_scan=0.000092  [13.660551922s]  ETA 1217.416972311s
+epoch  20  ce=3.4937  recon=0.0946  div=0.0003  total=3.5886  acc=12.2%  noise=0.126  lr_sub=0.000914  lr_scan=0.000091  [13.432309396s]  ETA 1206.913366318s
+epoch  21  ce=3.4433  recon=0.0964  div=0.0003  total=3.5401  acc=12.5%  noise=0.128  lr_sub=0.000905  lr_scan=0.000091  [13.651692351s]  ETA 1186.433249996s
+epoch  22  ce=3.4024  recon=0.0973  div=0.0004  total=3.5001  acc=12.5%  noise=0.130  lr_sub=0.000896  lr_scan=0.000090  [13.532474521s]  ETA 1175.820165396s
+epoch  23  ce=3.3714  recon=0.0985  div=0.0005  total=3.4704  acc=12.6%  noise=0.133  lr_sub=0.000886  lr_scan=0.000089  [13.224279894s]  ETA 1154.554349961s
+epoch  24  ce=3.3469  recon=0.0985  div=0.0005  total=3.4458  acc=12.4%  noise=0.135  lr_sub=0.000876  lr_scan=0.000088  [13.392229304s]  ETA 1143.127392729s
+epoch  25  ce=3.3091  recon=0.0988  div=0.0006  total=3.4084  acc=13.0%  noise=0.138  lr_sub=0.000866  lr_scan=0.000087  [13.36968447s]  ETA 1123.074535131s
+epoch  26  ce=3.2941  recon=0.0987  div=0.0006  total=3.3933  acc=12.9%  noise=0.140  lr_sub=0.000855  lr_scan=0.000086  [13.812557956s]  ETA 1105.117400353s
+epoch  27  ce=3.2639  recon=0.0991  div=0.0006  total=3.3637  acc=13.1%  noise=0.142  lr_sub=0.000844  lr_scan=0.000084  [13.071046078s]  ETA 1092.527724036s
+epoch  28  ce=3.2461  recon=0.0990  div=0.0007  total=3.3458  acc=13.3%  noise=0.145  lr_sub=0.000832  lr_scan=0.000083  [13.551550144s]  ETA 1073.926509517s

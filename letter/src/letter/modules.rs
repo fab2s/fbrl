@@ -3,7 +3,7 @@
 //! v2: ScanStep and AttentionStep each own their GRU and loc_head.
 //! No shared Controller — clean sub-graph boundaries for word transfer.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -53,8 +53,9 @@ pub type LocationHandoff = Rc<RefCell<Option<Variable>>>;
 ///
 /// Owns its own GRU and loc_head (independent from AttentionStep).
 ///
-/// Location update: x = tanh(scan_x[step]), y = tanh(loc_head(h))[y].
-/// The x-sweep is learned but constrained, y is free.
+/// **Standalone mode** (scan_start empty): x = tanh(scan_x[step]), y = tanh(loc_head(h))[y].
+/// **Composed mode** (scan_start provided): free (x, y) = tanh(loc_head(h)), starting
+/// from SubScan's position. The learnable scan_xs are unused in composed mode.
 pub struct ScanStep {
     sensor: Rc<dyn Module>,
     gru: flodl::GRUCell,
@@ -65,6 +66,12 @@ pub struct ScanStep {
     content_head: Option<Linear>,
     content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
     handoff: LocationHandoff,
+    /// External starting position (for composition with SubScan).
+    /// When populated before forward, ScanStep uses it as initial location
+    /// and switches to free (x, y) mode.
+    scan_start: LocationHandoff,
+    /// Whether the current forward pass is using an external start position.
+    from_external: Cell<bool>,
 }
 
 impl ScanStep {
@@ -75,6 +82,7 @@ impl ScanStep {
         content_head: Option<Linear>,
         content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
         handoff: LocationHandoff,
+        scan_start: LocationHandoff,
     ) -> Result<Self> {
         let gru = flodl::GRUCell::new(hidden_dim, hidden_dim)?;
         let loc_head = Linear::new(hidden_dim, 2)?;
@@ -102,16 +110,27 @@ impl ScanStep {
             content_head,
             content_logits,
             handoff,
+            scan_start,
+            from_external: Cell::new(false),
         })
     }
 
     fn step(&self, h: &Variable, image: &Variable) -> Result<Variable> {
         let new_h = {
             if self.location.borrow().is_none() {
-                let batch = h.shape()[0];
-                let device = h.data().device();
-                let zeros = Tensor::zeros(&[batch, 2], TensorOptions { device, ..Default::default() })?;
-                *self.location.borrow_mut() = Some(Variable::new(zeros, false));
+                // Check for external start position (composed mode with SubScan).
+                let external = self.scan_start.borrow_mut().take();
+                self.from_external.set(external.is_some());
+                let loc = match external {
+                    Some(pos) => pos,
+                    None => {
+                        let batch = h.shape()[0];
+                        let device = h.data().device();
+                        let zeros = Tensor::zeros(&[batch, 2], TensorOptions { device, ..Default::default() })?;
+                        Variable::new(zeros, false)
+                    }
+                };
+                *self.location.borrow_mut() = Some(loc);
             }
 
             let loc_guard = self.location.borrow();
@@ -131,16 +150,23 @@ impl ScanStep {
             buf.borrow_mut().push(logit);
         }
 
-        // Location: learnable x, free y from loc_head
+        // Location update.
         let raw = self.loc_head.forward(&new_h)?.tanh()?;
-        let y = raw.select(1, 1)?.unsqueeze(1)?; // [B, 1]
+        let new_loc = if self.from_external.get() {
+            // Composed mode: free (x, y) refinement from SubScan position.
+            // Both channels of loc_head are active — scan can follow the letter
+            // anywhere on the word image, not just along a learnable x-sweep.
+            raw
+        } else {
+            // Standalone: learnable x, free y from loc_head.
+            let y = raw.select(1, 1)?.unsqueeze(1)?; // [B, 1]
+            let idx = *self.step_idx.borrow();
+            let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
+            let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?; // [B, 1]
+            *self.step_idx.borrow_mut() = idx + 1;
+            x.cat(&y, 1)?
+        };
 
-        let idx = *self.step_idx.borrow();
-        let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
-        let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?; // [B, 1]
-        *self.step_idx.borrow_mut() = idx + 1;
-
-        let new_loc = x.cat(&y, 1)?; // [B, 2]
         *self.location.borrow_mut() = Some(new_loc.clone());
 
         // Write detached copy to handoff — read phase picks this up as initial position.
@@ -164,6 +190,7 @@ impl Module for ScanStep {
     fn reset(&self) {
         *self.location.borrow_mut() = None;
         *self.step_idx.borrow_mut() = 0;
+        self.from_external.set(false);
         if let Some(buf) = &self.content_logits {
             buf.borrow_mut().clear();
         }

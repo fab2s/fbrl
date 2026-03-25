@@ -66,7 +66,7 @@ impl GlimpseSensor {
     /// Extract, encode, and fuse.
     /// image: [B, C, H, W], location: [B, 2] in [-1, 1].
     /// Returns: [B, latent_dim].
-    fn sense(&self, image: &Variable, location: &Variable) -> Result<Variable> {
+    pub(crate) fn sense(&self, image: &Variable, location: &Variable) -> Result<Variable> {
         let img_shape = image.shape();
         let b = location.shape()[0];
         let h = img_shape[2];

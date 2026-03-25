@@ -1,0 +1,2 @@
+# Everything — Dockerfile has no COPY, source is bind-mounted at runtime.
+*
