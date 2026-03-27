@@ -1,40 +1,53 @@
-//! Training loop for SubScan + Letter composition (Step 2).
+//! Training loop for SubScan (Step 2) — REINFORCE with frozen letter oracle.
 //!
-//! Trains SubScan to localize letters within bounded regions of word images,
-//! using a frozen letter read module for classification.
+//! SubScan's job: given a noisy starting position near a letter center,
+//! use two blurred glimpses to triangulate the actual letter center.
+//! The midpoint of the glimpse positions is the center estimate.
 //!
-//! Per batch, for each of 4 letter positions:
-//! 1. Compute a noisy region around the ground-truth letter center
-//! 2. SubScan localizes within the region → position
-//! 3. LetterModel.scan refines from that position → LetterModel.read classifies
-//! 4. CE + reconstruction loss per position
-//! Then: SubScan diversity loss across the 4 positions, backward, step.
+//! ## Training mechanism
+//!
+//! A retry loop per letter IS the training:
+//! - SubScan forward → sample position → oracle reads → reward/penalty
+//! - Negative reinforcement on failed reads: backward + step changes weights,
+//!   so the next forward pass produces a different output
+//! - Positive reinforcement on success: speed bonus + correct letter nudge
+//! - Each failed attempt physically shifts the model via gradient step
+//!
+//! ## REINFORCE gradient
+//!
+//! SubScan outputs a deterministic mean position μ. A small Gaussian action
+//! noise ε is added for the REINFORCE gradient computation:
+//!   action = μ + ε,  ε ~ N(0, σ²)
+//!   loss = reward × |action - μ|² / (2σ²)
+//!
+//! This gives gradient: -reward × ε/σ² × ∂μ/∂θ
+//! - Negative reward → push μ away from the failed action
+//! - Positive reward → pull μ toward the successful action
+//!
+//! The action noise is NOT exploration noise on the input — it is the
+//! mathematical mechanism that gives REINFORCE a gradient direction.
+//! Between retries, weight updates shift μ, which is the real exploration.
 
 use std::fs;
 use std::io::Write;
 use std::time::Instant;
 
-use flodl::autograd::Variable;
-use flodl::nn::{
-    cross_entropy_loss, mse_loss, clip_grad_norm,
-    Adam, CosineScheduler, Optimizer, Parameter,
-};
+use flodl::autograd::{no_grad, Variable};
+use flodl::nn::{clip_grad_norm, Adam, Module, Optimizer, Parameter};
 use flodl::monitor::Monitor;
-use flodl::tensor::{cuda_available, Device, Result, Tensor, TensorError, TensorOptions};
+use flodl::tensor::{cuda_available, Device, DType, Result, Tensor, TensorError};
 use flodl::CpuWorker;
 use serde::{Serialize, Deserialize};
 
-use super::data::{WordDataset, WordLoader, IsolationDataset};
-use super::loss::fixation_diversity_loss;
-use super::subscan::{SubScan, SubScanConfig};
+use super::data::{WordDataset, WordLoader};
+use super::subscan::{SubScanModel, SubScanConfig};
 
 use fbrl::letter::LetterModel;
 
 /// Number of letter positions in a word image.
 const N_POSITIONS: usize = 4;
 
-/// Normalized x-centers for the 4 letter positions in a 128×256 word image.
-/// Letters are evenly spaced: centers at pixels 32, 96, 160, 224.
+/// Normalized x-centers for the 4 letter positions in a 128x256 word image.
 const LETTER_CENTERS: [f64; N_POSITIONS] = [-0.75, -0.25, 0.25, 0.75];
 
 /// SubScan training configuration.
@@ -48,7 +61,7 @@ pub struct SubScanTrainConfig {
     pub subscan_n_glimpses: usize,
     pub subscan_blur_sigma: f64,
 
-    // --- Letter model (loaded from checkpoint) ---
+    // --- Letter model (oracle, fully frozen) ---
     pub letter_checkpoint: String,
     pub letter_n_classes: usize,
     pub letter_n_scan: usize,
@@ -58,32 +71,36 @@ pub struct SubScanTrainConfig {
     pub letter_n_scales: usize,
     pub letter_latent_dim: i64,
 
-    // --- Region noise curriculum ---
-    /// Starting noise magnitude (fraction of letter width in normalized coords).
-    pub noise_start: f64,
-    /// Final noise magnitude.
-    pub noise_end: f64,
-    /// Epochs over which noise ramps from start to end.
-    pub noise_ramp_epochs: usize,
-    /// Region half-width in normalized coords (~1 letter width = 0.5).
+    // --- Region bounding ---
     pub region_half_w: f64,
+
+    // --- Noise curriculum on starting position (simulates word model imprecision) ---
+    pub noise_x_start: f64,
+    pub noise_x_end: f64,
+    pub noise_y_start: f64,
+    pub noise_y_end: f64,
+    pub noise_ramp_pct: f64,
+
+    // --- REINFORCE ---
+    /// Maximum retry attempts per letter before giving up.
+    pub max_attempts: usize,
+    /// Negative reward on each failed read attempt.
+    pub fail_penalty: f64,
+    /// Extra positive reward when the oracle reads the correct target letter.
+    pub target_bonus: f64,
+    /// Std dev of Gaussian action noise for REINFORCE gradient computation.
+    pub action_sigma: f64,
+    /// Minimum softmax confidence for the oracle read to count as a success.
+    pub confidence_threshold: f64,
 
     // --- Training ---
     pub batch_size: usize,
     pub epochs: usize,
     pub subscan_lr: f64,
-    pub scan_lr: f64,
-    pub min_lr_ratio: f64,
     pub max_grad_norm: f64,
 
-    // --- Loss weights ---
-    pub recon_weight: f64,
-    pub diversity_weight: f64,
-    pub diversity_sigma: f64,
-
-    // --- Data paths ---
+    // --- Data ---
     pub word_data: String,
-    pub isolation_data: String,
 
     // --- Checkpointing ---
     #[serde(default)]
@@ -117,24 +134,26 @@ impl Default for SubScanTrainConfig {
             letter_n_scales: 1,
             letter_latent_dim: 256,
 
-            noise_start: 0.08,
-            noise_end: 0.20,
-            noise_ramp_epochs: 50,
             region_half_w: 0.5,
+
+            noise_x_start: 0.02,
+            noise_x_end: 0.18,
+            noise_y_start: 0.01,
+            noise_y_end: 0.08,
+            noise_ramp_pct: 0.6,
+
+            max_attempts: 30,
+            fail_penalty: -0.1,
+            target_bonus: 0.2,
+            action_sigma: 0.03,
+            confidence_threshold: 0.5,
 
             batch_size: 32,
             epochs: 100,
             subscan_lr: 0.001,
-            scan_lr: 0.0001,
-            min_lr_ratio: 0.01,
             max_grad_norm: 5.0,
 
-            recon_weight: 1.0,
-            diversity_weight: 1.0,
-            diversity_sigma: 0.1,
-
             word_data: String::new(),
-            isolation_data: String::new(),
 
             save_dir: "training".into(),
             checkpoint_interval: 25,
@@ -144,30 +163,34 @@ impl Default for SubScanTrainConfig {
     }
 }
 
-/// Per-epoch averaged metrics.
+/// Per-epoch metrics.
 pub struct SubScanEpochStats {
     pub epoch: usize,
-    pub ce_loss: f64,
-    pub recon_loss: f64,
-    pub div_loss: f64,
-    pub total_loss: f64,
-    pub accuracy: f64,
-    pub lr_subscan: f64,
-    pub lr_scan: f64,
-    pub noise_range: f64,
+    pub mean_attempts: f64,
+    pub max_attempt: usize,
+    pub success_rate: f64,
+    pub target_acc: f64,
+    pub mean_reward: f64,
+    pub noise_x: f64,
+    pub noise_y: f64,
+    pub lr: f64,
     pub duration: std::time::Duration,
     pub eta: std::time::Duration,
 }
 
-/// Run SubScan + Letter composition training (Step 2).
+/// Train SubScan via REINFORCE with frozen letter oracle.
+///
+/// The retry loop IS the training mechanism. Each failed attempt does
+/// backward + step, changing weights so the next forward produces a
+/// different output. Success gives positive reinforcement scaled by
+/// speed and correct-letter nudge.
 pub fn train_subscan(
     cfg: &SubScanTrainConfig,
     word_ds: &WordDataset,
-    iso_ds: &IsolationDataset,
     on_epoch: Option<&dyn Fn(&SubScanEpochStats)>,
 ) -> Result<()> {
     // --- Build SubScan ---
-    let subscan = SubScan::new(&SubScanConfig {
+    let subscan = SubScanModel::new(&SubScanConfig {
         hidden_dim: cfg.hidden_dim,
         patch_h: cfg.subscan_patch_h,
         patch_w: cfg.subscan_patch_w,
@@ -176,7 +199,7 @@ pub fn train_subscan(
         blur_sigma: cfg.subscan_blur_sigma,
     })?;
 
-    // --- Build and load LetterModel ---
+    // --- Build letter model (oracle — frozen, eval mode) ---
     let letter = LetterModel::new(
         cfg.letter_n_classes, cfg.letter_n_scan, cfg.letter_n_read,
         cfg.letter_patch_size, cfg.letter_scan_patch_w,
@@ -186,9 +209,6 @@ pub fn train_subscan(
         let report = letter.graph.load_checkpoint(&cfg.letter_checkpoint)?;
         eprintln!("Loaded letter checkpoint: {} params, {} skipped, {} missing",
             report.loaded.len(), report.skipped.len(), report.missing.len());
-        if !report.missing.is_empty() {
-            eprintln!("  missing: {:?}", &report.missing[..report.missing.len().min(5)]);
-        }
     }
 
     // --- Move to device ---
@@ -196,51 +216,28 @@ pub fn train_subscan(
         eprintln!("Using CUDA");
         flodl::tensor::set_cudnn_benchmark(true);
         letter.graph.set_device(Device::CUDA(0));
-        subscan.set_device(Device::CUDA(0));
+        subscan.graph.set_device(Device::CUDA(0));
         Device::CUDA(0)
     } else {
         eprintln!("Using CPU");
         Device::CPU
     };
 
-    // --- Freeze read-phase params, keep scan-phase trainable ---
-    let scan_params: Vec<Parameter> = letter.scan_phase_params().to_vec();
-    let scan_param_count = scan_params.len();
-    let all_letter_params = letter.parameters();
-
-    // Freeze everything in the letter model.
-    for p in &all_letter_params {
+    // Freeze letter model.
+    for p in &letter.parameters() {
         p.freeze()?;
     }
-    // Unfreeze scan-phase params.
-    for p in &scan_params {
-        p.unfreeze()?;
-    }
-    let frozen_count = all_letter_params.len() - scan_param_count;
-    eprintln!("Letter model: {} scan params (trainable), {} read params (frozen)",
-        scan_param_count, frozen_count);
+    letter.eval();
+    eprintln!("Letter model: {} params (frozen)", letter.parameters().len());
 
-    // --- Optimizer: two groups ---
-    let subscan_params = subscan.parameters();
-    eprintln!("SubScan: {} params", subscan_params.len());
+    // --- SubScan optimizer (fixed LR) ---
+    let subscan_params = subscan.graph.parameters();
+    eprintln!("SubScan: {} params (trainable)", subscan_params.len());
 
-    let mut optimizer = Adam::with_groups()
-        .group(&subscan_params, cfg.subscan_lr)
-        .group(&scan_params, cfg.scan_lr)
-        .build();
-    let subscan_scheduler = CosineScheduler::new(
-        cfg.subscan_lr, cfg.subscan_lr * cfg.min_lr_ratio, cfg.epochs,
-    );
-    let scan_scheduler = CosineScheduler::new(
-        cfg.scan_lr, cfg.scan_lr * cfg.min_lr_ratio, cfg.epochs,
-    );
+    let mut optimizer = Adam::new(&subscan_params, cfg.subscan_lr);
+    let all_trainable: Vec<Parameter> = subscan_params.clone();
 
-    // All trainable params for grad clipping.
-    let mut all_trainable: Vec<Parameter> = subscan_params.clone();
-    all_trainable.extend(scan_params.iter().cloned());
-
-    letter.train();
-    subscan.set_training(true);
+    subscan.graph.train();
 
     // --- Data loader ---
     let mut loader = WordLoader::new(word_ds, cfg.batch_size, true);
@@ -252,26 +249,31 @@ pub fn train_subscan(
             .map_err(|e| TensorError::new(&format!("create save dir: {e}")))?;
     }
 
-    // --- Streaming log ---
+    // --- Log file ---
     let mut log_file = if !cfg.save_dir.is_empty() {
         let path = format!("{}/training.log", cfg.save_dir);
         let mut f = fs::File::create(&path)
             .map_err(|e| TensorError::new(&format!("create log: {e}")))?;
-        writeln!(f, "# fbrl-word subscan training (step 2)").ok();
-        writeln!(f, "# epochs={}  batch={}  subscan_lr={:.4}  scan_lr={:.4}",
-            cfg.epochs, cfg.batch_size, cfg.subscan_lr, cfg.scan_lr).ok();
+        writeln!(f, "# fbrl-word subscan training (step 2) — REINFORCE").ok();
+        writeln!(f, "# epochs={}  batch={}  lr={:.4}  max_attempts={}",
+            cfg.epochs, cfg.batch_size, cfg.subscan_lr, cfg.max_attempts).ok();
+        writeln!(f, "# noise_x={:.3}→{:.3}  noise_y={:.3}→{:.3}  ramp={:.0}%",
+            cfg.noise_x_start, cfg.noise_x_end, cfg.noise_y_start, cfg.noise_y_end,
+            cfg.noise_ramp_pct * 100.0).ok();
+        writeln!(f, "# fail_penalty={:.2}  target_bonus={:.2}  sigma={:.3}  threshold={:.2}",
+            cfg.fail_penalty, cfg.target_bonus, cfg.action_sigma, cfg.confidence_threshold).ok();
         Some(f)
     } else {
         None
     };
 
-    // --- Live monitor (optional) ---
+    // --- Monitor ---
     let mut monitor = if let Some(port) = cfg.monitor_port {
         let mut m = Monitor::new(cfg.epochs);
         if let Err(e) = m.serve(port) {
             eprintln!("warning: monitor server: {e}");
         }
-        m.watch(&letter.graph);
+        m.watch(&subscan.graph);
         m.set_metadata(serde_json::to_value(cfg).unwrap_or_default());
         if !cfg.save_dir.is_empty() {
             m.save_html(&format!("{}/dashboard.html", cfg.save_dir));
@@ -281,176 +283,268 @@ pub fn train_subscan(
         None
     };
 
-    // --- Background worker for async checkpointing ---
     let mut worker = CpuWorker::new();
-
     let metric_tags: &[&str] = &[
-        "ce", "recon", "diversity", "total", "accuracy", "lr_subscan", "lr_scan", "noise",
+        "mean_attempts", "success_rate", "target_acc", "mean_reward",
+        "noise_x", "noise_y", "lr",
     ];
 
-    // --- RNG for isolation image selection ---
+    // --- RNG ---
     let mut rng_state: u64 = 0xCAFE_BABE;
-    let mut rng = |bound: usize| -> usize {
-        rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
-        (rng_state >> 33) as usize % bound
-    };
+    #[inline]
+    fn rng_next(state: &mut u64) -> u64 {
+        *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        *state
+    }
+    /// Uniform in [-1, 1].
+    #[inline]
+    fn rng_uniform(state: &mut u64) -> f64 {
+        let v = rng_next(state);
+        ((v >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+    }
+    /// Uniform in (0, 1] — needed for Box-Muller (must avoid 0 for log).
+    #[inline]
+    fn rng_open01(state: &mut u64) -> f64 {
+        let v = rng_next(state);
+        ((v >> 11) as f64 + 1.0) / ((1u64 << 53) as f64 + 1.0)
+    }
+    /// Standard normal via Box-Muller.
+    #[inline]
+    fn rng_normal(state: &mut u64) -> f64 {
+        let u1 = rng_open01(state);
+        let u2 = rng_open01(state);
+        (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+    }
+    fn shuffle(slice: &mut [usize], state: &mut u64) {
+        for i in (1..slice.len()).rev() {
+            let j = (rng_next(state) >> 33) as usize % (i + 1);
+            slice.swap(i, j);
+        }
+    }
 
-    let opts = TensorOptions { device, ..Default::default() };
+    let inv_two_sigma_sq = 1.0 / (2.0 * cfg.action_sigma * cfg.action_sigma);
     let train_start = Instant::now();
     let mut epoch_times: Vec<f64> = Vec::with_capacity(cfg.epochs);
 
     for epoch in 0..cfg.epochs {
         loader.reset();
         let epoch_start = Instant::now();
-        let mut n_batches = 0usize;
 
         // Noise curriculum.
-        let noise_progress = if cfg.noise_ramp_epochs > 0 {
-            (epoch as f64 / cfg.noise_ramp_epochs as f64).min(1.0)
-        } else {
-            1.0
-        };
-        let noise_range = cfg.noise_start + (cfg.noise_end - cfg.noise_start) * noise_progress;
+        let noise_ramp_epochs = (cfg.noise_ramp_pct * cfg.epochs as f64).max(1.0);
+        let noise_progress = (epoch as f64 / noise_ramp_epochs).min(1.0);
+        let noise_x = cfg.noise_x_start + (cfg.noise_x_end - cfg.noise_x_start) * noise_progress;
+        let noise_y = cfg.noise_y_start + (cfg.noise_y_end - cfg.noise_y_start) * noise_progress;
 
-        // Update LR.
-        let current_subscan_lr = subscan_scheduler.lr(epoch);
-        let current_scan_lr = scan_scheduler.lr(epoch);
-        optimizer.set_group_lr(0, current_subscan_lr);
-        optimizer.set_group_lr(1, current_scan_lr);
+        // Epoch accumulators.
+        let mut total_attempts = 0usize;
+        let mut total_letters = 0usize;
+        let mut total_successes = 0usize;
+        let mut total_target_correct = 0usize;
+        let mut max_attempt_epoch = 0usize;
+        let mut reward_sum = 0.0f64;
+        let mut reward_count = 0usize;
 
         while let Some(batch) = loader.next_batch()? {
             let img_var = Variable::new(batch.image, false);
-            let b = img_var.shape()[0];
+            let b = img_var.shape()[0] as usize;
 
-            // Pre-extract letter indices for isolation lookup.
-            let letter_indices: Vec<Vec<i64>> = (0..N_POSITIONS).map(|pos| {
-                batch.letter_idx[pos].to_i64_vec().unwrap_or_default()
-            }).collect();
+            // Case label for letter model (all lowercase).
+            let case_data = vec![1.0f32; b];
+            let case_var = Variable::new(
+                Tensor::from_f32(&case_data, &[b as i64, 1], device)?, false,
+            );
 
-            // Accumulate losses across the 4 letter positions.
-            let zero = Variable::new(Tensor::zeros(&[1], opts)?, false);
-            let mut total_ce = zero.clone();
-            let mut total_recon = zero.clone();
-            let mut subscan_positions: Vec<Variable> = Vec::with_capacity(N_POSITIONS);
-            let mut total_acc = 0.0f64;
+            // Region half-width.
+            let half_w_data = vec![cfg.region_half_w as f32; b];
+            let region_half_w = Variable::new(
+                Tensor::from_f32(&half_w_data, &[b as i64, 1], device)?, false,
+            );
 
-            for pos in 0..N_POSITIONS {
-                // Region bounds: ground-truth center + uniform noise.
-                let gt_center = LETTER_CENTERS[pos];
-                let noise_data: Vec<f32> = (0..b as usize).map(|_| {
-                    let u = rng(10000) as f64 / 10000.0; // [0, 1)
-                    let offset = (u * 2.0 - 1.0) * noise_range;
-                    (gt_center + offset) as f32
+            // Shuffle letter order within word.
+            let mut letter_order = [0usize, 1, 2, 3];
+            shuffle(&mut letter_order, &mut rng_state);
+
+            for &pos in &letter_order {
+                let gt_x = LETTER_CENTERS[pos];
+
+                // Curriculum-noised starting position (fixed for this letter's retry loop).
+                let start_data: Vec<f32> = (0..b).flat_map(|_| {
+                    let x = (gt_x + rng_uniform(&mut rng_state) * noise_x) as f32;
+                    let y = (rng_uniform(&mut rng_state) * noise_y) as f32;
+                    [x, y]
                 }).collect();
-                let region_center = Variable::new(
-                    Tensor::from_f32(&noise_data, &[b, 1], device)?, false,
-                );
-                let half_w_data = vec![cfg.region_half_w as f32; b as usize];
-                let region_half_w = Variable::new(
-                    Tensor::from_f32(&half_w_data, &[b, 1], device)?, false,
+                let start_pos = Variable::new(
+                    Tensor::from_f32(&start_data, &[b as i64, 2], device)?, false,
                 );
 
-                // SubScan: localize within region.
-                let subscan_pos = subscan.forward(&img_var, &region_center, &region_half_w)?;
-                subscan_positions.push(subscan_pos.clone());
+                // Per-sample tracking: which samples have succeeded.
+                let mut succeeded = vec![false; b];
+                let mut attempt_counts = vec![0usize; b];
 
-                // LetterModel: scan from SubScan's position, read classifies.
-                // Case label: assume lowercase (1.0) for word letters.
-                let case_data = vec![1.0f32; b as usize];
-                let case_var = Variable::new(
-                    Tensor::from_f32(&case_data, &[b, 1], device)?, false,
-                );
-                letter.set_scan_start(subscan_pos);
-                let result = letter.forward(&img_var, &case_var)?;
+                // ── Retry loop ──────────────────────────────────────
+                for attempt in 0..cfg.max_attempts {
+                    if succeeded.iter().all(|&s| s) { break; }
 
-                // Per-position CE loss.
-                let target = Variable::new(batch.letter_idx[pos].clone(), false);
-                let ce = cross_entropy_loss(&result.letter_logits, &target)?;
-                total_ce = total_ce.add(&ce)?;
+                    // SubScan forward → mean position μ [B, 2].
+                    let mu = subscan.forward(&img_var, &start_pos, &region_half_w)?;
 
-                // Per-position reconstruction loss.
-                // Target: matching letter from isolation dataset (128×128).
-                if cfg.recon_weight > 0.0 {
-                    let recon_targets: Vec<Tensor> = (0..b as usize).map(|bi| {
-                        let lidx = letter_indices[pos][bi];
-                        iso_ds.get_random_image(lidx, &mut rng).clone()
+                    // Action noise for REINFORCE gradient: ε ~ N(0, σ²).
+                    let noise_data: Vec<f32> = (0..b * 2).map(|_| {
+                        (rng_normal(&mut rng_state) * cfg.action_sigma) as f32
                     }).collect();
-                    let recon_target_refs: Vec<&Tensor> = recon_targets.iter().collect();
-                    let recon_target_batch = Tensor::stack(&recon_target_refs, 0)?;
-                    let recon_target = Variable::new(
-                        recon_target_batch.to_device(device)?, false,
+                    let noise_tensor = Tensor::from_f32(&noise_data, &[b as i64, 2], device)?;
+
+                    // Sampled action: a = μ_detached + ε (fixed sample, no grad).
+                    let action_tensor = mu.data().add(&noise_tensor)?;
+                    let action = Variable::new(action_tensor, false);
+
+                    // Oracle reads from sampled action position.
+                    let (conf_vals, target_matches) = no_grad(|| {
+                        let result = letter.forward(&img_var, &case_var, &action)?;
+                        let logits = result.letter_logits.data();
+
+                        // Softmax confidence: max(softmax(logits)).
+                        let probs = logits.softmax(1)?;
+                        let max_probs = probs.max_dim(1, false)?; // [B] float
+
+                        // Prediction matches target letter? (as float to avoid int64 item())
+                        let preds = logits.argmax(1, false)?; // [B] int64
+                        let is_target = preds.eq_tensor(&batch.letter_idx[pos])?
+                            .to_dtype(DType::Float32)?; // [B] float 0/1
+
+                        // Pull to CPU for per-sample processing.
+                        let max_probs_cpu = max_probs.to_device(Device::CPU)?;
+                        let is_target_cpu = is_target.to_device(Device::CPU)?;
+
+                        let mut confs = Vec::with_capacity(b);
+                        let mut matches = Vec::with_capacity(b);
+                        for i in 0..b {
+                            confs.push(max_probs_cpu.select(0, i as i64)?.item()?);
+                            matches.push(is_target_cpu.select(0, i as i64)?.item()? > 0.5);
+                        }
+                        Ok((confs, matches))
+                    })?;
+
+                    letter.graph.detach_state();
+
+                    // Per-sample reward.
+                    let mut rewards = vec![0.0f32; b];
+                    let mut any_active = false;
+
+                    for i in 0..b {
+                        if succeeded[i] { continue; }
+                        any_active = true;
+                        attempt_counts[i] = attempt + 1;
+
+                        if conf_vals[i] >= cfg.confidence_threshold {
+                            // ── Success: oracle read something ──
+                            succeeded[i] = true;
+                            let speed = (cfg.max_attempts - attempt) as f64
+                                / cfg.max_attempts as f64;
+                            let mut r = speed;
+                            if target_matches[i] {
+                                r += cfg.target_bonus;
+                                total_target_correct += 1;
+                            }
+                            rewards[i] = r as f32;
+                            total_successes += 1;
+                            reward_sum += r;
+                        } else {
+                            // ── Failure: negative reinforcement ──
+                            rewards[i] = cfg.fail_penalty as f32;
+                            reward_sum += cfg.fail_penalty;
+                        }
+                        reward_count += 1;
+                    }
+
+                    if !any_active { break; }
+
+                    // REINFORCE loss: reward × |action - μ|² / (2σ²).
+                    // action is fixed (no grad), μ is in the graph.
+                    // Gradient: -reward × (action - μ) / σ² × ∂μ/∂θ.
+                    //   reward > 0 → pull μ toward action (reinforce)
+                    //   reward < 0 → push μ away from action (penalize)
+                    let diff = action.sub(&mu)?;
+                    let sq_dist = diff.pow_scalar(2.0)?.sum_dim(1, false)?; // [B]
+
+                    let reward_tensor = Variable::new(
+                        Tensor::from_f32(&rewards, &[b as i64], device)?, false,
                     );
-                    let recon = mse_loss(&result.recon, &recon_target)?;
-                    total_recon = total_recon.add(&recon)?;
+
+                    // loss = mean_over_batch(reward_i × sq_dist_i / (2σ²))
+                    let loss = sq_dist.mul(&reward_tensor)?
+                        .mul_scalar(inv_two_sigma_sq)?
+                        .mean()?;
+
+                    optimizer.zero_grad();
+                    loss.backward()?;
+                    clip_grad_norm(&all_trainable, cfg.max_grad_norm)?;
+                    optimizer.step()?;
+
+                    subscan.graph.detach_state();
                 }
 
-                // Accuracy tracking (per-position mean, then averaged).
-                let preds = result.letter_logits.data().argmax(1, false)?;
-                let acc = preds.eq_tensor(&batch.letter_idx[pos])?.mean()?.item()?;
-                total_acc += acc;
+                // Max attempts exhausted: count remaining failures.
+                for i in 0..b {
+                    if !succeeded[i] {
+                        attempt_counts[i] = cfg.max_attempts;
+                    }
+                }
 
-                // Detach state between positions (no gradient across positions).
-                letter.graph.detach_state();
+                total_letters += b;
+                for &ac in &attempt_counts {
+                    total_attempts += ac;
+                    if ac > max_attempt_epoch {
+                        max_attempt_epoch = ac;
+                    }
+                }
             }
-
-            // SubScan diversity: repel the 4 output positions from each other.
-            let div_loss = if cfg.diversity_weight > 0.0 {
-                fixation_diversity_loss(&subscan_positions, cfg.diversity_sigma, 0.3)?
-            } else {
-                zero.clone()
-            };
-
-            // Total loss.
-            let avg_ce = total_ce.mul_scalar(1.0 / N_POSITIONS as f64)?;
-            let avg_recon = total_recon.mul_scalar(1.0 / N_POSITIONS as f64)?;
-            let total = avg_ce.add(&avg_recon.mul_scalar(cfg.recon_weight)?)?
-                .add(&div_loss.mul_scalar(cfg.diversity_weight)?)?;
-
-            optimizer.zero_grad();
-            total.backward()?;
-            clip_grad_norm(&all_trainable, cfg.max_grad_norm)?;
-            optimizer.step()?;
-
-            // Break gradient chain for next batch.
-            letter.graph.detach_state();
-            subscan.reset();
-
-            // Record metrics.
-            let acc = total_acc / N_POSITIONS as f64;
-            letter.graph.record_scalar("ce", avg_ce.item()?);
-            letter.graph.record_scalar("recon", avg_recon.item()?);
-            letter.graph.record_scalar("diversity", div_loss.item()?);
-            letter.graph.record_scalar("total", total.item()?);
-            letter.graph.record_scalar("accuracy", acc);
-            letter.graph.record_scalar("lr_subscan", current_subscan_lr);
-            letter.graph.record_scalar("lr_scan", current_scan_lr);
-            letter.graph.record_scalar("noise", noise_range);
-
-            n_batches += 1;
         }
 
-        if n_batches == 0 {
-            return Err(TensorError::new(&format!("epoch {epoch}: no batches")));
+        if total_letters == 0 {
+            return Err(TensorError::new(&format!("epoch {epoch}: no data")));
         }
 
-        // Flush batch means → epoch history.
-        letter.graph.flush(&[]);
+        // Epoch metrics.
+        let mean_attempts = total_attempts as f64 / total_letters as f64;
+        let success_rate = total_successes as f64 / total_letters as f64;
+        let target_acc = if total_successes > 0 {
+            total_target_correct as f64 / total_successes as f64
+        } else {
+            0.0
+        };
+        let mean_reward = if reward_count > 0 {
+            reward_sum / reward_count as f64
+        } else {
+            0.0
+        };
+
+        subscan.graph.record_scalar("mean_attempts", mean_attempts);
+        subscan.graph.record_scalar("success_rate", success_rate);
+        subscan.graph.record_scalar("target_acc", target_acc);
+        subscan.graph.record_scalar("mean_reward", mean_reward);
+        subscan.graph.record_scalar("noise_x", noise_x);
+        subscan.graph.record_scalar("noise_y", noise_y);
+        subscan.graph.record_scalar("lr", cfg.subscan_lr);
+
+        subscan.graph.flush(&[]);
 
         let epoch_dur = epoch_start.elapsed();
         epoch_times.push((epoch_dur.as_secs_f64() * 100.0).round() / 100.0);
-        let eta_secs = letter.graph.eta(cfg.epochs);
+        let eta_secs = subscan.graph.eta(cfg.epochs);
         let eta = std::time::Duration::from_secs_f64(eta_secs);
 
         let stats = SubScanEpochStats {
             epoch,
-            ce_loss: letter.graph.trend("ce").latest(),
-            recon_loss: letter.graph.trend("recon").latest(),
-            div_loss: letter.graph.trend("diversity").latest(),
-            total_loss: letter.graph.trend("total").latest(),
-            accuracy: letter.graph.trend("accuracy").latest(),
-            lr_subscan: current_subscan_lr,
-            lr_scan: current_scan_lr,
-            noise_range,
+            mean_attempts,
+            max_attempt: max_attempt_epoch,
+            success_rate,
+            target_acc,
+            mean_reward,
+            noise_x,
+            noise_y,
+            lr: cfg.subscan_lr,
             duration: epoch_dur,
             eta,
         };
@@ -460,17 +554,20 @@ pub fn train_subscan(
         }
 
         if let Some(ref mut m) = monitor {
-            m.log(epoch, epoch_dur, &letter.graph);
+            m.log(epoch, epoch_dur, &subscan.graph);
         }
 
         if let Some(ref mut f) = log_file {
             writeln!(f,
-                "epoch {:3}  ce={:.4}  recon={:.4}  div={:.4}  total={:.4}  acc={:.1}%  \
-                 noise={:.3}  lr_sub={:.6}  lr_scan={:.6}  [{:?}]  ETA {:?}",
+                "epoch {:3}  attempts={:.1}(max {})  success={:.1}%  target={:.1}%  \
+                 reward={:.3}  noise=({:.3},{:.3})  lr={:.6}  [{:?}]  ETA {:?}",
                 epoch + 1,
-                stats.ce_loss, stats.recon_loss, stats.div_loss, stats.total_loss,
-                stats.accuracy * 100.0, stats.noise_range,
-                stats.lr_subscan, stats.lr_scan,
+                stats.mean_attempts, stats.max_attempt,
+                stats.success_rate * 100.0,
+                stats.target_acc * 100.0,
+                stats.mean_reward,
+                stats.noise_x, stats.noise_y,
+                stats.lr,
                 stats.duration, stats.eta,
             ).ok();
             f.flush().ok();
@@ -479,63 +576,56 @@ pub fn train_subscan(
         // Async checkpoint.
         if !cfg.save_dir.is_empty() && cfg.checkpoint_interval > 0
             && (epoch + 1) % cfg.checkpoint_interval == 0
+            && worker.is_idle()
         {
-            if worker.is_idle() {
-                let path = format!("{}/checkpoint_epoch_{}.fdl.gz", cfg.save_dir, epoch + 1);
-                let snap = letter.graph.snapshot_cpu()?;
-                worker.submit(move || {
-                    if let Err(e) = snap.save_file(&path) {
-                        eprintln!("warning: async checkpoint: {e}");
-                    }
-                });
-                // TODO: also save SubScan params separately (not in letter graph)
-            }
+            let path = format!("{}/checkpoint_epoch_{}.fdl.gz", cfg.save_dir, epoch + 1);
+            let snap = subscan.graph.snapshot_cpu()?;
+            worker.submit(move || {
+                if let Err(e) = snap.save_file(&path) {
+                    eprintln!("warning: async checkpoint: {e}");
+                }
+            });
         }
     }
 
     // --- Finalize ---
     if let Some(ref mut m) = monitor {
-        m.finish_with(&letter.graph);
+        m.finish_with(&subscan.graph);
     }
 
     if !cfg.save_dir.is_empty() {
-        // Save final letter graph checkpoint.
-        let letter_path = format!("{}/letter_composed.fdl.gz", cfg.save_dir);
-        let snap = letter.graph.snapshot_cpu()?;
+        let subscan_path = format!("{}/subscan_final.fdl.gz", cfg.save_dir);
+        let snap = subscan.graph.snapshot_cpu()?;
         worker.submit(move || {
-            if let Err(e) = snap.save_file(&letter_path) {
-                eprintln!("warning: final letter checkpoint: {e}");
+            if let Err(e) = snap.save_file(&subscan_path) {
+                eprintln!("warning: final subscan checkpoint: {e}");
             }
         });
 
-        // TODO: save SubScan params as a separate checkpoint
-        // (SubScan is not a Graph, so no snapshot_cpu — need manual tensor saving)
-
-        if let Err(e) = letter.graph.plot_html(
+        if let Err(e) = subscan.graph.plot_html(
             &format!("{}/training.html", cfg.save_dir), metric_tags,
         ) {
             eprintln!("warning: plot HTML: {e}");
         }
-        if let Err(e) = letter.graph.export_trends(
+        if let Err(e) = subscan.graph.export_trends(
             &format!("{}/training.csv", cfg.save_dir), metric_tags,
         ) {
             eprintln!("warning: export CSV: {e}");
         }
 
-        // Manifest.
         let manifest = serde_json::json!({
             "framework": "flodl",
-            "model": "subscan+letter",
+            "model": "subscan",
             "step": 2,
+            "training": "REINFORCE",
             "config": cfg,
             "results": {
-                "accuracy": letter.graph.trend("accuracy").latest(),
-                "ce": letter.graph.trend("ce").latest(),
-                "recon": letter.graph.trend("recon").latest(),
+                "mean_attempts": subscan.graph.trend("mean_attempts").latest(),
+                "success_rate": subscan.graph.trend("success_rate").latest(),
+                "target_acc": subscan.graph.trend("target_acc").latest(),
+                "mean_reward": subscan.graph.trend("mean_reward").latest(),
             },
-            "files": {
-                "letter_model": "letter_composed.fdl.gz",
-            },
+            "files": { "subscan_model": "subscan_final.fdl.gz" },
             "parent": cfg.letter_checkpoint,
         });
         if let Err(e) = fs::write(
@@ -545,31 +635,30 @@ pub fn train_subscan(
             eprintln!("warning: write manifest: {e}");
         }
 
-        // Benchmark report.
         let total_time = train_start.elapsed().as_secs_f64();
         let rss_mb = (flodl::tensor::rss_kb() as f64 / 1024.0).round() as i64;
         let mut bench = serde_json::json!({
             "framework": "flodl",
-            "model": "subscan+letter",
+            "model": "subscan",
             "config": {
                 "hidden_dim": cfg.hidden_dim,
                 "batch_size": cfg.batch_size,
                 "epochs": cfg.epochs,
+                "max_attempts": cfg.max_attempts,
             },
             "ram_peak_rss_mb": rss_mb,
             "total_time_s": (total_time * 10.0).round() / 10.0,
             "avg_epoch_s": ((total_time / cfg.epochs as f64) * 10.0).round() / 10.0,
             "epoch_times_s": epoch_times,
         });
-        if device != Device::CPU {
-            if let Ok((used, total)) = flodl::tensor::cuda_memory_info() {
+        if device != Device::CPU
+            && let Ok((used, total)) = flodl::tensor::cuda_memory_info() {
                 let gpu = flodl::tensor::cuda_device_name().unwrap_or_default();
                 bench["gpu"] = serde_json::json!(gpu);
                 bench["vram"] = serde_json::json!({
                     "device_used_mb": (used as f64 / 1024.0 / 1024.0).round() as i64,
                     "device_total_mb": (total as f64 / 1024.0 / 1024.0).round() as i64,
                 });
-            }
         }
         if let Err(e) = fs::write(
             format!("{}/benchmark.json", cfg.save_dir),

@@ -37,6 +37,12 @@ pub struct LetterConfig {
     pub min_lr: f64,
     pub max_grad_norm: f64,
 
+    // Origin noise curriculum — defines the tolerance band for composition.
+    pub origin_noise_x: f64,
+    pub origin_noise_y: f64,
+    pub noise_start: f64,
+    pub noise_ramp_epochs: usize,
+
     // Loss weights.
     pub scan_guide_weight: f64,
     pub read_guide_weight: f64,
@@ -78,6 +84,11 @@ impl Default for LetterConfig {
             lr: 0.001,
             min_lr: 0.0,
             max_grad_norm: 5.0,
+
+            origin_noise_x: 0.3,
+            origin_noise_y: 0.15,
+            noise_start: 0.0,
+            noise_ramp_epochs: 75,
 
             scan_guide_weight: 8.0,
             read_guide_weight: 0.0,
@@ -220,17 +231,40 @@ pub fn train_letter(
         let epoch_start = Instant::now();
         let mut n_batches = 0usize;
 
+        // Noise curriculum: ramp from noise_start to 1.0 over noise_ramp_epochs.
+        let noise_progress = if cfg.noise_ramp_epochs > 0 {
+            let t = (epoch as f64 / cfg.noise_ramp_epochs as f64).min(1.0);
+            cfg.noise_start + (1.0 - cfg.noise_start) * t
+        } else {
+            1.0
+        };
+        let cur_noise_x = cfg.origin_noise_x * noise_progress;
+        let cur_noise_y = cfg.origin_noise_y * noise_progress;
+
         // Update LR at start of epoch.
         let current_lr = scheduler.lr(epoch);
         optimizer.set_lr(current_lr);
 
         while let Some(batch) = loader.next_batch()? {
+            let b = batch.image.shape()[0];
+
+            // Origin with noise curriculum — defines the tolerance band for composition.
+            let origin = if cur_noise_x > 0.0 || cur_noise_y > 0.0 {
+                let noise = Tensor::randn(&[b, 2], TensorOptions { device, ..Default::default() })?;
+                let scale = Tensor::from_f32(
+                    &[cur_noise_x as f32, cur_noise_y as f32], &[1, 2], device,
+                )?;
+                Variable::new(noise.mul(&scale)?, false)
+            } else {
+                Variable::new(Tensor::zeros(&[b, 2], TensorOptions { device, ..Default::default() })?, false)
+            };
+
             let img_var = Variable::new(batch.image, false);
             let case_var = Variable::new(batch.case_label.clone(), false);
             let clean_var = Variable::new(batch.clean, false);
             let partner_clean_var = Variable::new(batch.partner_clean, false);
 
-            let result = model.forward(&img_var, &case_var)?;
+            let result = model.forward(&img_var, &case_var, &origin)?;
 
             // Classification losses (cross_entropy accepts [B] int64 indices).
             let letter_idx = batch.letter_idx;
@@ -520,15 +554,14 @@ pub fn train_letter(
             "avg_epoch_s": ((total_time / cfg.epochs as f64) * 10.0).round() / 10.0,
             "epoch_times_s": epoch_times,
         });
-        if device != Device::CPU {
-            if let Ok((used, total)) = flodl::tensor::cuda_memory_info() {
+        if device != Device::CPU
+            && let Ok((used, total)) = flodl::tensor::cuda_memory_info() {
                 let gpu = flodl::tensor::cuda_device_name().unwrap_or_default();
                 bench["gpu"] = serde_json::json!(gpu);
                 bench["vram"] = serde_json::json!({
                     "device_used_mb": (used as f64 / 1024.0 / 1024.0).round() as i64,
                     "device_total_mb": (total as f64 / 1024.0 / 1024.0).round() as i64,
                 });
-            }
         }
         let bench_path = format!("{}/benchmark.json", cfg.save_dir);
         if let Err(e) = fs::write(
@@ -567,7 +600,6 @@ fn case_idx_from_float(case_label: &Tensor) -> Result<Tensor> {
 }
 
 /// Compute classification accuracy from logits and target indices (on-device).
-
 fn accuracy(logits: &Tensor, targets: &Tensor) -> Result<f64> {
     let preds = logits.argmax(1, false)?;
     preds.eq_tensor(targets)?.mean()?.item()

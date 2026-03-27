@@ -1,9 +1,6 @@
 //! Graph-compatible modules for the attention pipeline.
-//!
-//! v2: ScanStep and AttentionStep each own their GRU and loc_head.
-//! No shared Controller — clean sub-graph boundaries for word transfer.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -44,6 +41,29 @@ impl Module for H0Init {
     }
 }
 
+/// Shared controller components: GRU and location head.
+/// Both ScanStep and AttentionStep hold Rc to the same instance,
+/// ensuring shared weights and single parameter collection.
+pub struct Controller {
+    pub gru: flodl::GRUCell,
+    pub loc_head: Linear,
+}
+
+impl Controller {
+    pub fn new(hidden_dim: i64) -> Result<Self> {
+        Ok(Controller {
+            gru: flodl::GRUCell::new(hidden_dim, hidden_dim)?,
+            loc_head: Linear::new(hidden_dim, 2)?,
+        })
+    }
+
+    pub fn parameters(&self) -> Vec<Parameter> {
+        let mut params = self.gru.parameters();
+        params.extend(self.loc_head.parameters());
+        params
+    }
+}
+
 /// One-way handoff: scan writes its final location here, read picks it up
 /// as its initial position (detached, so no gradient flows back to scan).
 pub type LocationHandoff = Rc<RefCell<Option<Variable>>>;
@@ -51,47 +71,34 @@ pub type LocationHandoff = Rc<RefCell<Option<Variable>>>;
 /// ScanStep: wide-patch scan with learnable x-position, learned y.
 /// Produces coarse overview fixations guided by attention_guide_loss.
 ///
-/// Owns its own GRU and loc_head (independent from AttentionStep).
-///
-/// **Standalone mode** (scan_start empty): x = tanh(scan_x[step]), y = tanh(loc_head(h))[y].
-/// **Composed mode** (scan_start provided): free (x, y) = tanh(loc_head(h)), starting
-/// from SubScan's position. The learnable scan_xs are unused in composed mode.
+/// Location update: x = tanh(scan_x[step]), y = tanh(loc_head(h))[y].
+/// The x-sweep is learned but constrained, y is free.
 pub struct ScanStep {
     sensor: Rc<dyn Module>,
-    gru: flodl::GRUCell,
-    loc_head: Linear,
+    controller: Rc<Controller>,
     scan_xs: Vec<Parameter>,
     location: RefCell<Option<Variable>>,
     step_idx: RefCell<usize>,
     content_head: Option<Linear>,
     content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
     handoff: LocationHandoff,
-    /// External starting position (for composition with SubScan).
-    /// When populated before forward, ScanStep uses it as initial location
-    /// and switches to free (x, y) mode.
-    scan_start: LocationHandoff,
-    /// Whether the current forward pass is using an external start position.
-    from_external: Cell<bool>,
 }
 
 impl ScanStep {
     pub fn new(
         sensor: impl Module + 'static,
-        hidden_dim: i64,
+        controller: Rc<Controller>,
         n_scan: usize,
         content_head: Option<Linear>,
         content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
         handoff: LocationHandoff,
-        scan_start: LocationHandoff,
     ) -> Result<Self> {
-        let gru = flodl::GRUCell::new(hidden_dim, hidden_dim)?;
-        let loc_head = Linear::new(hidden_dim, 2)?;
-
         let mut scan_xs = Vec::with_capacity(n_scan);
         for i in 0..n_scan {
             let init_val = if n_scan == 1 {
                 0.0
             } else {
+                // Spread across [-0.5, 0.5] for multiple scan steps
                 -0.5 + (i as f64) / (n_scan as f64 - 1.0)
             };
             let t = Tensor::from_f32(&[init_val as f32], &[1], flodl::tensor::Device::CPU)?;
@@ -102,35 +109,23 @@ impl ScanStep {
         }
         Ok(ScanStep {
             sensor: Rc::new(sensor),
-            gru,
-            loc_head,
+            controller,
             scan_xs,
             location: RefCell::new(None),
             step_idx: RefCell::new(0),
             content_head,
             content_logits,
             handoff,
-            scan_start,
-            from_external: Cell::new(false),
         })
     }
 
     fn step(&self, h: &Variable, image: &Variable) -> Result<Variable> {
         let new_h = {
             if self.location.borrow().is_none() {
-                // Check for external start position (composed mode with SubScan).
-                let external = self.scan_start.borrow_mut().take();
-                self.from_external.set(external.is_some());
-                let loc = match external {
-                    Some(pos) => pos,
-                    None => {
-                        let batch = h.shape()[0];
-                        let device = h.data().device();
-                        let zeros = Tensor::zeros(&[batch, 2], TensorOptions { device, ..Default::default() })?;
-                        Variable::new(zeros, false)
-                    }
-                };
-                *self.location.borrow_mut() = Some(loc);
+                let batch = h.shape()[0];
+                let device = h.data().device();
+                let zeros = Tensor::zeros(&[batch, 2], TensorOptions { device, ..Default::default() })?;
+                *self.location.borrow_mut() = Some(Variable::new(zeros, false));
             }
 
             let loc_guard = self.location.borrow();
@@ -141,7 +136,7 @@ impl ScanStep {
             let glimpse = self.sensor.as_named_input().unwrap()
                 .forward_named(image, &refs)?;
 
-            self.gru.forward_step(&glimpse, Some(h))?
+            self.controller.gru.forward_step(&glimpse, Some(h))?
         };
 
         // Content head: predict whether scan location has ink.
@@ -150,26 +145,20 @@ impl ScanStep {
             buf.borrow_mut().push(logit);
         }
 
-        // Location update.
-        let raw = self.loc_head.forward(&new_h)?.tanh()?;
-        let new_loc = if self.from_external.get() {
-            // Composed mode: free (x, y) refinement from SubScan position.
-            // Both channels of loc_head are active — scan can follow the letter
-            // anywhere on the word image, not just along a learnable x-sweep.
-            raw
-        } else {
-            // Standalone: learnable x, free y from loc_head.
-            let y = raw.select(1, 1)?.unsqueeze(1)?; // [B, 1]
-            let idx = *self.step_idx.borrow();
-            let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
-            let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?; // [B, 1]
-            *self.step_idx.borrow_mut() = idx + 1;
-            x.cat(&y, 1)?
-        };
+        // Location: learnable x, free y from loc_head
+        let raw = self.controller.loc_head.forward(&new_h)?.tanh()?;
+        let y = raw.select(1, 1)?.unsqueeze(1)?; // [B, 1]
 
+        let idx = *self.step_idx.borrow();
+        let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
+        let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?; // [B, 1]
+        *self.step_idx.borrow_mut() = idx + 1;
+
+        let new_loc = x.cat(&y, 1)?; // [B, 2]
         *self.location.borrow_mut() = Some(new_loc.clone());
 
         // Write detached copy to handoff — read phase picks this up as initial position.
+        // Detached so no gradient flows from read back through the handoff to scan.
         *self.handoff.borrow_mut() = Some(new_loc.detach());
 
         Ok(new_h)
@@ -190,7 +179,6 @@ impl Module for ScanStep {
     fn reset(&self) {
         *self.location.borrow_mut() = None;
         *self.step_idx.borrow_mut() = 0;
-        self.from_external.set(false);
         if let Some(buf) = &self.content_logits {
             buf.borrow_mut().clear();
         }
@@ -204,9 +192,9 @@ impl Module for ScanStep {
     }
 
     fn parameters(&self) -> Vec<Parameter> {
+        // Only scan-specific params: sensor + scan_xs + content_head.
+        // GRU and loc_head are shared — collected by AttentionStep.
         let mut params = self.sensor.parameters();
-        params.extend(self.gru.parameters());
-        params.extend(self.loc_head.parameters());
         params.extend(self.scan_xs.iter().cloned());
         if let Some(head) = &self.content_head {
             params.extend(head.parameters());
@@ -234,34 +222,45 @@ impl NamedInputModule for ScanStep {
     }
 }
 
-/// AttentionStep: the read loop body with its own GRU and loc_head.
-///
-/// Receives h as stream, image via ref, manages location as internal state.
-/// Free (x,y) positioning.
+/// AttentionStep is the read loop body: receives h as stream, image via ref,
+/// manages location as internal recurrent state. Free (x,y) positioning.
 ///
 /// When a `LocationHandoff` is provided, the first read step starts at the
-/// scan's final position (detached) instead of (0,0).
+/// scan's final position (detached) instead of (0,0). This matches Python's
+/// behavior where a single `location` variable flows from scan to read.
+///
+/// Implements:
+/// - `NamedInputModule` — receives "image" via Using refs
+/// - `Module::reset()` — auto-reset before each loop invocation
+/// - `Module::trace()` — loop collects fixation trajectory
+/// - `Module::detach_state()` — breaks gradient chain on carried state
 pub struct AttentionStep {
     sensor: Rc<dyn Module>,
-    gru: flodl::GRUCell,
-    loc_head: Linear,
+    controller: Rc<Controller>,
     location: RefCell<Option<Variable>>,
     handoff: Option<LocationHandoff>,
 }
 
 impl AttentionStep {
-    pub fn new(
-        sensor: impl Module + 'static,
-        hidden_dim: i64,
-        handoff: Option<LocationHandoff>,
-    ) -> Result<Self> {
+    /// Create with a new (unshared) controller. For standalone use or backward compat.
+    pub fn new(sensor: impl Module + 'static, hidden_dim: i64) -> Result<Self> {
         Ok(AttentionStep {
             sensor: Rc::new(sensor),
-            gru: flodl::GRUCell::new(hidden_dim, hidden_dim)?,
-            loc_head: Linear::new(hidden_dim, 2)?,
+            controller: Rc::new(Controller::new(hidden_dim)?),
             location: RefCell::new(None),
-            handoff,
+            handoff: None,
         })
+    }
+
+    /// Create with a shared controller and location handoff (for scan+read architecture).
+    /// The read phase starts at the scan's final position (detached).
+    pub fn with_shared(sensor: impl Module + 'static, controller: Rc<Controller>, handoff: LocationHandoff) -> Self {
+        AttentionStep {
+            sensor: Rc::new(sensor),
+            controller,
+            location: RefCell::new(None),
+            handoff: Some(handoff),
+        }
     }
 
     fn step(&self, h: &Variable, image: &Variable) -> Result<Variable> {
@@ -294,11 +293,11 @@ impl AttentionStep {
                 .forward_named(image, &refs)?;
 
             // GRU update
-            self.gru.forward_step(&glimpse, Some(h))?
+            self.controller.gru.forward_step(&glimpse, Some(h))?
         }; // loc_guard dropped here
 
         // Update location
-        let new_loc = self.loc_head.forward(&new_h)?.tanh()?;
+        let new_loc = self.controller.loc_head.forward(&new_h)?.tanh()?;
         *self.location.borrow_mut() = Some(new_loc);
 
         Ok(new_h)
@@ -309,6 +308,7 @@ impl Module for AttentionStep {
     fn name(&self) -> &str { "attention_step" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
+        // Plain forward: no refs, create dummy image
         self.step(input, input)
     }
 
@@ -330,8 +330,9 @@ impl Module for AttentionStep {
 
     fn parameters(&self) -> Vec<Parameter> {
         let mut params = self.sensor.parameters();
-        params.extend(self.gru.parameters());
-        params.extend(self.loc_head.parameters());
+        // AttentionStep owns the controller params (even if shared via Rc).
+        // ScanStep deliberately excludes them to avoid double-counting.
+        params.extend(self.controller.parameters());
         params
     }
 
@@ -352,5 +353,190 @@ impl NamedInputModule for AttentionStep {
     ) -> Result<Variable> {
         let image = refs.get("image").expect("AttentionStep requires 'image' ref");
         self.step(input, image)
+    }
+}
+
+/// CombinedStep: flat scan+read loop matching Python's `encode_scan_read`.
+///
+/// A single module runs n_scan + n_read steps with continuous location flow:
+/// - Steps 0..n_scan: scan sensor (wide patch), learnable x + free y, content head
+/// - Steps n_scan..total: read sensor (square patch), free (x,y)
+///
+/// All positions are relative to origin. The `loc_head` outputs offsets from
+/// origin, `location_fc` in the sensor sees these relative offsets, and
+/// `grid_sample` receives `origin + offset` for correct image sampling.
+///
+/// The graph sees one loop of `n_scan + n_read` iterations. Traces are split
+/// into scan and read portions by the model's `forward()`.
+pub struct CombinedStep {
+    scan_sensor: Rc<dyn Module>,
+    read_sensor: Rc<dyn Module>,
+    controller: Rc<Controller>,
+    n_scan: usize,
+    scan_xs: Vec<Parameter>,
+    /// Current position as relative offset from origin.
+    location: RefCell<Option<Variable>>,
+    /// Origin position (set from graph input on first step, constant within a forward pass).
+    origin: RefCell<Option<Variable>>,
+    step_idx: RefCell<usize>,
+    content_head: Option<Linear>,
+    content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
+}
+
+impl CombinedStep {
+    pub fn new(
+        scan_sensor: impl Module + 'static,
+        read_sensor: impl Module + 'static,
+        controller: Rc<Controller>,
+        n_scan: usize,
+        content_head: Option<Linear>,
+        content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
+    ) -> Result<Self> {
+        let mut scan_xs = Vec::with_capacity(n_scan);
+        for i in 0..n_scan {
+            let init_val = if n_scan == 1 {
+                0.0
+            } else {
+                -0.5 + (i as f64) / (n_scan as f64 - 1.0)
+            };
+            let t = Tensor::from_f32(&[init_val as f32], &[1], flodl::tensor::Device::CPU)?;
+            scan_xs.push(Parameter {
+                variable: Variable::new(t, true),
+                name: format!("scan_x_{i}"),
+            });
+        }
+        Ok(CombinedStep {
+            scan_sensor: Rc::new(scan_sensor),
+            read_sensor: Rc::new(read_sensor),
+            controller,
+            n_scan,
+            scan_xs,
+            location: RefCell::new(None),
+            origin: RefCell::new(None),
+            step_idx: RefCell::new(0),
+            content_head,
+            content_logits,
+        })
+    }
+
+    fn step(&self, h: &Variable, image: &Variable, origin: &Variable) -> Result<Variable> {
+        let idx = *self.step_idx.borrow();
+        let is_scan = idx < self.n_scan;
+
+        // Store origin on first step (constant within a forward pass).
+        if self.origin.borrow().is_none() {
+            *self.origin.borrow_mut() = Some(origin.clone());
+        }
+
+        let new_h = {
+            // Lazy init: start at origin position.
+            if self.location.borrow().is_none() {
+                *self.location.borrow_mut() = Some(origin.clone());
+            }
+
+            let loc_guard = self.location.borrow();
+            let location = loc_guard.as_ref().unwrap();
+
+            // location_fc sees position relative to origin (always near zero).
+            // grid_sample sees absolute position (unchanged from old code).
+            let relative = location.sub(origin)?;
+
+            let mut refs = HashMap::new();
+            refs.insert("location".to_string(), location.clone());
+            refs.insert("relative_location".to_string(), relative);
+
+            // Pick sensor based on phase.
+            let sensor = if is_scan { &self.scan_sensor } else { &self.read_sensor };
+            let glimpse = sensor.as_named_input().unwrap()
+                .forward_named(image, &refs)?;
+
+            self.controller.gru.forward_step(&glimpse, Some(h))?
+        };
+
+        // Content head (scan phase only).
+        if is_scan
+            && let (Some(head), Some(buf)) = (&self.content_head, &self.content_logits) {
+                let logit = head.forward(&new_h)?;
+                buf.borrow_mut().push(logit);
+        }
+
+        // Location update — all positions are absolute (same as old code).
+        // Origin translation is isolated: only location_fc sees the difference.
+        let new_loc = if is_scan {
+            // Scan: learnable x, free y from loc_head.
+            let raw = self.controller.loc_head.forward(&new_h)?.tanh()?;
+            let y = raw.select(1, 1)?.unsqueeze(1)?;
+            let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
+            let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?;
+            x.cat(&y, 1)?
+        } else {
+            // Read: free (x, y).
+            self.controller.loc_head.forward(&new_h)?.tanh()?
+        };
+
+        *self.location.borrow_mut() = Some(new_loc);
+        *self.step_idx.borrow_mut() = idx + 1;
+
+        Ok(new_h)
+    }
+}
+
+impl Module for CombinedStep {
+    fn name(&self) -> &str { "combined_step" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        // Not called directly — NamedInputModule path provides origin via refs.
+        self.step(input, input, input)
+    }
+
+    fn as_named_input(&self) -> Option<&dyn NamedInputModule> {
+        Some(self)
+    }
+
+    fn reset(&self) {
+        *self.location.borrow_mut() = None;
+        *self.origin.borrow_mut() = None;
+        *self.step_idx.borrow_mut() = 0;
+        if let Some(buf) = &self.content_logits {
+            buf.borrow_mut().clear();
+        }
+    }
+
+    fn detach_state(&self) {
+        let mut loc = self.location.borrow_mut();
+        if let Some(v) = loc.take() {
+            *loc = Some(v.detach());
+        }
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut params = self.scan_sensor.parameters();
+        params.extend(self.read_sensor.parameters());
+        params.extend(self.controller.parameters());
+        params.extend(self.scan_xs.iter().cloned());
+        if let Some(head) = &self.content_head {
+            params.extend(head.parameters());
+        }
+        params
+    }
+
+    fn sub_modules(&self) -> Vec<Rc<dyn Module>> {
+        vec![self.scan_sensor.clone(), self.read_sensor.clone()]
+    }
+
+    fn trace(&self) -> Option<Variable> {
+        self.location.borrow().clone()
+    }
+}
+
+impl NamedInputModule for CombinedStep {
+    fn forward_named(
+        &self,
+        input: &Variable,
+        refs: &HashMap<String, Variable>,
+    ) -> Result<Variable> {
+        let image = refs.get("image").expect("CombinedStep requires 'image' ref");
+        let origin = refs.get("origin").expect("CombinedStep requires 'origin' ref");
+        self.step(input, image, origin)
     }
 }

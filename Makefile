@@ -5,8 +5,8 @@
 # The override mounts the parent so flodl path dependency resolves.
 
 COMPOSE = docker compose
-RUN     = $(COMPOSE) run --rm --service-ports dev
-RUN_WORD = $(COMPOSE) run --rm --service-ports -w /workspace/fbrl/word dev
+RUN     = $(COMPOSE) run --rm $(if $(MONITOR),--service-ports) dev
+RUN_WORD = $(COMPOSE) run --rm $(if $(MONITOR),--service-ports) -w /workspace/fbrl/word dev
 FEATURES ?= cuda
 
 .PHONY: image build test test-release check clippy doc shell train-letter clean kill \
@@ -122,12 +122,12 @@ rebuild-word: image
 	@touch ../rdl/flodl-sys/shim.cpp 2>/dev/null || true
 	$(RUN_WORD) cargo build --release --features $(FEATURES)
 
-# Train SubScan (Step 2: SubScan + Letter composition)
-# Usage: make train-subscan WORD_DATA=../python/data/words ISO_DATA=../python/data/letters CHECKPOINT=../letter/training/model_final.fdl.gz
-#        make train-subscan WORD_DATA=... ISO_DATA=... CHECKPOINT=... EPOCHS=100 MONITOR=3000
+# Train SubScan (Step 2: REINFORCE + frozen letter oracle)
+# Usage: make train-subscan WORD_DATA=../python/data/words CHECKPOINT=../letter/runs/v1_relative/model_final.fdl.gz
+#        make train-subscan WORD_DATA=... CHECKPOINT=... EPOCHS=100 MONITOR=3000
 SUBSCAN_SAVE ?= training
 train-subscan: rebuild-word
-	$(RUN_WORD) cargo run --release --features $(FEATURES) -- train-subscan --word-data $(WORD_DATA) --iso-data $(ISO_DATA) $(if $(CHECKPOINT),--checkpoint $(CHECKPOINT)) $(if $(SUBSCAN_SAVE),--save-dir $(SUBSCAN_SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(MONITOR),--monitor $(MONITOR))
+	$(RUN_WORD) cargo run --release --features $(FEATURES) -- train-subscan --word-data $(WORD_DATA) $(if $(CHECKPOINT),--checkpoint $(CHECKPOINT)) $(if $(SUBSCAN_SAVE),--save-dir $(SUBSCAN_SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(MONITOR),--monitor $(MONITOR))
 
 # Train word model (Step 3, future)
 # Usage: make train-word DATA=../python/data/words SAVE=runs/v1 MONITOR=3000

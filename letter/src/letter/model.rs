@@ -1,14 +1,18 @@
 //! LetterModel — single-letter recognition via foveal attention.
 //!
-//! Built as a graph with two inputs (image, case label):
+//! Built as a graph with three inputs (image, case label, origin):
 //!
 //! ```text
 //! image → Tag("image") → H0Init
-//!   → [Loop(ScanStep).Using("image").Tag("scan")]     // optional scan phase
-//!   → Loop(AttentionStep).Using("image").Tag("read")   // read phase
-//!   → Linear → Tag("latent") → Fork(letterHead).Tag("heads_0")
-//!   → Fork(caseHead).Tag("heads_1") → Decoder.Using("latent", "case") → Tag("recon")
+//!       → Input(["case", "origin"])
+//!       → Loop(CombinedStep).Using("image", "origin").Tag("attn")
+//!       → Linear → Tag("latent") → Fork(letterHead).Tag("heads_0")
+//!       → Fork(caseHead).Tag("heads_1") → Decoder.Using("latent", "case") → Tag("recon")
 //! ```
+//!
+//! All attention positions are relative to `origin`. The loc_head outputs
+//! offsets, `location_fc` sees these offsets (always near zero), and
+//! `grid_sample` receives `origin + offset` for correct image sampling.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,7 +25,7 @@ use flodl::tensor::{Device, Result};
 
 use super::decoder::VisualDecoder;
 use super::glimpse::GlimpseSensor;
-use super::modules::{AttentionStep, H0Init, Identity, LocationHandoff, ScanStep};
+use super::modules::{CombinedStep, Controller, H0Init, Identity};
 
 /// Wraps an Rc<VisualDecoder> so it can live in the graph while
 /// LetterModel retains a reference for recode.
@@ -60,28 +64,14 @@ pub struct LetterResult {
 }
 
 /// Single-letter model built as a computation graph.
-///
-/// v2: separate ScanStep and AttentionStep loops, each with own GRU.
-/// Traces are collected per-loop via separate tags ("scan" / "read").
-///
-/// **Composition support:** when used inside a SubScan model, call
-/// [`set_scan_start`] before each forward pass to inject SubScan's
-/// output position. ScanStep will start from that position and use
-/// free (x, y) mode instead of learnable x-sweep.
 pub struct LetterModel {
     pub graph: Graph,
     /// Decoder reference for recode (shared with graph node via Rc).
     pub decoder: Rc<VisualDecoder>,
-    /// Content logits buffer shared with ScanStep (populated during forward).
+    /// Content logits buffer shared with CombinedStep (populated during forward).
     content_logits_buf: Rc<RefCell<Vec<Variable>>>,
-    /// Number of scan steps — used to know whether to look for scan traces.
+    /// Number of scan steps — used to split traces into scan/read.
     n_scan: usize,
-    /// Shared with ScanStep — write here before forward to inject an
-    /// external starting position (from SubScan).
-    scan_start: Option<LocationHandoff>,
-    /// Scan-phase parameters (h0 + ScanStep), collected before graph build.
-    /// In composed mode these stay trainable while read params are frozen.
-    scan_phase_params: Vec<Parameter>,
 }
 
 impl LetterModel {
@@ -98,76 +88,62 @@ impl LetterModel {
         n_scales: usize,
         latent_dim: i64,
     ) -> Result<Self> {
+        let controller = Rc::new(Controller::new(latent_dim)?);
+
         let letter_head = Linear::new(latent_dim, n_classes as i64)?;
         let case_head = Linear::new(latent_dim, 2)?;
         let decoder = Rc::new(VisualDecoder::new(latent_dim + 1, 128, 128)?);
 
+        // Content head + shared buffer for scan ink detection (only when scanning).
         let content_logits_buf = Rc::new(RefCell::new(Vec::new()));
-        let handoff: LocationHandoff = Rc::new(RefCell::new(None));
-
-        // Build graph: H0Init → [ScanLoop] → ReadLoop → heads → decoder
-        // Collect scan-phase params before modules are consumed by the builder.
-        let h0_init = H0Init::new(latent_dim)?;
-        let mut scan_phase_params = h0_init.parameters();
-
-        let mut builder = FlowBuilder::from(Identity)
-            .label("LetterModel")
-            .tag("image")
-            .input(&["case"])
-            .through(h0_init);
-
-        // Optional scan phase (own GRU + loc_head).
-        let scan_start: Option<LocationHandoff> = if n_scan > 0 {
-            let scan_start: LocationHandoff = Rc::new(RefCell::new(None));
-            let scan_sensor = GlimpseSensor::new(patch_size, scan_patch_w, n_scales, latent_dim)?;
-            let content_head = Linear::new(latent_dim, 1)?;
-            let scan_step = ScanStep::new(
-                scan_sensor, latent_dim, n_scan,
-                Some(content_head), Some(content_logits_buf.clone()),
-                handoff.clone(),
-                scan_start.clone(),
-            )?;
-            scan_phase_params.extend(scan_step.parameters());
-            builder = builder
-                .loop_body(scan_step).for_n(n_scan)
-                .using(&["image"]).tag("scan");
-            Some(scan_start)
+        let content_head = if n_scan > 0 {
+            Some(Linear::new(latent_dim, 1)?)
         } else {
             None
         };
 
-        // Read phase (own GRU + loc_head, picks up scan handoff if present).
+        let total_steps = n_scan + n_read;
+        let scan_sensor = GlimpseSensor::new(patch_size, scan_patch_w, n_scales, latent_dim)?;
         let read_sensor = GlimpseSensor::new(patch_size, patch_size, n_scales, latent_dim)?;
-        let read_step = AttentionStep::new(
-            read_sensor, latent_dim,
-            if n_scan > 0 { Some(handoff) } else { None },
+
+        let combined = CombinedStep::new(
+            scan_sensor, read_sensor, controller,
+            n_scan, content_head, Some(content_logits_buf.clone()),
         )?;
 
-        let graph = builder
-            .loop_body(read_step).for_n(n_read)
-            .using(&["image"]).tag("read")
+        let graph = FlowBuilder::from(Identity)
+            .label("LetterModel")
+            .tag("image")
+            .input(&["case", "origin"])
+            .through(H0Init::new(latent_dim)?)
+            .loop_body(combined).for_n(total_steps)
+            .using(&["image", "origin"]).tag("attn")
             .through(Linear::new(latent_dim, latent_dim)?).tag("latent")
             .fork(letter_head).tag("heads_0")
             .fork(case_head).tag("heads_1")
             .through(SharedDecoder(decoder.clone())).using(&["latent", "case"]).tag("recon")
             .build()?;
 
-        Ok(LetterModel { graph, decoder, content_logits_buf, n_scan, scan_start, scan_phase_params })
+        Ok(LetterModel { graph, decoder, content_logits_buf, n_scan })
     }
 
     /// Run the full pipeline: encode → classify → decode.
     ///
-    /// img: [B, 1, 128, 128] input image.
-    /// case_label: [B, 1] float — 0.0=upper, 1.0=lower.
-    pub fn forward(&self, img: &Variable, case_label: &Variable) -> Result<LetterResult> {
-        self.graph.forward_multi(&[img.clone(), case_label.clone()])?;
+    /// - `img`: `[B, 1, H, W]` input image.
+    /// - `case_label`: `[B, 1]` float — 0.0=upper, 1.0=lower.
+    /// - `origin`: `[B, 2]` coordinate origin for the attention mechanism.
+    ///   Standalone training: `(0,0) + noise`. Composition: SubScan output.
+    pub fn forward(&self, img: &Variable, case_label: &Variable, origin: &Variable) -> Result<LetterResult> {
+        self.graph.forward_multi(&[img.clone(), case_label.clone(), origin.clone()])?;
 
-        let scan_locs = if self.n_scan > 0 {
-            self.graph.traces("scan").unwrap_or_default()
+        // Split flat traces into scan and read portions.
+        let all_traces = self.graph.traces("attn").unwrap_or_default();
+        let (scan_locs, read_locs) = if self.n_scan > 0 && all_traces.len() > self.n_scan {
+            let (s, r) = all_traces.split_at(self.n_scan);
+            (s.to_vec(), r.to_vec())
         } else {
-            Vec::new()
+            (Vec::new(), all_traces)
         };
-        let read_locs = self.graph.traces("read").unwrap_or_default();
 
         Ok(LetterResult {
             letter_logits: self.graph.tagged("heads_0").expect("heads_0"),
@@ -177,28 +153,6 @@ impl LetterModel {
             read_locations: read_locs,
             recon: self.graph.tagged("recon").expect("recon"),
         })
-    }
-
-    /// Inject an external starting position for the scan phase.
-    ///
-    /// Call before `forward()` when composing with SubScan. ScanStep will
-    /// start from this position and use free (x, y) refinement instead of
-    /// the learnable x-sweep used in standalone mode.
-    ///
-    /// The position is consumed on the next forward pass — call again for
-    /// each subsequent forward.
-    pub fn set_scan_start(&self, pos: Variable) {
-        if let Some(ref start) = self.scan_start {
-            *start.borrow_mut() = Some(pos);
-        }
-    }
-
-    /// Scan-phase parameters (h0 + ScanStep).
-    ///
-    /// In composed mode, these stay trainable while read-phase params
-    /// (AttentionStep, latent projection, heads, decoder) are frozen.
-    pub fn scan_phase_params(&self) -> &[Parameter] {
-        &self.scan_phase_params
     }
 
     /// Content logits from the most recent forward pass (one per scan step).

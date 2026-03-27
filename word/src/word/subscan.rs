@@ -1,12 +1,21 @@
-//! SubScan: bounded-region letter localization.
+//! SubScan: bounded-region letter localization (Graph-based).
 //!
 //! Given a region of a word image (defined by center + half-width), SubScan
-//! takes two short, wide, blurred glimpses within the bounded region and
+//! takes N short, wide, blurred glimpses within the bounded region and
 //! infers a letter center position for handoff to the letter model.
 //!
-//! The output position is free — it does not need to coincide with either
+//! The output position is free — it does not need to coincide with any
 //! glimpse location. SubScan observes partial ink structure and infers
 //! where the letter center must be.
+//!
+//! ## Architecture (FlowBuilder graph)
+//!
+//! ```text
+//! image → GaussianBlur(σ) → tag("blurred")
+//!       → H0Init(hidden_dim)
+//!       → Loop(SubScanStep, n_glimpses).Using("blurred", "region_center", "region_half_w")
+//!           .Tag("scan")
+//! ```
 //!
 //! ## Region bounding
 //!
@@ -24,11 +33,14 @@
 //! - **Two free glimpses**: minimum for triangulating the letter center
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use flodl::autograd::Variable;
-use flodl::nn::{gaussian_blur_2d, Linear, Module, Parameter};
-use flodl::tensor::{Device, Result, Tensor, TensorOptions};
+use flodl::graph::{FlowBuilder, Graph};
+use flodl::nn::{GaussianBlur, Linear, Module, NamedInputModule, Parameter};
+use flodl::tensor::Result;
 
+use fbrl::letter::H0Init;
 use super::glimpse::GlimpseSensor;
 
 /// SubScan configuration.
@@ -48,151 +60,184 @@ pub struct SubScanConfig {
     pub blur_sigma: f64,
 }
 
-/// SubScan: bounded-region letter localization module.
+// ── SubScanStep: loop body NamedInputModule ──────────────────────────
+
+/// One step of the SubScan loop.
+///
+/// Receives hidden state `h` as stream and accesses blurred image,
+/// region center, and region half-width from graph refs.
+///
+/// Internal state: current location (lazy-initialized to region center).
+struct SubScanStep {
+    sensor: GlimpseSensor,
+    gru: flodl::GRUCell,
+    loc_head: Linear,
+    location: RefCell<Option<Variable>>,
+}
+
+impl SubScanStep {
+    fn new(sensor: GlimpseSensor, gru: flodl::GRUCell, loc_head: Linear) -> Self {
+        SubScanStep {
+            sensor,
+            gru,
+            loc_head,
+            location: RefCell::new(None),
+        }
+    }
+
+    fn step(
+        &self,
+        h: &Variable,
+        blurred: &Variable,
+        region_center: &Variable,
+        region_half_w: &Variable,
+    ) -> Result<Variable> {
+        let new_h = {
+            // Lazy init: start at region_center [B, 2] (noisy x and y).
+            if self.location.borrow().is_none() {
+                *self.location.borrow_mut() = Some(region_center.clone());
+            }
+
+            let loc_guard = self.location.borrow();
+            let loc = loc_guard.as_ref().unwrap();
+
+            let glimpse = self.sensor.sense(blurred, loc)?;
+            self.gru.forward_step(&glimpse, Some(h))?
+        }; // loc_guard dropped
+
+        // Location update: x bounded to region, y free.
+        let raw = self.loc_head.forward(&new_h)?.tanh()?; // [B, 2] in [-1, 1]
+        let raw_x = raw.narrow(1, 0, 1)?;                  // [B, 1]
+        let raw_y = raw.narrow(1, 1, 1)?;                  // [B, 1]
+        let center_x = region_center.narrow(1, 0, 1)?;     // [B, 1]
+        let x = center_x.add(&region_half_w.mul(&raw_x)?)?;
+        let new_loc = x.cat(&raw_y, 1)?;                   // [B, 2]
+
+        *self.location.borrow_mut() = Some(new_loc);
+        Ok(new_h)
+    }
+}
+
+impl Module for SubScanStep {
+    fn name(&self) -> &str { "subscan_step" }
+
+    fn forward(&self, input: &Variable) -> Result<Variable> {
+        // Not called directly — NamedInputModule path is used.
+        self.step(input, input, input, input)
+    }
+
+    fn as_named_input(&self) -> Option<&dyn NamedInputModule> { Some(self) }
+
+    fn reset(&self) {
+        *self.location.borrow_mut() = None;
+    }
+
+    fn detach_state(&self) {
+        let mut loc = self.location.borrow_mut();
+        if let Some(v) = loc.take() {
+            *loc = Some(v.detach());
+        }
+    }
+
+    fn parameters(&self) -> Vec<Parameter> {
+        let mut params = self.sensor.parameters();
+        params.extend(self.gru.parameters());
+        params.extend(self.loc_head.parameters());
+        params
+    }
+
+    fn trace(&self) -> Option<Variable> {
+        self.location.borrow().clone()
+    }
+}
+
+impl NamedInputModule for SubScanStep {
+    fn forward_named(
+        &self,
+        input: &Variable,
+        refs: &HashMap<String, Variable>,
+    ) -> Result<Variable> {
+        let blurred = refs.get("blurred").expect("SubScanStep requires 'blurred' ref");
+        let region_center = refs.get("region_center")
+            .expect("SubScanStep requires 'region_center' ref");
+        let region_half_w = refs.get("region_half_w")
+            .expect("SubScanStep requires 'region_half_w' ref");
+        self.step(input, blurred, region_center, region_half_w)
+    }
+}
+
+// ── SubScanModel: Graph wrapper ──────────────────────────────────────
+
+/// SubScan model built as a computation graph.
 ///
 /// Two short, wide, blurred glimpses within a bounded region, then infer
 /// the letter center position. The output position does not need to
 /// coincide with either glimpse location — it is an inference from
 /// accumulated evidence.
-///
-/// # Forward flow
-///
-/// ```text
-/// h = h0, loc = (region_center, 0)
-/// for each glimpse:
-///     glimpse = sensor(blur(image), loc)
-///     h = GRU(glimpse, h)
-///     loc = (region_center + region_half_w * tanh(raw_x), tanh(raw_y))
-/// return loc
-/// ```
-pub struct SubScan {
-    sensor: GlimpseSensor,
-    gru: flodl::GRUCell,
-    loc_head: Linear,
-    h0: Parameter,
-    hidden_dim: i64,
-    n_glimpses: usize,
-    blur_sigma: f64,
-    /// Location traces from the most recent forward pass.
-    locations: RefCell<Vec<Variable>>,
+pub struct SubScanModel {
+    pub graph: Graph,
 }
 
-impl SubScan {
+impl SubScanModel {
+    /// Create the SubScan model as a Graph.
     pub fn new(cfg: &SubScanConfig) -> Result<Self> {
         let sensor = GlimpseSensor::new(
             cfg.patch_h, cfg.patch_w, cfg.n_scales, cfg.hidden_dim,
         )?;
         let gru = flodl::GRUCell::new(cfg.hidden_dim, cfg.hidden_dim)?;
         let loc_head = Linear::new(cfg.hidden_dim, 2)?;
-        let h0_data = Tensor::zeros(&[1, cfg.hidden_dim], Default::default())?;
-        let h0 = Parameter {
-            variable: Variable::new(h0_data, true),
-            name: "h0".into(),
-        };
 
-        Ok(SubScan {
-            sensor,
-            gru,
-            loc_head,
-            h0,
-            hidden_dim: cfg.hidden_dim,
-            n_glimpses: cfg.n_glimpses,
-            blur_sigma: cfg.blur_sigma,
-            locations: RefCell::new(Vec::new()),
-        })
+        let step = SubScanStep::new(sensor, gru, loc_head);
+
+        let graph = FlowBuilder::from(GaussianBlur::new(cfg.blur_sigma))
+            .label("SubScan")
+            .tag("blurred")
+            .input(&["region_center", "region_half_w"])
+            .through(H0Init::new(cfg.hidden_dim)?)
+            .loop_body(step).for_n(cfg.n_glimpses)
+                .using(&["blurred", "region_center", "region_half_w"])
+                .tag("scan")
+            .build()?;
+
+        Ok(SubScanModel { graph })
     }
 
     /// Localize a letter within a bounded region.
     ///
     /// - `image`: `[B, 1, H, W]` — full word image.
-    /// - `region_center`: `[B, 1]` — normalized x-center of the region in `[-1, 1]`.
-    /// - `region_half_w`: `[B, 1]` — normalized half-width of the region.
+    /// - `region_center`: `[B, 2]` — noisy starting position (x, y) in normalized coords.
+    /// - `region_half_w`: `[B, 1]` — normalized half-width bounding the x-axis.
     ///
-    /// Returns `[B, 2]` — inferred letter center position, x bounded to region, y free.
+    /// Returns `[B, 2]` — midpoint of all glimpse positions (triangulated center).
+    ///
+    /// Using the midpoint instead of the last position creates an inductive bias:
+    /// the glimpses must bracket the letter to produce a good center estimate.
     pub fn forward(
         &self,
         image: &Variable,
         region_center: &Variable,
         region_half_w: &Variable,
     ) -> Result<Variable> {
-        let batch = image.shape()[0];
-        let device = image.device();
-        let opts = TensorOptions { device, ..Default::default() };
-
-        // Blur the image — SubScan sees density, not letterforms.
-        let blurred = gaussian_blur_2d(image, self.blur_sigma)?;
-
-        // Initialize hidden state from learned h0.
-        let mut h = self.h0.variable.reshape(&[1, self.hidden_dim])?
-            .repeat(&[batch, 1])?;
-
-        // Start at region center.
-        let y_zero = Variable::new(Tensor::zeros(&[batch, 1], opts)?, false);
-        let mut loc = region_center.cat(&y_zero, 1)?; // [B, 2]
-
-        let mut locs = Vec::with_capacity(self.n_glimpses);
-
-        for _step in 0..self.n_glimpses {
-            // Extract blurred glimpse at current location.
-            let glimpse = self.sensor.sense(&blurred, &loc)?;
-
-            // GRU integrates the partial view.
-            h = self.gru.forward_step(&glimpse, Some(&h))?;
-
-            // Update location (bounded to region).
-            let raw = self.loc_head.forward(&h)?.tanh()?; // [B, 2] in [-1, 1]
-            let raw_x = raw.narrow(1, 0, 1)?;             // [B, 1]
-            let raw_y = raw.narrow(1, 1, 1)?;             // [B, 1]
-            let x = region_center.add(&region_half_w.mul(&raw_x)?)?;
-            loc = x.cat(&raw_y, 1)?;                      // [B, 2]
-
-            locs.push(loc.clone());
-        }
-
-        *self.locations.borrow_mut() = locs;
-        Ok(loc)
+        self.graph.forward_multi(&[
+            image.clone(),
+            region_center.clone(),
+            region_half_w.clone(),
+        ])?;
+        let traces = self.graph.traces("scan").unwrap_or_default();
+        assert!(!traces.is_empty(), "no scan traces");
+        // Midpoint of all glimpse positions: triangulated center.
+        // Each trace is [B, 2]. Stack → [B, N, 2], mean over dim 1 → [B, 2].
+        let stacked = Variable::stack(&traces, 1)?;
+        stacked.mean_dim(1, false)
     }
 
     /// Location traces from the most recent forward pass (one per glimpse step).
     pub fn locations(&self) -> Vec<Variable> {
-        self.locations.borrow().clone()
+        self.graph.traces("scan").unwrap_or_default()
     }
 
     /// All learnable parameters.
     pub fn parameters(&self) -> Vec<Parameter> {
-        let mut params = vec![self.h0.clone()];
-        params.extend(self.sensor.parameters());
-        params.extend(self.gru.parameters());
-        params.extend(self.loc_head.parameters());
-        params
-    }
-
-    /// Clear per-forward state.
-    pub fn reset(&self) {
-        self.locations.borrow_mut().clear();
-    }
-
-    /// Move all parameters to a device.
-    pub fn set_device(&self, device: Device) {
-        // Move parameters using the same pattern as Graph::set_device:
-        // detach, move to device, set_data.
-        for p in self.parameters() {
-            if p.variable.data().device() != device {
-                if let Ok(t) = p.variable.data().detach()
-                    .and_then(|d| d.to_device(device))
-                {
-                    p.variable.set_data(t);
-                }
-            }
-        }
-        // Move non-parameter state (BatchNorm running stats, if any).
-        self.sensor.move_to_device(device);
-        self.gru.move_to_device(device);
-        self.loc_head.move_to_device(device);
-    }
-
-    /// Set training/eval mode (affects sensor internals).
-    pub fn set_training(&self, training: bool) {
-        self.sensor.set_training(training);
+        self.graph.parameters()
     }
 }

@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use flodl::autograd::{Variable, NoGradGuard};
-use flodl::tensor::{cuda_available, Device, Result, Tensor, TensorError};
+use flodl::tensor::{cuda_available, Device, Result, Tensor, TensorError, TensorOptions};
 use serde::Deserialize;
 
 use super::data::load_gray_png;
@@ -195,8 +195,9 @@ pub fn eval_letter(
 
         let img_var = Variable::new(img, false);
         let case_var = Variable::new(case, false);
+        let origin = Variable::new(Tensor::zeros(&[1, 2], TensorOptions { device, ..Default::default() })?, false);
 
-        let result = model.forward(&img_var, &case_var)?;
+        let result = model.forward(&img_var, &case_var, &origin)?;
 
         // Predictions.
         let pred_letter = result.letter_logits.data().argmax(1, false)?
@@ -219,9 +220,14 @@ pub fn eval_letter(
             .squeeze(0)?.squeeze(0)?.to_f32_vec()?;
 
         // Read original PNG bytes for atlas embedding.
+        let display_letter = if sample.case_str == "lower" {
+            sample.letter.to_lowercase()
+        } else {
+            sample.letter.clone()
+        };
         let img_path = resolve_test_path(Path::new(test_data_dir), &format!(
             "img_{}_{}.png",
-            &sample.letter,
+            &display_letter,
             if sample.font == "unknown" { "default" } else { &sample.font }
         ));
         let png_bytes = fs::read(&img_path).unwrap_or_default();
@@ -365,7 +371,7 @@ fn generate_eval_json(results: &[SampleResult]) -> String {
 /// Encode bytes to base64 (no external dependency).
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -426,8 +432,8 @@ fn generate_atlas(results: &[SampleResult]) -> String {
     html.push_str(".legend span{margin-right:16px}\n");
     html.push_str("</style></head><body>\n");
 
-    let _ = write!(html, "<h1>Letter Attention Atlas</h1>\n");
-    let _ = write!(html, "<div class=\"summary\">Letter: {}/{} ({:.1}%) &middot; Case: {}/{} ({:.1}%)</div>\n",
+    let _ = writeln!(html, "<h1>Letter Attention Atlas</h1>");
+    let _ = writeln!(html, "<div class=\"summary\">Letter: {}/{} ({:.1}%) &middot; Case: {}/{} ({:.1}%)</div>",
         letter_correct, total, letter_correct as f64 / total as f64 * 100.0,
         case_correct, total, case_correct as f64 / total as f64 * 100.0);
 
@@ -440,20 +446,20 @@ fn generate_atlas(results: &[SampleResult]) -> String {
 
     // Per-letter sections.
     for (letter, samples) in &by_letter {
-        let _ = write!(html, "<h2>{}</h2>\n<div class=\"letter-row\">\n", letter);
+        let _ = writeln!(html, "<h2>{}</h2>\n<div class=\"letter-row\">", letter);
 
         for r in samples {
             let is_correct = r.pred_letter_idx == r.letter_idx && r.case_correct;
             let pred = idx_to_letter(r.pred_letter_idx, &r.case_str);
             let error_class = if is_correct { "" } else { " error" };
 
-            let _ = write!(html, "<div class=\"sample{}\">\n<div class=\"pair\">\n", error_class);
+            let _ = writeln!(html, "<div class=\"sample{}\">\n<div class=\"pair\">", error_class);
 
             // Input image with fixation overlay (SVG).
-            let _ = write!(html, "<svg width=\"128\" height=\"128\" viewBox=\"0 0 128 128\">\n");
+            let _ = writeln!(html, "<svg width=\"128\" height=\"128\" viewBox=\"0 0 128 128\">");
             if !r.image_png.is_empty() {
                 let img_b64 = base64_encode(&r.image_png);
-                let _ = write!(html, "<image href=\"data:image/png;base64,{}\" width=\"128\" height=\"128\"/>\n", img_b64);
+                let _ = writeln!(html, "<image href=\"data:image/png;base64,{}\" width=\"128\" height=\"128\"/>", img_b64);
             }
             // Build full trajectory: scan locs then read locs.
             let all_locs: Vec<([f64; 2], bool)> = r.scan_locs.iter().map(|l| (*l, true))
@@ -467,7 +473,7 @@ fn generate_atlas(results: &[SampleResult]) -> String {
                 let y0 = (p0[1] + 1.0) / 2.0 * 128.0;
                 let x1 = (p1[0] + 1.0) / 2.0 * 128.0;
                 let y1 = (p1[1] + 1.0) / 2.0 * 128.0;
-                let _ = write!(html, "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#fff\" stroke-width=\"1\" opacity=\"0.4\"/>\n",
+                let _ = writeln!(html, "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#fff\" stroke-width=\"1\" opacity=\"0.4\"/>",
                     x0, y0, x1, y1);
             }
 
@@ -475,16 +481,16 @@ fn generate_atlas(results: &[SampleResult]) -> String {
             for (i, loc) in r.scan_locs.iter().enumerate() {
                 let px = (loc[0] + 1.0) / 2.0 * 128.0;
                 let py = (loc[1] + 1.0) / 2.0 * 128.0;
-                let _ = write!(html, "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"5\" fill=\"#3498db\" opacity=\"0.8\"/>\n", px, py);
-                let _ = write!(html, "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"#fff\" font-size=\"7\" text-anchor=\"middle\" dominant-baseline=\"central\">S{}</text>\n",
+                let _ = writeln!(html, "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"5\" fill=\"#3498db\" opacity=\"0.8\"/>", px, py);
+                let _ = writeln!(html, "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"#fff\" font-size=\"7\" text-anchor=\"middle\" dominant-baseline=\"central\">S{}</text>",
                     px, py, i + 1);
             }
             // Read fixations (red, numbered).
             for (i, loc) in r.read_locs.iter().enumerate() {
                 let px = (loc[0] + 1.0) / 2.0 * 128.0;
                 let py = (loc[1] + 1.0) / 2.0 * 128.0;
-                let _ = write!(html, "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\" fill=\"#e74c3c\" opacity=\"0.8\"/>\n", px, py);
-                let _ = write!(html, "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"#fff\" font-size=\"7\" text-anchor=\"middle\" dominant-baseline=\"central\">{}</text>\n",
+                let _ = writeln!(html, "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\" fill=\"#e74c3c\" opacity=\"0.8\"/>", px, py);
+                let _ = writeln!(html, "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"#fff\" font-size=\"7\" text-anchor=\"middle\" dominant-baseline=\"central\">{}</text>",
                     px, py, i + 1);
             }
             html.push_str("</svg>\n");
@@ -493,15 +499,15 @@ fn generate_atlas(results: &[SampleResult]) -> String {
             if r.recon_data.len() == 128 * 128 {
                 let recon_png = pixels_to_png(&r.recon_data, 128, 128);
                 let recon_b64 = base64_encode(&recon_png);
-                let _ = write!(html, "<img src=\"data:image/png;base64,{}\" width=\"128\" height=\"128\">\n", recon_b64);
+                let _ = writeln!(html, "<img src=\"data:image/png;base64,{}\" width=\"128\" height=\"128\">", recon_b64);
             }
 
             html.push_str("</div>\n"); // .pair
 
             // Labels.
-            let _ = write!(html, "<div class=\"label\">{}</div>\n", r.font);
+            let _ = writeln!(html, "<div class=\"label\">{}</div>", r.font);
             let correct_class = if is_correct { "correct" } else { "wrong" };
-            let _ = write!(html, "<div class=\"pred {}\">→ {}</div>\n", correct_class, pred);
+            let _ = writeln!(html, "<div class=\"pred {}\">→ {}</div>", correct_class, pred);
             html.push_str("</div>\n"); // .sample
         }
         html.push_str("</div>\n"); // .letter-row

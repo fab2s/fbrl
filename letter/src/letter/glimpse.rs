@@ -64,9 +64,13 @@ impl GlimpseSensor {
     }
 
     /// Extract, encode, and fuse.
-    /// image: [B, C, H, W], location: [B, 2] in [-1, 1].
-    /// Returns: [B, latent_dim].
-    fn sense(&self, image: &Variable, location: &Variable) -> Result<Variable> {
+    ///
+    /// - `image`: `[B, C, H, W]`
+    /// - `location`: `[B, 2]` absolute position in `[-1, 1]` (for grid_sample)
+    /// - `relative_location`: `[B, 2]` position relative to origin (for location embedding)
+    ///
+    /// Returns: `[B, latent_dim]`.
+    fn sense(&self, image: &Variable, location: &Variable, relative_location: &Variable) -> Result<Variable> {
         let img_shape = image.shape();
         let b = location.shape()[0];
         let h = img_shape[2];
@@ -104,9 +108,9 @@ impl GlimpseSensor {
         let feat = flodl::adaptive_avg_pool2d(&feat, [1, 1])?;
         let feat = feat.flatten(1, -1)?;
 
-        // Fuse "what I see" + "where I am"
+        // Fuse "what I see" + "where I am" (relative to origin)
         let glimpse_feat = self.glimpse_fc.forward(&feat)?.relu()?;
-        let loc_feat = self.location_fc.forward(location)?.relu()?;
+        let loc_feat = self.location_fc.forward(relative_location)?.relu()?;
         let fused = glimpse_feat.cat(&loc_feat, 1)?;
         self.combine_fc.forward(&fused)?.relu()
     }
@@ -117,7 +121,7 @@ impl Module for GlimpseSensor {
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
         // Shouldn't be called directly — use as_named_input
-        self.sense(input, input)
+        self.sense(input, input, input)
     }
 
     fn as_named_input(&self) -> Option<&dyn NamedInputModule> {
@@ -142,7 +146,8 @@ impl NamedInputModule for GlimpseSensor {
         refs: &HashMap<String, Variable>,
     ) -> Result<Variable> {
         let location = refs.get("location").expect("GlimpseSensor requires 'location' ref");
-        self.sense(image, location)
+        let relative = refs.get("relative_location").unwrap_or(location);
+        self.sense(image, location, relative)
     }
 }
 

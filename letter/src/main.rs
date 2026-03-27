@@ -72,6 +72,12 @@ fn run_train(args: &[String]) {
             "--min-lr" => { cfg.min_lr = next_arg(args, &mut i).parse().expect("--min-lr F"); }
             "--max-grad-norm" => { cfg.max_grad_norm = next_arg(args, &mut i).parse().expect("--max-grad-norm F"); }
 
+            // Origin noise.
+            "--noise-x" => { cfg.origin_noise_x = next_arg(args, &mut i).parse().expect("--noise-x F"); }
+            "--noise-y" => { cfg.origin_noise_y = next_arg(args, &mut i).parse().expect("--noise-y F"); }
+            "--noise-start" => { cfg.noise_start = next_arg(args, &mut i).parse().expect("--noise-start F"); }
+            "--noise-ramp" => { cfg.noise_ramp_epochs = next_arg(args, &mut i).parse().expect("--noise-ramp N"); }
+
             // Loss weights.
             "--scan-guide-weight" => { cfg.scan_guide_weight = next_arg(args, &mut i).parse().expect("--scan-guide-weight F"); }
             "--read-guide-weight" => { cfg.read_guide_weight = next_arg(args, &mut i).parse().expect("--read-guide-weight F"); }
