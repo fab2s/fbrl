@@ -1,36 +1,42 @@
-//! SubScan: bounded-region letter localization (Graph-based).
+//! SubScan: triangle-glimpse letter localization (Graph-based).
 //!
-//! Given a region of a word image (defined by center + half-width), SubScan
-//! takes N short, wide, blurred glimpses within the bounded region and
-//! infers a letter center position for handoff to the letter model.
+//! Given a region of a word image, SubScan takes 3 blurred glimpses in a
+//! triangle pattern to sense ink structure, then outputs the letter center_x.
 //!
-//! The output position is free — it does not need to coincide with any
-//! glimpse location. SubScan observes partial ink structure and infers
-//! where the letter center must be.
+//! ## Triangle geometry
+//!
+//! ```text
+//!         apex (cx, +h/2)
+//!         /\
+//!        /  \
+//!       /    \
+//!      /______\
+//!   left       right
+//! (cx-w, 0)  (cx+w, 0)
+//! ```
+//!
+//! - **Left base**: senses left ink edge
+//! - **Right base**: senses right ink edge
+//! - **Apex**: senses vertical structure (distinguishes O from IL)
+//!
+//! The base width `w` is bounded: min (I-width) to max (<MM-width).
+//! The triangle height is fixed (known from line height).
+//! SubScan outputs center_x = midpoint of base.
 //!
 //! ## Architecture (FlowBuilder graph)
 //!
 //! ```text
 //! image → GaussianBlur(σ) → tag("blurred")
 //!       → H0Init(hidden_dim)
-//!       → Loop(SubScanStep, n_glimpses).Using("blurred", "region_center", "region_half_w")
+//!       → Input(["region_center", "region_half_w"])
+//!       → Loop(TriangleStep, 3).Using("blurred", "region_center", "region_half_w")
 //!           .Tag("scan")
 //! ```
 //!
-//! ## Region bounding
+//! ## Training
 //!
-//! SubScan's location head is reparameterized to stay within its region:
-//! ```text
-//! x = region_center + region_half_width * tanh(raw_x)
-//! y = tanh(raw_y)   // full vertical range
-//! ```
-//!
-//! ## Glimpse design
-//!
-//! - **Short and wide** (~8x28 pixels): horizontal localization emphasis
-//! - **2/3 letter width**: one glimpse cannot see the whole letter
-//! - **Blurred**: gaussian blur on the full image before glimpse extraction
-//! - **Two free glimpses**: minimum for triangulating the letter center
+//! Supervised MSE on center_x. No oracle, no REINFORCE.
+//! Trained independently — compose with letter model at inference only.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -38,7 +44,7 @@ use std::collections::HashMap;
 use flodl::autograd::Variable;
 use flodl::graph::{FlowBuilder, Graph};
 use flodl::nn::{GaussianBlur, Linear, Module, NamedInputModule, Parameter};
-use flodl::tensor::Result;
+use flodl::tensor::{Result, Tensor};
 
 use fbrl::letter::H0Init;
 use super::glimpse::GlimpseSensor;
@@ -47,41 +53,64 @@ use super::glimpse::GlimpseSensor;
 pub struct SubScanConfig {
     /// Hidden/latent dimension for GRU and sensor output.
     pub hidden_dim: i64,
-    /// Glimpse patch height (short: ~8 pixels).
+    /// Glimpse patch height.
     pub patch_h: i64,
-    /// Glimpse patch width (wide: ~28 pixels, ~2/3 letter width).
+    /// Glimpse patch width.
     pub patch_w: i64,
     /// Number of resolution scales in the glimpse sensor.
     pub n_scales: usize,
-    /// Number of glimpse steps (default: 2).
+    /// Number of glimpse steps (default: 3 for one triangle pass).
     pub n_glimpses: usize,
-    /// Gaussian blur sigma applied to the full image before glimpse extraction.
-    /// Ensures SubScan sees ink density, not letterform detail.
+    /// Gaussian blur sigma applied to the full image.
     pub blur_sigma: f64,
+
+    // Triangle geometry bounds (normalized coords).
+    /// Minimum base half-width (about I-width / 2).
+    pub min_base_hw: f64,
+    /// Maximum base half-width (less than one letter spacing / 2).
+    pub max_base_hw: f64,
+    /// Triangle height (fixed, about half a letter height).
+    pub triangle_height: f64,
 }
 
-// ── SubScanStep: loop body NamedInputModule ──────────────────────────
+// ── TriangleStep: loop body ─────────────────────────────────────────
 
-/// One step of the SubScan loop.
+/// One step of the triangle SubScan loop.
 ///
-/// Receives hidden state `h` as stream and accesses blurred image,
-/// region center, and region half-width from graph refs.
-///
-/// Internal state: current location (lazy-initialized to region center).
-struct SubScanStep {
+/// Steps cycle through triangle vertices: left base → right base → apex.
+/// After each glimpse, the GRU updates hidden state and the output head
+/// refines center_x and base_half_width estimates.
+struct TriangleStep {
     sensor: GlimpseSensor,
     gru: flodl::GRUCell,
-    loc_head: Linear,
-    location: RefCell<Option<Variable>>,
+    output_head: Linear, // hidden_dim → 2 (raw_cx, raw_bw)
+
+    // Triangle bounds
+    min_base_hw: f64,
+    max_base_hw: f64,
+    triangle_h: f64,
+
+    // State
+    step_idx: RefCell<usize>,
+    center_x: RefCell<Option<Variable>>,
+    base_half_w: RefCell<Option<Variable>>,
 }
 
-impl SubScanStep {
-    fn new(sensor: GlimpseSensor, gru: flodl::GRUCell, loc_head: Linear) -> Self {
-        SubScanStep {
-            sensor,
-            gru,
-            loc_head,
-            location: RefCell::new(None),
+impl TriangleStep {
+    fn new(
+        sensor: GlimpseSensor,
+        gru: flodl::GRUCell,
+        output_head: Linear,
+        min_base_hw: f64,
+        max_base_hw: f64,
+        triangle_h: f64,
+    ) -> Self {
+        TriangleStep {
+            sensor, gru, output_head,
+            min_base_hw, max_base_hw, triangle_h,
+            step_idx: RefCell::new(0),
+            center_x: RefCell::new(None),
+            base_half_w: RefCell::new(None),
         }
     }
 
@@ -92,102 +121,153 @@ impl SubScanStep {
         region_center: &Variable,
         region_half_w: &Variable,
     ) -> Result<Variable> {
-        let new_h = {
-            // Lazy init: start at region_center [B, 2] (noisy x and y).
-            if self.location.borrow().is_none() {
-                *self.location.borrow_mut() = Some(region_center.clone());
+        let idx = *self.step_idx.borrow();
+        let dev = blurred.device();
+        let b = h.shape()[0];
+
+        // Initialize on first step.
+        if idx == 0 {
+            let cx = region_center.narrow(1, 0, 1)?; // [B, 1]
+            *self.center_x.borrow_mut() = Some(cx);
+
+            let init_hw = (self.min_base_hw + self.max_base_hw) / 2.0;
+            let bw_data = vec![init_hw as f32; b as usize];
+            let bw = Variable::new(
+                Tensor::from_f32(&bw_data, &[b, 1], dev)?, false,
+            );
+            *self.base_half_w.borrow_mut() = Some(bw);
+        }
+
+        let cx = self.center_x.borrow().as_ref().unwrap().clone();
+        let bw = self.base_half_w.borrow().as_ref().unwrap().clone();
+
+        // Glimpse position from triangle vertex.
+        let glimpse_pos = match idx % 3 {
+            0 => {
+                // Left base: (center_x - base_half_w, 0)
+                let x = cx.sub(&bw)?;
+                let y_data = vec![0.0f32; b as usize];
+                let y = Variable::new(Tensor::from_f32(&y_data, &[b, 1], dev)?, false);
+                x.cat(&y, 1)?
             }
+            1 => {
+                // Right base: (center_x + base_half_w, 0)
+                let x = cx.add(&bw)?;
+                let y_data = vec![0.0f32; b as usize];
+                let y = Variable::new(Tensor::from_f32(&y_data, &[b, 1], dev)?, false);
+                x.cat(&y, 1)?
+            }
+            _ => {
+                // Apex: (center_x, +triangle_height/2)
+                let y_val = (self.triangle_h / 2.0) as f32;
+                let y_data = vec![y_val; b as usize];
+                let y = Variable::new(Tensor::from_f32(&y_data, &[b, 1], dev)?, false);
+                cx.cat(&y, 1)?
+            }
+        };
 
-            let loc_guard = self.location.borrow();
-            let loc = loc_guard.as_ref().unwrap();
+        // Extract glimpse and update GRU.
+        let glimpse = self.sensor.sense(blurred, &glimpse_pos)?;
+        let new_h = self.gru.forward_step(&glimpse, Some(h))?;
 
-            let glimpse = self.sensor.sense(blurred, loc)?;
-            self.gru.forward_step(&glimpse, Some(h))?
-        }; // loc_guard dropped
+        // Update center_x and base_half_w from output head.
+        let raw = self.output_head.forward(&new_h)?.tanh()?; // [B, 2] in [-1, 1]
+        let raw_cx = raw.narrow(1, 0, 1)?;
+        let raw_bw = raw.narrow(1, 1, 1)?;
 
-        // Location update: x bounded to region, y free.
-        let raw = self.loc_head.forward(&new_h)?.tanh()?; // [B, 2] in [-1, 1]
-        let raw_x = raw.narrow(1, 0, 1)?;                  // [B, 1]
-        let raw_y = raw.narrow(1, 1, 1)?;                  // [B, 1]
-        let center_x = region_center.narrow(1, 0, 1)?;     // [B, 1]
-        let x = center_x.add(&region_half_w.mul(&raw_x)?)?;
-        let new_loc = x.cat(&raw_y, 1)?;                   // [B, 2]
+        // center_x: bounded to region via tanh reparameterization.
+        let center_ref = region_center.narrow(1, 0, 1)?;
+        let new_cx = center_ref.add(&region_half_w.mul(&raw_cx)?)?;
 
-        *self.location.borrow_mut() = Some(new_loc);
+        // base_half_w: bounded to [min, max].
+        // tanh in [-1,1] → (tanh+1)/2 in [0,1] → min + range * [0,1]
+        let range = self.max_base_hw - self.min_base_hw;
+        let new_bw = raw_bw.add_scalar(1.0)?
+            .mul_scalar(0.5 * range)?
+            .add_scalar(self.min_base_hw)?;
+
+        *self.center_x.borrow_mut() = Some(new_cx);
+        *self.base_half_w.borrow_mut() = Some(new_bw);
+        *self.step_idx.borrow_mut() = idx + 1;
+
         Ok(new_h)
     }
 }
 
-impl Module for SubScanStep {
-    fn name(&self) -> &str { "subscan_step" }
+impl Module for TriangleStep {
+    fn name(&self) -> &str { "triangle_step" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        // Not called directly — NamedInputModule path is used.
         self.step(input, input, input, input)
     }
 
     fn as_named_input(&self) -> Option<&dyn NamedInputModule> { Some(self) }
 
     fn reset(&self) {
-        *self.location.borrow_mut() = None;
+        *self.step_idx.borrow_mut() = 0;
+        *self.center_x.borrow_mut() = None;
+        *self.base_half_w.borrow_mut() = None;
     }
 
     fn detach_state(&self) {
-        let mut loc = self.location.borrow_mut();
-        if let Some(v) = loc.take() {
-            *loc = Some(v.detach());
-        }
+        let mut cx = self.center_x.borrow_mut();
+        if let Some(v) = cx.take() { *cx = Some(v.detach()); }
+        let mut bw = self.base_half_w.borrow_mut();
+        if let Some(v) = bw.take() { *bw = Some(v.detach()); }
     }
 
     fn parameters(&self) -> Vec<Parameter> {
         let mut params = self.sensor.parameters();
         params.extend(self.gru.parameters());
-        params.extend(self.loc_head.parameters());
+        params.extend(self.output_head.parameters());
         params
     }
 
     fn trace(&self) -> Option<Variable> {
-        self.location.borrow().clone()
+        // Return center_x as [B, 1] trace for the graph.
+        self.center_x.borrow().clone()
     }
 }
 
-impl NamedInputModule for SubScanStep {
+impl NamedInputModule for TriangleStep {
     fn forward_named(
         &self,
         input: &Variable,
         refs: &HashMap<String, Variable>,
     ) -> Result<Variable> {
-        let blurred = refs.get("blurred").expect("SubScanStep requires 'blurred' ref");
+        let blurred = refs.get("blurred")
+            .expect("TriangleStep requires 'blurred' ref");
         let region_center = refs.get("region_center")
-            .expect("SubScanStep requires 'region_center' ref");
+            .expect("TriangleStep requires 'region_center' ref");
         let region_half_w = refs.get("region_half_w")
-            .expect("SubScanStep requires 'region_half_w' ref");
+            .expect("TriangleStep requires 'region_half_w' ref");
         self.step(input, blurred, region_center, region_half_w)
     }
 }
 
 // ── SubScanModel: Graph wrapper ──────────────────────────────────────
 
-/// SubScan model built as a computation graph.
+/// SubScan model with triangle-constrained glimpses.
 ///
-/// Two short, wide, blurred glimpses within a bounded region, then infer
-/// the letter center position. The output position does not need to
-/// coincide with either glimpse location — it is an inference from
-/// accumulated evidence.
+/// Three blurred glimpses (left base, right base, apex) sense ink structure.
+/// Outputs center_x for handoff to the letter model.
 pub struct SubScanModel {
     pub graph: Graph,
 }
 
 impl SubScanModel {
-    /// Create the SubScan model as a Graph.
+    /// Create the triangle SubScan model.
     pub fn new(cfg: &SubScanConfig) -> Result<Self> {
         let sensor = GlimpseSensor::new(
             cfg.patch_h, cfg.patch_w, cfg.n_scales, cfg.hidden_dim,
         )?;
         let gru = flodl::GRUCell::new(cfg.hidden_dim, cfg.hidden_dim)?;
-        let loc_head = Linear::new(cfg.hidden_dim, 2)?;
+        let output_head = Linear::new(cfg.hidden_dim, 2)?;
 
-        let step = SubScanStep::new(sensor, gru, loc_head);
+        let step = TriangleStep::new(
+            sensor, gru, output_head,
+            cfg.min_base_hw, cfg.max_base_hw, cfg.triangle_height,
+        );
 
         let graph = FlowBuilder::from(GaussianBlur::new(cfg.blur_sigma))
             .label("SubScan")
@@ -205,13 +285,10 @@ impl SubScanModel {
     /// Localize a letter within a bounded region.
     ///
     /// - `image`: `[B, 1, H, W]` — full word image.
-    /// - `region_center`: `[B, 2]` — noisy starting position (x, y) in normalized coords.
-    /// - `region_half_w`: `[B, 1]` — normalized half-width bounding the x-axis.
+    /// - `region_center`: `[B, 2]` — noisy starting position (x, y).
+    /// - `region_half_w`: `[B, 1]` — region half-width bounding center_x.
     ///
-    /// Returns `[B, 2]` — midpoint of all glimpse positions (triangulated center).
-    ///
-    /// Using the midpoint instead of the last position creates an inductive bias:
-    /// the glimpses must bracket the letter to produce a good center estimate.
+    /// Returns `[B, 1]` — predicted center_x.
     pub fn forward(
         &self,
         image: &Variable,
@@ -223,16 +300,15 @@ impl SubScanModel {
             region_center.clone(),
             region_half_w.clone(),
         ])?;
+
+        // The last trace is center_x [B, 1] after all 3 glimpses.
         let traces = self.graph.traces("scan").unwrap_or_default();
         assert!(!traces.is_empty(), "no scan traces");
-        // Midpoint of all glimpse positions: triangulated center.
-        // Each trace is [B, 2]. Stack → [B, N, 2], mean over dim 1 → [B, 2].
-        let stacked = Variable::stack(&traces, 1)?;
-        stacked.mean_dim(1, false)
+        Ok(traces.last().unwrap().clone())
     }
 
-    /// Location traces from the most recent forward pass (one per glimpse step).
-    pub fn locations(&self) -> Vec<Variable> {
+    /// Center_x traces from each step (one per glimpse).
+    pub fn center_traces(&self) -> Vec<Variable> {
         self.graph.traces("scan").unwrap_or_default()
     }
 

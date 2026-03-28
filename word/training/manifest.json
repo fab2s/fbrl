@@ -1,0 +1,38 @@
+{
+  "config": {
+    "batch_size": 32,
+    "checkpoint_interval": 25,
+    "epochs": 100,
+    "hidden_dim": 256,
+    "max_base_hw": 0.2,
+    "max_grad_norm": 5.0,
+    "min_base_hw": 0.03,
+    "min_lr_ratio": 0.01,
+    "noise_ramp_pct": 0.6,
+    "noise_x_end": 0.18,
+    "noise_x_start": 0.02,
+    "noise_y_end": 0.08,
+    "noise_y_start": 0.01,
+    "region_half_w": 0.5,
+    "save_dir": "training",
+    "subscan_blur_sigma": 4.0,
+    "subscan_lr": 0.001,
+    "subscan_n_glimpses": 3,
+    "subscan_n_scales": 1,
+    "subscan_patch_h": 8,
+    "subscan_patch_w": 28,
+    "triangle_height": 0.3,
+    "word_data": "../python/data/words"
+  },
+  "files": {
+    "subscan_model": "subscan_final.fdl.gz"
+  },
+  "framework": "flodl",
+  "model": "subscan-triangle",
+  "results": {
+    "err_x": 0.0002926784697920084,
+    "mse": 1.5186609433825992e-7
+  },
+  "step": 2,
+  "training": "supervised MSE"
+}

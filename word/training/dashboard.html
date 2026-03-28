@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>floDl Training Report</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f1117;--card:#1a1d27;--border:#2a2d3a;--text:#e4e6eb;--dim:#8b8fa3;
+--accent:#6c8cff;--green:#34d399;--red:#f87171;--yellow:#fbbf24;--purple:#a78bfa}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:var(--bg);color:var(--text);padding:0;min-height:100vh}
+
+/* Header */
+.header{background:var(--card);border-bottom:1px solid var(--border);padding:16px 24px;
+display:flex;flex-direction:column;gap:8px}
+.header-row{display:flex;align-items:center;gap:24px;flex-wrap:wrap}
+.header h1{font-size:18px;font-weight:600;color:var(--accent);letter-spacing:-0.5px}
+.header h1 span{color:var(--dim);font-weight:400}
+.hw-info{color:var(--dim);font-size:11px;letter-spacing:0.3px;font-family:monospace}
+.stat{display:flex;flex-direction:column;gap:2px}
+.stat-label{font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:var(--dim)}
+.stat-value{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+.progress-bar{flex:1;min-width:120px;max-width:300px;height:6px;background:var(--border);
+border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:var(--accent);border-radius:3px;transition:width 0.3s}
+
+/* Layout */
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px 24px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;overflow:hidden}
+.card h2{font-size:13px;text-transform:uppercase;letter-spacing:0.5px;color:var(--dim);margin-bottom:12px}
+.full-width{grid-column:1/-1}
+
+/* Charts */
+canvas{width:100%;height:260px;cursor:crosshair}
+.legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+.legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim);cursor:pointer;
+user-select:none;padding:2px 6px;border-radius:4px;transition:opacity 0.2s,background 0.15s}
+.legend-item:hover{background:rgba(108,140,255,0.1)}
+.legend-item.dimmed{opacity:0.3}
+.legend-item.solo{background:rgba(108,140,255,0.15)}
+.legend-dot{width:8px;height:8px;border-radius:50%}
+
+/* Resource bars */
+.res-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.res-item{display:flex;flex-direction:column;gap:4px}
+.res-label{display:flex;justify-content:space-between;font-size:11px;color:var(--dim)}
+.res-bar{height:8px;background:var(--border);border-radius:4px;overflow:hidden}
+.res-fill{height:100%;border-radius:4px;transition:width 0.5s}
+.res-fill.cpu{background:var(--accent)}
+.res-fill.ram{background:var(--purple)}
+.res-fill.gpu{background:var(--green)}
+.res-fill.vram{background:var(--yellow)}
+
+/* Log table */
+.log-wrap{max-height:300px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.log-wrap::-webkit-scrollbar{width:6px}
+.log-wrap::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+table{width:100%;border-collapse:collapse;font-size:12px;font-variant-numeric:tabular-nums}
+th{text-align:left;color:var(--dim);font-weight:500;padding:6px 8px;
+border-bottom:1px solid var(--border);position:sticky;top:0;background:var(--card)}
+td{padding:5px 8px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(108,140,255,0.05)}
+
+/* SVG toggle */
+.svg-toggle{cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px}
+.svg-toggle .arrow{transition:transform 0.2s;font-size:10px}
+.svg-toggle.open .arrow{transform:rotate(90deg)}
+.svg-container{max-height:0;overflow:hidden;transition:max-height 0.3s ease;background:#fff;border-radius:6px;margin-top:8px}
+.svg-container svg{width:100%;height:auto}
+
+/* Tooltip */
+.tooltip{position:fixed;background:rgba(26,29,39,0.95);color:var(--text);padding:8px 12px;
+border-radius:6px;font-size:11px;pointer-events:none;display:none;z-index:100;
+border:1px solid var(--border);white-space:nowrap;backdrop-filter:blur(8px)}
+
+/* Status */
+.status{display:inline-flex;align-items:center;gap:6px;font-size:12px}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--green);
+animation:pulse 2s ease-in-out infinite}
+.status-dot.done{background:var(--dim);animation:none}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-row">
+    <h1>floDl <span>Training Dashboard</span></h1>
+    <div class="status" id="status">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">Waiting...</span>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Epoch</div>
+      <div class="stat-value" id="epochNum">—</div>
+    </div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="stat">
+      <div class="stat-label">ETA</div>
+      <div class="stat-value" id="etaDisplay">—</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Elapsed</div>
+      <div class="stat-value" id="elapsedDisplay">—</div>
+    </div>
+  </div>
+  <div class="hw-info" id="hwInfo" style="display:none"></div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Training Metrics</h2>
+    <canvas id="metricsChart"></canvas>
+    <div class="legend" id="metricsLegend"></div>
+  </div>
+
+  <div class="card">
+    <h2>Resources</h2>
+    <canvas id="resourceChart"></canvas>
+    <div class="legend" id="resourceLegend"></div>
+    <div class="res-grid" id="resGrid">
+      <div class="res-item"><div class="res-label"><span>CPU</span><span id="cpuVal">—</span></div>
+        <div class="res-bar"><div class="res-fill cpu" id="cpuBar" style="width:0"></div></div></div>
+      <div class="res-item"><div class="res-label"><span>RAM</span><span id="ramVal">—</span></div>
+        <div class="res-bar"><div class="res-fill ram" id="ramBar" style="width:0"></div></div></div>
+      <div class="res-item"><div class="res-label"><span>GPU</span><span id="gpuVal">—</span></div>
+        <div class="res-bar"><div class="res-fill gpu" id="gpuBar" style="width:0"></div></div></div>
+      <div class="res-item"><div class="res-label"><span>VRAM</span><span id="vramVal">—</span></div>
+        <div class="res-bar"><div class="res-fill vram" id="vramBar" style="width:0"></div></div></div>
+    </div>
+  </div>
+
+  <div class="card full-width">
+    <h2>Epoch Log</h2>
+    <div class="log-wrap" id="logWrap">
+      <table>
+        <thead><tr id="logHeader"><th>Epoch</th><th>Duration</th></tr></thead>
+        <tbody id="logBody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card full-width" id="metaCard" style="display:none">
+    <details>
+      <summary style="cursor:pointer;color:var(--dim);font-size:13px;text-transform:uppercase;letter-spacing:0.5px">Training Configuration</summary>
+      <pre id="metaPre" style="margin-top:12px;color:var(--text);font-size:12px;white-space:pre-wrap;word-break:break-word"></pre>
+    </details>
+  </div>
+
+  <div class="card full-width" id="svgCard" style="display:none">
+    <div class="svg-toggle" id="svgToggle" onclick="toggleSvg()">
+      <span class="arrow">&#9654;</span>
+      <h2 style="margin:0">Graph Architecture</h2>
+    </div>
+    <div class="svg-container" id="svgContainer"></div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<script>
+const ARCHIVE_DATA=[{"epoch":1,"total":100,"duration":8.6738,"metrics":{"mse":0.00017873,"err_x":0.01070842,"lr":0.00100000,"noise_x":0.02000000,"noise_y":0.01000000},"resources":{"cpu":13.4,"ram_used":3835281408,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":2,"total":100,"duration":7.2459,"metrics":{"mse":0.00017331,"err_x":0.01135228,"lr":0.00099976,"noise_x":0.02266667,"noise_y":0.01116667},"resources":{"cpu":14.6,"ram_used":3855085568,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":3,"total":100,"duration":6.9157,"metrics":{"mse":0.00021536,"err_x":0.01265582,"lr":0.00099902,"noise_x":0.02533333,"noise_y":0.01233333},"resources":{"cpu":14.1,"ram_used":3864723456,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":4,"total":100,"duration":7.2709,"metrics":{"mse":0.00025869,"err_x":0.01384166,"lr":0.00099780,"noise_x":0.02800000,"noise_y":0.01350000},"resources":{"cpu":15.2,"ram_used":3885875200,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":5,"total":100,"duration":7.2698,"metrics":{"mse":0.00028915,"err_x":0.01452486,"lr":0.00099610,"noise_x":0.03066667,"noise_y":0.01466667},"resources":{"cpu":13.7,"ram_used":3850903552,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":6,"total":100,"duration":6.8117,"metrics":{"mse":0.00037453,"err_x":0.01674964,"lr":0.00099391,"noise_x":0.03333333,"noise_y":0.01583333},"resources":{"cpu":13.9,"ram_used":3869458432,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":7,"total":100,"duration":6.9244,"metrics":{"mse":0.00033712,"err_x":0.01523914,"lr":0.00099123,"noise_x":0.03600000,"noise_y":0.01700000},"resources":{"cpu":15.2,"ram_used":3870998528,"ram_total":20971692032,"gpu":22.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":8,"total":100,"duration":7.9447,"metrics":{"mse":0.00013059,"err_x":0.00873408,"lr":0.00098808,"noise_x":0.03866667,"noise_y":0.01816667},"resources":{"cpu":14.7,"ram_used":3865239552,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":9,"total":100,"duration":7.4977,"metrics":{"mse":0.00001079,"err_x":0.00230154,"lr":0.00098445,"noise_x":0.04133333,"noise_y":0.01933333},"resources":{"cpu":14.7,"ram_used":3863392256,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":10,"total":100,"duration":7.1041,"metrics":{"mse":0.00000488,"err_x":0.00155463,"lr":0.00098035,"noise_x":0.04400000,"noise_y":0.02050000},"resources":{"cpu":16.1,"ram_used":3877232640,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":11,"total":100,"duration":6.9985,"metrics":{"mse":0.00001611,"err_x":0.00233523,"lr":0.00097577,"noise_x":0.04666667,"noise_y":0.02166667},"resources":{"cpu":14.0,"ram_used":3861512192,"ram_total":20971692032,"gpu":15.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":12,"total":100,"duration":8.1597,"metrics":{"mse":0.00001101,"err_x":0.00185027,"lr":0.00097074,"noise_x":0.04933333,"noise_y":0.02283333},"resources":{"cpu":13.7,"ram_used":3872755712,"ram_total":20971692032,"gpu":14.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":13,"total":100,"duration":8.0987,"metrics":{"mse":0.00000427,"err_x":0.00120009,"lr":0.00096524,"noise_x":0.05200000,"noise_y":0.02400000},"resources":{"cpu":15.3,"ram_used":3871109120,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":14,"total":100,"duration":6.8010,"metrics":{"mse":0.00005331,"err_x":0.00360070,"lr":0.00095929,"noise_x":0.05466667,"noise_y":0.02516667},"resources":{"cpu":11.8,"ram_used":3869536256,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":15,"total":100,"duration":6.7662,"metrics":{"mse":0.00000298,"err_x":0.00109764,"lr":0.00095289,"noise_x":0.05733333,"noise_y":0.02633333},"resources":{"cpu":11.2,"ram_used":3865362432,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":16,"total":100,"duration":6.6840,"metrics":{"mse":0.00000376,"err_x":0.00125586,"lr":0.00094605,"noise_x":0.06000000,"noise_y":0.02750000},"resources":{"cpu":11.1,"ram_used":3851403264,"ram_total":20971692032,"gpu":17.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":17,"total":100,"duration":8.1502,"metrics":{"mse":0.00000940,"err_x":0.00196994,"lr":0.00093877,"noise_x":0.06266667,"noise_y":0.02866667},"resources":{"cpu":11.8,"ram_used":3851431936,"ram_total":20971692032,"gpu":14.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":18,"total":100,"duration":7.5332,"metrics":{"mse":0.00001082,"err_x":0.00190434,"lr":0.00093107,"noise_x":0.06533333,"noise_y":0.02983333},"resources":{"cpu":10.2,"ram_used":3853398016,"ram_total":20971692032,"gpu":13.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":19,"total":100,"duration":8.8420,"metrics":{"mse":0.00001860,"err_x":0.00228983,"lr":0.00092294,"noise_x":0.06800000,"noise_y":0.03100000},"resources":{"cpu":11.6,"ram_used":3855454208,"ram_total":20971692032,"gpu":14.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":20,"total":100,"duration":9.1606,"metrics":{"mse":0.00000106,"err_x":0.00072361,"lr":0.00091440,"noise_x":0.07066667,"noise_y":0.03216667},"resources":{"cpu":11.4,"ram_used":3854626816,"ram_total":20971692032,"gpu":12.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":21,"total":100,"duration":8.8708,"metrics":{"mse":0.00001168,"err_x":0.00217413,"lr":0.00090546,"noise_x":0.07333333,"noise_y":0.03333333},"resources":{"cpu":10.0,"ram_used":3848417280,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":22,"total":100,"duration":7.1465,"metrics":{"mse":0.00000718,"err_x":0.00170479,"lr":0.00089613,"noise_x":0.07600000,"noise_y":0.03450000},"resources":{"cpu":12.2,"ram_used":3838009344,"ram_total":20971692032,"gpu":17.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":23,"total":100,"duration":6.7912,"metrics":{"mse":0.00001423,"err_x":0.00230633,"lr":0.00088640,"noise_x":0.07866667,"noise_y":0.03566667},"resources":{"cpu":10.4,"ram_used":3836833792,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":24,"total":100,"duration":7.0733,"metrics":{"mse":0.00000984,"err_x":0.00182987,"lr":0.00087630,"noise_x":0.08133333,"noise_y":0.03683333},"resources":{"cpu":13.0,"ram_used":3838193664,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":25,"total":100,"duration":6.8275,"metrics":{"mse":0.00001658,"err_x":0.00269946,"lr":0.00086584,"noise_x":0.08400000,"noise_y":0.03800000},"resources":{"cpu":11.1,"ram_used":3838763008,"ram_total":20971692032,"gpu":17.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":26,"total":100,"duration":7.1037,"metrics":{"mse":0.00000630,"err_x":0.00156013,"lr":0.00085502,"noise_x":0.08666667,"noise_y":0.03916667},"resources":{"cpu":11.7,"ram_used":3844743168,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":27,"total":100,"duration":6.4663,"metrics":{"mse":0.00001444,"err_x":0.00256539,"lr":0.00084385,"noise_x":0.08933333,"noise_y":0.04033333},"resources":{"cpu":11.7,"ram_used":3837345792,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":28,"total":100,"duration":6.5255,"metrics":{"mse":0.00000916,"err_x":0.00213918,"lr":0.00083235,"noise_x":0.09200000,"noise_y":0.04150000},"resources":{"cpu":10.6,"ram_used":3838173184,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":29,"total":100,"duration":7.1528,"metrics":{"mse":0.00001758,"err_x":0.00256221,"lr":0.00082052,"noise_x":0.09466667,"noise_y":0.04266667},"resources":{"cpu":12.6,"ram_used":3836194816,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":30,"total":100,"duration":9.1911,"metrics":{"mse":0.00001060,"err_x":0.00219135,"lr":0.00080839,"noise_x":0.09733333,"noise_y":0.04383333},"resources":{"cpu":10.6,"ram_used":3838828544,"ram_total":20971692032,"gpu":15.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":31,"total":100,"duration":6.9423,"metrics":{"mse":0.00000638,"err_x":0.00183629,"lr":0.00079595,"noise_x":0.10000000,"noise_y":0.04500000},"resources":{"cpu":11.4,"ram_used":3838103552,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":32,"total":100,"duration":6.9062,"metrics":{"mse":0.00003130,"err_x":0.00323009,"lr":0.00078323,"noise_x":0.10266667,"noise_y":0.04616667},"resources":{"cpu":10.7,"ram_used":3837403136,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":33,"total":100,"duration":8.2010,"metrics":{"mse":0.00001028,"err_x":0.00223987,"lr":0.00077023,"noise_x":0.10533333,"noise_y":0.04733333},"resources":{"cpu":11.4,"ram_used":3835383808,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":34,"total":100,"duration":7.2511,"metrics":{"mse":0.00000488,"err_x":0.00152949,"lr":0.00075698,"noise_x":0.10800000,"noise_y":0.04850000},"resources":{"cpu":10.7,"ram_used":3836223488,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":35,"total":100,"duration":7.2839,"metrics":{"mse":0.00000764,"err_x":0.00202369,"lr":0.00074347,"noise_x":0.11066667,"noise_y":0.04966667},"resources":{"cpu":12.6,"ram_used":3835953152,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":36,"total":100,"duration":6.6948,"metrics":{"mse":0.00000889,"err_x":0.00208668,"lr":0.00072973,"noise_x":0.11333333,"noise_y":0.05083333},"resources":{"cpu":11.3,"ram_used":3836379136,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":37,"total":100,"duration":6.7978,"metrics":{"mse":0.00001061,"err_x":0.00238024,"lr":0.00071576,"noise_x":0.11600000,"noise_y":0.05200000},"resources":{"cpu":12.8,"ram_used":3841949696,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":38,"total":100,"duration":7.4698,"metrics":{"mse":0.00000987,"err_x":0.00220270,"lr":0.00070159,"noise_x":0.11866667,"noise_y":0.05316667},"resources":{"cpu":10.6,"ram_used":3840004096,"ram_total":20971692032,"gpu":14.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":39,"total":100,"duration":8.0481,"metrics":{"mse":0.00002847,"err_x":0.00334162,"lr":0.00068722,"noise_x":0.12133333,"noise_y":0.05433333},"resources":{"cpu":12.7,"ram_used":3834429440,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":40,"total":100,"duration":6.7188,"metrics":{"mse":0.00000506,"err_x":0.00158965,"lr":0.00067268,"noise_x":0.12400000,"noise_y":0.05550000},"resources":{"cpu":10.6,"ram_used":3836207104,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":41,"total":100,"duration":7.3493,"metrics":{"mse":0.00000926,"err_x":0.00212712,"lr":0.00065796,"noise_x":0.12666667,"noise_y":0.05666667},"resources":{"cpu":14.8,"ram_used":3840892928,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":42,"total":100,"duration":6.7139,"metrics":{"mse":0.00001160,"err_x":0.00240087,"lr":0.00064310,"noise_x":0.12933333,"noise_y":0.05783333},"resources":{"cpu":11.3,"ram_used":3831205888,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":43,"total":100,"duration":6.7074,"metrics":{"mse":0.00002403,"err_x":0.00318767,"lr":0.00062810,"noise_x":0.13200000,"noise_y":0.05900000},"resources":{"cpu":11.8,"ram_used":3834232832,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":44,"total":100,"duration":6.6594,"metrics":{"mse":0.00000620,"err_x":0.00179512,"lr":0.00061298,"noise_x":0.13466667,"noise_y":0.06016667},"resources":{"cpu":11.8,"ram_used":3820720128,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":45,"total":100,"duration":6.8258,"metrics":{"mse":0.00000746,"err_x":0.00195678,"lr":0.00059775,"noise_x":0.13733333,"noise_y":0.06133333},"resources":{"cpu":10.9,"ram_used":3824185344,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":46,"total":100,"duration":6.7482,"metrics":{"mse":0.00000961,"err_x":0.00212326,"lr":0.00058244,"noise_x":0.14000000,"noise_y":0.06250000},"resources":{"cpu":12.8,"ram_used":3833712640,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":47,"total":100,"duration":8.0816,"metrics":{"mse":0.00000981,"err_x":0.00221978,"lr":0.00056704,"noise_x":0.14266667,"noise_y":0.06366667},"resources":{"cpu":10.3,"ram_used":3835891712,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":48,"total":100,"duration":7.8831,"metrics":{"mse":0.00001915,"err_x":0.00278466,"lr":0.00055158,"noise_x":0.14533333,"noise_y":0.06483333},"resources":{"cpu":11.8,"ram_used":3838021632,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":49,"total":100,"duration":7.7687,"metrics":{"mse":0.00001009,"err_x":0.00230286,"lr":0.00053608,"noise_x":0.14800000,"noise_y":0.06600000},"resources":{"cpu":10.3,"ram_used":3837739008,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":50,"total":100,"duration":7.0248,"metrics":{"mse":0.00001193,"err_x":0.00248358,"lr":0.00052055,"noise_x":0.15066667,"noise_y":0.06716667},"resources":{"cpu":13.0,"ram_used":3831115776,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":51,"total":100,"duration":7.3760,"metrics":{"mse":0.00000625,"err_x":0.00181315,"lr":0.00050500,"noise_x":0.15333333,"noise_y":0.06833333},"resources":{"cpu":10.6,"ram_used":3828146176,"ram_total":20971692032,"gpu":16.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":52,"total":100,"duration":8.2975,"metrics":{"mse":0.00003494,"err_x":0.00338612,"lr":0.00048945,"noise_x":0.15600000,"noise_y":0.06950000},"resources":{"cpu":12.2,"ram_used":3831107584,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":53,"total":100,"duration":8.1793,"metrics":{"mse":0.00000543,"err_x":0.00156586,"lr":0.00047392,"noise_x":0.15866667,"noise_y":0.07066667},"resources":{"cpu":11.1,"ram_used":3837759488,"ram_total":20971692032,"gpu":22.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":54,"total":100,"duration":6.6744,"metrics":{"mse":0.00000480,"err_x":0.00150735,"lr":0.00045842,"noise_x":0.16133333,"noise_y":0.07183333},"resources":{"cpu":11.7,"ram_used":3835768832,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":55,"total":100,"duration":6.6254,"metrics":{"mse":0.00000842,"err_x":0.00200131,"lr":0.00044296,"noise_x":0.16400000,"noise_y":0.07300000},"resources":{"cpu":10.6,"ram_used":3836465152,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":56,"total":100,"duration":8.8173,"metrics":{"mse":0.00000613,"err_x":0.00176167,"lr":0.00042756,"noise_x":0.16666667,"noise_y":0.07416667},"resources":{"cpu":11.4,"ram_used":3834990592,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":57,"total":100,"duration":9.2124,"metrics":{"mse":0.00001580,"err_x":0.00248390,"lr":0.00041225,"noise_x":0.16933333,"noise_y":0.07533333},"resources":{"cpu":11.5,"ram_used":3834380288,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":58,"total":100,"duration":9.4046,"metrics":{"mse":0.00001882,"err_x":0.00256152,"lr":0.00039702,"noise_x":0.17200000,"noise_y":0.07650000},"resources":{"cpu":9.9,"ram_used":3833405440,"ram_total":20971692032,"gpu":15.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":59,"total":100,"duration":8.2207,"metrics":{"mse":0.00000657,"err_x":0.00170221,"lr":0.00038190,"noise_x":0.17466667,"noise_y":0.07766667},"resources":{"cpu":11.9,"ram_used":3831939072,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":60,"total":100,"duration":6.9780,"metrics":{"mse":0.00001098,"err_x":0.00228446,"lr":0.00036690,"noise_x":0.17733333,"noise_y":0.07883333},"resources":{"cpu":10.7,"ram_used":3832184832,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":61,"total":100,"duration":7.0334,"metrics":{"mse":0.00001448,"err_x":0.00254662,"lr":0.00035204,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":12.7,"ram_used":3830685696,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":62,"total":100,"duration":7.0815,"metrics":{"mse":0.00002293,"err_x":0.00299928,"lr":0.00033732,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":11.3,"ram_used":3837407232,"ram_total":20971692032,"gpu":17.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":63,"total":100,"duration":7.6156,"metrics":{"mse":0.00000405,"err_x":0.00133484,"lr":0.00032278,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":13.1,"ram_used":3834851328,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":64,"total":100,"duration":8.4244,"metrics":{"mse":0.00000464,"err_x":0.00151738,"lr":0.00030841,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.1,"ram_used":3834785792,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":65,"total":100,"duration":8.3602,"metrics":{"mse":0.00000363,"err_x":0.00136428,"lr":0.00029424,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":11.7,"ram_used":3837202432,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":66,"total":100,"duration":8.9667,"metrics":{"mse":0.00000444,"err_x":0.00150910,"lr":0.00028027,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":11.5,"ram_used":3843485696,"ram_total":20971692032,"gpu":15.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":67,"total":100,"duration":8.4446,"metrics":{"mse":0.00000478,"err_x":0.00153696,"lr":0.00026653,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":11.6,"ram_used":3837792256,"ram_total":20971692032,"gpu":17.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":68,"total":100,"duration":10.0048,"metrics":{"mse":0.00000355,"err_x":0.00128073,"lr":0.00025302,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.2,"ram_used":3832074240,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":69,"total":100,"duration":8.2980,"metrics":{"mse":0.00001117,"err_x":0.00200281,"lr":0.00023977,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":12.1,"ram_used":3828961280,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":70,"total":100,"duration":8.9356,"metrics":{"mse":0.00000133,"err_x":0.00081451,"lr":0.00022677,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":9.9,"ram_used":3828576256,"ram_total":20971692032,"gpu":15.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":71,"total":100,"duration":7.9867,"metrics":{"mse":0.00000147,"err_x":0.00088477,"lr":0.00021405,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.1,"ram_used":3826835456,"ram_total":20971692032,"gpu":22.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":72,"total":100,"duration":6.8639,"metrics":{"mse":0.00000128,"err_x":0.00083046,"lr":0.00020161,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.6,"ram_used":3827625984,"ram_total":20971692032,"gpu":22.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":73,"total":100,"duration":6.7034,"metrics":{"mse":0.00000154,"err_x":0.00091737,"lr":0.00018948,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.2,"ram_used":3827593216,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":74,"total":100,"duration":6.6548,"metrics":{"mse":0.00000242,"err_x":0.00098405,"lr":0.00017765,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.6,"ram_used":3826421760,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":75,"total":100,"duration":6.6573,"metrics":{"mse":0.00000134,"err_x":0.00084750,"lr":0.00016615,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.4,"ram_used":3824730112,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":76,"total":100,"duration":6.7783,"metrics":{"mse":0.00000097,"err_x":0.00073740,"lr":0.00015498,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.5,"ram_used":3823177728,"ram_total":20971692032,"gpu":22.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":77,"total":100,"duration":6.8390,"metrics":{"mse":0.00000111,"err_x":0.00074945,"lr":0.00014416,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.6,"ram_used":3825283072,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":78,"total":100,"duration":7.1784,"metrics":{"mse":0.00000132,"err_x":0.00082595,"lr":0.00013370,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.0,"ram_used":3825532928,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":79,"total":100,"duration":6.9375,"metrics":{"mse":0.00000079,"err_x":0.00065522,"lr":0.00012360,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.5,"ram_used":3825356800,"ram_total":20971692032,"gpu":21.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":80,"total":100,"duration":7.1462,"metrics":{"mse":0.00000047,"err_x":0.00052304,"lr":0.00011387,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.5,"ram_used":3824558080,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":81,"total":100,"duration":6.9294,"metrics":{"mse":0.00000101,"err_x":0.00069057,"lr":0.00010454,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":11.1,"ram_used":3825864704,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":82,"total":100,"duration":6.8309,"metrics":{"mse":0.00000070,"err_x":0.00059815,"lr":0.00009560,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.6,"ram_used":3825369088,"ram_total":20971692032,"gpu":22.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":83,"total":100,"duration":6.6776,"metrics":{"mse":0.00000046,"err_x":0.00050265,"lr":0.00008706,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.6,"ram_used":3827666944,"ram_total":20971692032,"gpu":22.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":84,"total":100,"duration":6.6955,"metrics":{"mse":0.00000042,"err_x":0.00048850,"lr":0.00007893,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.3,"ram_used":3829407744,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":85,"total":100,"duration":7.4157,"metrics":{"mse":0.00000045,"err_x":0.00049845,"lr":0.00007123,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":13.0,"ram_used":3835469824,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":86,"total":100,"duration":6.4092,"metrics":{"mse":0.00000032,"err_x":0.00043340,"lr":0.00006395,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":11.5,"ram_used":3832406016,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":87,"total":100,"duration":6.5697,"metrics":{"mse":0.00000034,"err_x":0.00044983,"lr":0.00005711,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":12.9,"ram_used":3835318272,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":88,"total":100,"duration":8.5017,"metrics":{"mse":0.00000034,"err_x":0.00043408,"lr":0.00005071,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.6,"ram_used":3837775872,"ram_total":20971692032,"gpu":15.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":89,"total":100,"duration":8.3800,"metrics":{"mse":0.00000026,"err_x":0.00038968,"lr":0.00004476,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":12.7,"ram_used":3835031552,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":90,"total":100,"duration":6.9486,"metrics":{"mse":0.00000021,"err_x":0.00034712,"lr":0.00003926,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":14.4,"ram_used":3859222528,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":91,"total":100,"duration":7.1177,"metrics":{"mse":0.00000027,"err_x":0.00038720,"lr":0.00003423,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":15.2,"ram_used":3864186880,"ram_total":20971692032,"gpu":16.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":92,"total":100,"duration":7.3525,"metrics":{"mse":0.00000019,"err_x":0.00033514,"lr":0.00002965,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.8,"ram_used":3864858624,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":93,"total":100,"duration":6.4895,"metrics":{"mse":0.00000019,"err_x":0.00032791,"lr":0.00002555,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":11.6,"ram_used":3875897344,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":94,"total":100,"duration":7.1505,"metrics":{"mse":0.00000018,"err_x":0.00031941,"lr":0.00002192,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":12.8,"ram_used":3913433088,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":95,"total":100,"duration":6.4214,"metrics":{"mse":0.00000018,"err_x":0.00032190,"lr":0.00001877,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":10.4,"ram_used":3914997760,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":96,"total":100,"duration":6.3375,"metrics":{"mse":0.00000016,"err_x":0.00030620,"lr":0.00001609,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":12.0,"ram_used":3926081536,"ram_total":20971692032,"gpu":19.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":97,"total":100,"duration":6.7996,"metrics":{"mse":0.00000016,"err_x":0.00030089,"lr":0.00001390,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":12.4,"ram_used":3947089920,"ram_total":20971692032,"gpu":20.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":98,"total":100,"duration":6.7068,"metrics":{"mse":0.00000015,"err_x":0.00029284,"lr":0.00001220,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":11.7,"ram_used":3959939072,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":99,"total":100,"duration":6.4893,"metrics":{"mse":0.00000015,"err_x":0.00029317,"lr":0.00001098,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":11.4,"ram_used":3965628416,"ram_total":20971692032,"gpu":18.0,"vram_alloc":85983232,"vram_total":17102733312}},{"epoch":100,"total":100,"duration":7.1304,"metrics":{"mse":0.00000015,"err_x":0.00029268,"lr":0.00001024,"noise_x":0.18000000,"noise_y":0.08000000},"resources":{"cpu":11.5,"ram_used":3969769472,"ram_total":20971692032,"gpu":15.0,"vram_alloc":85983232,"vram_total":17102733312}}];
+const ARCHIVE_SVG=`<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+ "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<!-- Generated by graphviz version 2.43.0 (0)
+ -->
+<!-- Title: G Pages: 1 -->
+<svg width="672pt" height="348pt"
+ viewBox="0.00 0.00 672.00 347.85" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 343.85)">
+<title>G</title>
+<polygon fill="white" stroke="transparent" points="-4,4 -4,-343.85 668,-343.85 668,4 -4,4"/>
+<g id="clust1" class="cluster">
+<title>cluster_level_0</title>
+<polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="8,-236.91 8,-331.85 656,-331.85 656,-236.91 8,-236.91"/>
+<text text-anchor="middle" x="332" y="-316.65" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 0</text>
+</g>
+<g id="clust2" class="cluster">
+<title>cluster_level_1</title>
+<polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="52,-142.91 52,-217.91 160,-217.91 160,-142.91 52,-142.91"/>
+<text text-anchor="middle" x="106" y="-202.71" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 1</text>
+</g>
+<g id="clust3" class="cluster">
+<title>cluster_level_2</title>
+<polygon fill="none" stroke="#999999" stroke-dasharray="5,2" points="155,-8 155,-123.91 361,-123.91 361,-8 155,-8"/>
+<text text-anchor="middle" x="258" y="-108.71" font-family="Helvetica,sans-Serif" font-size="14.00" fill="#999999">level 2</text>
+</g>
+<!-- gaussian_blur_1 -->
+<g id="node1" class="node">
+<title>gaussian_blur_1</title>
+<polygon fill="#aed6f1" stroke="black" points="15.68,-264.25 96,-244.95 176.32,-264.25 176.25,-295.49 15.75,-295.49 15.68,-264.25"/>
+<text text-anchor="middle" x="96" y="-276.08" font-family="Helvetica,sans-Serif" font-size="11.00">gaussian_blur</text>
+<text text-anchor="middle" x="96" y="-264.08" font-family="Helvetica,sans-Serif" font-size="11.00">#blurred</text>
+</g>
+<!-- h0_init_4 -->
+<g id="node4" class="node">
+<title>h0_init_4</title>
+<polygon fill="#eaecee" stroke="black" points="151.5,-186.91 60.5,-186.91 60.5,-150.91 151.5,-150.91 151.5,-186.91"/>
+<text text-anchor="middle" x="106" y="-172.11" font-family="Helvetica,sans-Serif" font-size="11.00">h0_init</text>
+<text text-anchor="middle" x="106" y="-160.11" font-family="Helvetica,sans-Serif" font-size="11.00">[256 params]</text>
+</g>
+<!-- gaussian_blur_1&#45;&gt;h0_init_4 -->
+<g id="edge1" class="edge">
+<title>gaussian_blur_1&#45;&gt;h0_init_4</title>
+<path fill="none" stroke="#2c3e50" d="M98.6,-245.36C100.05,-230.54 101.86,-212.12 103.33,-197.18"/>
+<polygon fill="#2c3e50" stroke="#2c3e50" points="106.83,-197.32 104.32,-187.03 99.86,-196.64 106.83,-197.32"/>
+</g>
+<!-- loop_5 -->
+<g id="node5" class="node">
+<title>loop_5</title>
+<polygon fill="#a9dfbf" stroke="black" points="353.04,-66.33 258,-92.87 162.96,-66.33 163.05,-23.38 352.95,-23.38 353.04,-66.33"/>
+<text text-anchor="middle" x="258" y="-63.66" font-family="Helvetica,sans-Serif" font-size="11.00">loop</text>
+<text text-anchor="middle" x="258" y="-51.66" font-family="Helvetica,sans-Serif" font-size="11.00">#scan</text>
+<text text-anchor="middle" x="258" y="-39.66" font-family="Helvetica,sans-Serif" font-size="11.00">[619.9K params]</text>
+</g>
+<!-- gaussian_blur_1&#45;&gt;loop_5 -->
+<g id="edge3" class="edge">
+<title>gaussian_blur_1&#45;&gt;loop_5</title>
+<path fill="none" stroke="#2980b9" stroke-dasharray="5,2" d="M125.87,-251.99C138.57,-242.62 152.97,-230.69 164,-217.91 195.53,-181.39 222.04,-132.77 238.78,-98.26"/>
+<polygon fill="#2980b9" stroke="#2980b9" points="242.09,-99.45 243.24,-88.92 235.77,-96.44 242.09,-99.45"/>
+<text text-anchor="middle" x="232" y="-166.71" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#2980b9">blurred</text>
+</g>
+<!-- input_region_center_2 -->
+<g id="node2" class="node">
+<title>input_region_center_2</title>
+<polygon fill="#aed6f1" stroke="black" points="194.99,-264.25 304,-244.95 413.01,-264.25 412.91,-295.49 195.09,-295.49 194.99,-264.25"/>
+<text text-anchor="middle" x="304" y="-276.08" font-family="Helvetica,sans-Serif" font-size="11.00">input_region_center</text>
+<text text-anchor="middle" x="304" y="-264.08" font-family="Helvetica,sans-Serif" font-size="11.00">#region_center</text>
+</g>
+<!-- input_region_center_2&#45;&gt;loop_5 -->
+<g id="edge4" class="edge">
+<title>input_region_center_2&#45;&gt;loop_5</title>
+<path fill="none" stroke="#2980b9" stroke-dasharray="5,2" d="M298.45,-245.78C290.83,-209.9 276.99,-144.8 267.65,-100.85"/>
+<polygon fill="#2980b9" stroke="#2980b9" points="271.06,-100.05 265.55,-90.99 264.21,-101.5 271.06,-100.05"/>
+<text text-anchor="middle" x="323.5" y="-166.71" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#2980b9">region_center</text>
+</g>
+<!-- input_region_half_w_3 -->
+<g id="node3" class="node">
+<title>input_region_half_w_3</title>
+<polygon fill="#aed6f1" stroke="black" points="431.74,-264.25 540,-244.95 648.26,-264.25 648.16,-295.49 431.84,-295.49 431.74,-264.25"/>
+<text text-anchor="middle" x="540" y="-276.08" font-family="Helvetica,sans-Serif" font-size="11.00">input_region_half_w</text>
+<text text-anchor="middle" x="540" y="-264.08" font-family="Helvetica,sans-Serif" font-size="11.00">#region_half_w</text>
+</g>
+<!-- input_region_half_w_3&#45;&gt;loop_5 -->
+<g id="edge5" class="edge">
+<title>input_region_half_w_3&#45;&gt;loop_5</title>
+<path fill="none" stroke="#2980b9" stroke-dasharray="5,2" d="M511.41,-249.94C462.06,-212.07 360.58,-134.19 302.12,-89.32"/>
+<polygon fill="#2980b9" stroke="#2980b9" points="304.23,-86.53 294.17,-83.22 299.97,-92.08 304.23,-86.53"/>
+<text text-anchor="middle" x="499" y="-166.71" font-family="Helvetica,sans-Serif" font-size="9.00" fill="#2980b9">region_half_w</text>
+</g>
+<!-- h0_init_4&#45;&gt;loop_5 -->
+<g id="edge2" class="edge">
+<title>h0_init_4&#45;&gt;loop_5</title>
+<path fill="none" stroke="#2c3e50" d="M129.09,-150.83C151.21,-134.46 185.22,-109.3 212.75,-88.93"/>
+<polygon fill="#2c3e50" stroke="#2c3e50" points="215.11,-91.54 221.07,-82.78 210.95,-85.92 215.11,-91.54"/>
+</g>
+</g>
+</svg>
+`;
+const ARCHIVE_COMPLETE="Complete (12m 20s)";
+const ARCHIVE_LABEL="SubScan";
+const ARCHIVE_HASH="8e3805cae155a45169ce209ab9c3c1d8f3cd7ffe24491d70f4d2ad5a331fd92b";
+const ARCHIVE_META={"batch_size":32,"checkpoint_interval":25,"epochs":100,"hidden_dim":256,"max_base_hw":0.2,"max_grad_norm":5.0,"min_base_hw":0.03,"min_lr_ratio":0.01,"noise_ramp_pct":0.6,"noise_x_end":0.18,"noise_x_start":0.02,"noise_y_end":0.08,"noise_y_start":0.01,"region_half_w":0.5,"save_dir":"training","subscan_blur_sigma":4.0,"subscan_lr":0.001,"subscan_n_glimpses":3,"subscan_n_scales":1,"subscan_patch_h":8,"subscan_patch_w":28,"triangle_height":0.3,"word_data":"../python/data/words"};
+const ARCHIVE_HARDWARE="Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz (16 threads, 19GB) | NVIDIA GeForce RTX 5060 Ti (15GB)";
+</script>
+<script>
+// State
+const epochs=[];
+const metricSeries={};  // name -> [values]
+const resourceSeries={cpu:[],gpu:[],ram:[],vram:[]};
+// Raw byte values for RAM/VRAM (for absolute-scale display when solo'd)
+const resourceRaw={ram_used:[],ram_total:[],vram_alloc:[],vram_total:[]};
+const COLORS=['#6c8cff','#f87171','#34d399','#fbbf24','#a78bfa','#fb923c','#67e8f9','#f472b6','#86efac','#fcd34d','#c4b5fd','#fdba74'];
+const RES_COLORS={cpu:'#6c8cff',ram:'#a78bfa',gpu:'#34d399',vram:'#fbbf24'};
+let metricNames=[];
+let startTime=null;
+let elapsedTimer=null;
+// Solo filter: {chartId: seriesName|null}. null = show all.
+const soloState={metricsChart:null,resourceChart:null};
+let _skipDraw=false;
+
+// --- Epoch processing (shared by live SSE and archive replay) ---
+function processEpoch(d){
+  epochs.push(d);
+  if(!startTime)startTime=Date.now()-(d.epoch*d.duration*1000);
+  const names=Object.keys(d.metrics||{});
+  names.forEach(n=>{
+    if(!metricSeries[n]){metricSeries[n]=[];metricNames.push(n)}
+    metricSeries[n].push(d.metrics[n]);
+  });
+  const r=d.resources||{};
+  resourceSeries.cpu.push(r.cpu!=null?r.cpu:null);
+  resourceSeries.gpu.push(r.gpu!=null?r.gpu:null);
+  resourceSeries.ram.push(r.ram_used!=null&&r.ram_total?r.ram_used/r.ram_total*100:null);
+  resourceSeries.vram.push(r.vram_alloc!=null&&r.vram_total?r.vram_alloc/r.vram_total*100:null);
+  resourceRaw.ram_used.push(r.ram_used||null);
+  resourceRaw.ram_total.push(r.ram_total||null);
+  resourceRaw.vram_alloc.push(r.vram_alloc||null);
+  resourceRaw.vram_total.push(r.vram_total||null);
+  updateHeader(d);
+  updateResources(r);
+  updateLog(d);
+  if(!_skipDraw){drawMetrics();drawResources()}
+  ensureLogHeaders();
+}
+function markComplete(msg){
+  document.getElementById('statusDot').classList.add('done');
+  document.getElementById('statusText').textContent=msg||'Complete';
+  if(elapsedTimer){clearInterval(elapsedTimer);elapsedTimer=null}
+}
+function showSvg(svg){
+  document.getElementById('svgCard').style.display='block';
+  const c=document.getElementById('svgContainer');
+  c.innerHTML=svg;
+  if(document.getElementById('svgToggle').classList.contains('open')){
+    c.style.maxHeight=c.scrollHeight+'px';
+  }
+}
+
+// --- Data source: live SSE or archive replay ---
+// ARCHIVE_DATA is injected by monitor.save_html(); if absent, connect live.
+if(typeof ARCHIVE_DATA!=='undefined'){
+  _skipDraw=true;
+  let archiveErr=null;
+  for(let i=0;i<ARCHIVE_DATA.length;i++){
+    try{processEpoch(ARCHIVE_DATA[i])}
+    catch(e){archiveErr=e;console.error('processEpoch failed at index '+i+':',e);break}
+  }
+  _skipDraw=false;
+  try{drawMetrics();drawResources()}catch(e){console.error('drawMetrics/drawResources:',e);archiveErr=archiveErr||e}
+  // Set elapsed from sum of epoch durations (wall-clock startTime is meaningless in archive)
+  const totalElapsed=ARCHIVE_DATA.reduce((s,d)=>s+(d.duration||0),0);
+  document.getElementById('elapsedDisplay').textContent=fmtDur(totalElapsed);
+  markComplete(archiveErr?'Archive error — see console':(ARCHIVE_COMPLETE||'Complete'));
+  if(typeof ARCHIVE_SVG==='string'){try{showSvg(ARCHIVE_SVG)}catch(e){console.error('showSvg:',e)}}
+  // Re-render after layout to ensure correct canvas dimensions
+  requestAnimationFrame(()=>{try{drawMetrics();drawResources()}catch(e){console.error('rAF redraw:',e)}});
+  if(archiveErr){
+    const d=document.createElement('div');
+    d.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#1a1d27;color:#f87171;padding:24px;border-radius:8px;border:1px solid #f87171;z-index:999;font-family:monospace;max-width:80%;white-space:pre-wrap';
+    d.textContent='Archive replay error at epoch '+(epochs.length+1)+':\n'+archiveErr.message+'\n\nCheck browser console (F12) for details.\nProcessed '+epochs.length+'/'+ARCHIVE_DATA.length+' epochs.';
+    document.body.appendChild(d);
+  }
+}else{
+  const es=new EventSource('/events');
+  es.addEventListener('epoch',e=>processEpoch(JSON.parse(e.data)));
+  es.addEventListener('complete',()=>markComplete());
+  if(!elapsedTimer)elapsedTimer=setInterval(updateElapsed,1000);
+  fetch('/graph.svg').then(r=>{if(r.ok)return r.text();throw 0}).then(showSvg).catch(()=>{});
+}
+
+// --- Label/Hash/Metadata ---
+function applyLabelHash(label,hash){
+  const h1=document.querySelector('.header h1');
+  if(!h1)return;
+  const short=hash?hash.substring(0,8):null;
+  if(label&&short)h1.innerHTML='floDl <span>'+label+' ['+short+']</span>';
+  else if(short)h1.innerHTML='floDl <span>['+short+']</span>';
+  if(label||short){
+    const t=label?(short?label+' ['+short+']':'['+short+']'):'floDl';
+    document.title='floDl'+(label?' \u2014 '+label:'')+(short?' ['+short+']':'');
+  }
+}
+function showMeta(meta){
+  if(!meta)return;
+  const card=document.getElementById('metaCard');
+  const pre=document.getElementById('metaPre');
+  if(!card||!pre)return;
+  try{pre.textContent=typeof meta==='string'?meta:JSON.stringify(meta,null,2)}
+  catch(e){pre.textContent=String(meta)}
+  card.style.display='block';
+}
+function showHardware(hw){
+  if(!hw)return;
+  const el=document.getElementById('hwInfo');
+  if(!el)return;
+  el.textContent=hw;
+  el.style.display='block';
+}
+// Apply from archive constants
+if(typeof ARCHIVE_LABEL!=='undefined'||typeof ARCHIVE_HASH!=='undefined'){
+  applyLabelHash(typeof ARCHIVE_LABEL!=='undefined'?ARCHIVE_LABEL:null,typeof ARCHIVE_HASH!=='undefined'?ARCHIVE_HASH:null);
+}
+if(typeof ARCHIVE_META!=='undefined'&&ARCHIVE_META!==null){showMeta(ARCHIVE_META)}
+if(typeof ARCHIVE_HARDWARE!=='undefined'){showHardware(ARCHIVE_HARDWARE)}
+// Apply from live server injection
+if(typeof LIVE_LABEL!=='undefined'||typeof LIVE_HASH!=='undefined'){
+  applyLabelHash(typeof LIVE_LABEL!=='undefined'?LIVE_LABEL:null,typeof LIVE_HASH!=='undefined'?LIVE_HASH:null);
+}
+if(typeof LIVE_HARDWARE!=='undefined'){showHardware(LIVE_HARDWARE)}
+
+// --- Header ---
+function updateHeader(d){
+  document.getElementById('epochNum').textContent=d.epoch+'/'+d.total;
+  document.getElementById('progressFill').style.width=(d.epoch/d.total*100)+'%';
+  document.getElementById('statusDot').classList.remove('done');
+  document.getElementById('statusText').textContent='Training';
+  if(d.eta!=null)document.getElementById('etaDisplay').textContent=fmtDur(d.eta);
+  updateElapsed();
+}
+
+function updateElapsed(){
+  if(!startTime)return;
+  const s=(Date.now()-startTime)/1000;
+  document.getElementById('elapsedDisplay').textContent=fmtDur(s);
+}
+
+// --- Resources ---
+function updateResources(r){
+  setBar('cpu',r.cpu);
+  setBar('gpu',r.gpu);
+  if(r.ram_used!=null&&r.ram_total){
+    const pct=r.ram_used/r.ram_total*100;
+    document.getElementById('ramBar').style.width=pct+'%';
+    document.getElementById('ramVal').textContent=fmtBytes(r.ram_used)+'/'+fmtBytes(r.ram_total);
+  }
+  if(r.vram_alloc!=null){
+    const total=r.vram_total||0;
+    const pct=total>0?Math.min(r.vram_alloc/total*100,100):0;
+    const spill=total>0&&r.vram_alloc>total?r.vram_alloc-total:0;
+    const bar=document.getElementById('vramBar');
+    bar.style.width=pct+'%';
+    bar.style.background=spill>0?'var(--red)':'var(--yellow)';
+    document.getElementById('vramVal').textContent=fmtBytes(r.vram_alloc)+' / '+fmtBytes(spill);
+  }
+}
+function setBar(id,val){
+  if(val==null)return;
+  document.getElementById(id+'Bar').style.width=val+'%';
+  document.getElementById(id+'Val').textContent=val.toFixed(0)+'%';
+}
+
+// --- Log table ---
+var logHeadersSet=false;
+function ensureLogHeaders(){
+  if(logHeadersSet||metricNames.length===0)return;
+  logHeadersSet=true;
+  const hdr=document.getElementById('logHeader');
+  metricNames.forEach(n=>{const th=document.createElement('th');th.textContent=n;hdr.appendChild(th)});
+  const thRes=document.createElement('th');thRes.textContent='Resources';hdr.appendChild(thRes);
+}
+function updateLog(d){
+  const body=document.getElementById('logBody');
+  const tr=document.createElement('tr');
+  let html='<td>'+d.epoch+'/'+d.total+'</td><td>'+fmtDur(d.duration)+'</td>';
+  metricNames.forEach(n=>{
+    const v=d.metrics&&d.metrics[n]!=null?fmtVal(d.metrics[n]):'—';
+    html+='<td>'+v+'</td>';
+  });
+  const r=d.resources||{};
+  let res=[];
+  if(r.cpu!=null)res.push('CPU:'+r.cpu.toFixed(0)+'%');
+  if(r.gpu!=null)res.push('GPU:'+r.gpu.toFixed(0)+'%');
+  if(r.vram_alloc!=null){
+    const spill=r.vram_total&&r.vram_alloc>r.vram_total?r.vram_alloc-r.vram_total:0;
+    res.push('VRAM:'+fmtBytes(r.vram_alloc)+'/'+fmtBytes(spill));
+  }
+  html+='<td style="color:var(--dim);font-size:11px">'+res.join(' ')+'</td>';
+  tr.innerHTML=html;
+  body.insertBefore(tr,body.firstChild);
+}
+
+// --- Charts ---
+function drawChart(canvasId,series,colors,labels,isPercent,yFmt,refLine){
+  const canvas=document.getElementById(canvasId);
+  const ctx=canvas.getContext('2d');
+  const dpr=window.devicePixelRatio||1;
+  const rect=canvas.getBoundingClientRect();
+  canvas.width=rect.width*dpr;canvas.height=rect.height*dpr;
+  ctx.scale(dpr,dpr);
+  const W=rect.width,H=rect.height;
+  const M={top:10,right:12,bottom:24,left:yFmt?70:48};
+  const pw=W-M.left-M.right,ph=H-M.top-M.bottom;
+  ctx.clearRect(0,0,W,H);
+
+  const allNames=Object.keys(series);
+  if(allNames.length===0)return;
+  const solo=soloState[canvasId]||null;
+  const names=solo?allNames.filter(n=>n===solo):allNames;
+  let maxEp=0,minV=Infinity,maxV=-Infinity;
+  // Scale axes to visible series only
+  names.forEach(n=>{
+    const vals=series[n];
+    maxEp=Math.max(maxEp,vals.length);
+    vals.forEach(v=>{if(v!=null){minV=Math.min(minV,v);maxV=Math.max(maxV,v)}});
+  });
+  // maxEp from all series (so X axis stays stable)
+  allNames.forEach(n=>{maxEp=Math.max(maxEp,series[n].length)});
+  if(!isFinite(minV)){minV=0;maxV=1}
+  if(minV===maxV){minV-=1;maxV+=1}
+  if(isPercent){minV=Math.min(0,minV);maxV=Math.max(100,maxV)}
+  if(refLine!=null){minV=Math.min(minV,refLine.value);maxV=Math.max(maxV,refLine.value)}
+  const pad=(maxV-minV)*0.05;minV-=pad;maxV+=pad;
+  const xScale=i=>M.left+(i/Math.max(1,maxEp-1))*pw;
+  const yScale=v=>M.top+ph-(v-minV)/(maxV-minV)*ph;
+
+  // Grid
+  const yLabel=yFmt||fmtVal;
+  ctx.strokeStyle='rgba(42,45,58,0.8)';ctx.lineWidth=1;
+  const yTicks=4;
+  for(let i=0;i<=yTicks;i++){
+    const v=minV+(maxV-minV)*i/yTicks;
+    const y=yScale(v);
+    ctx.beginPath();ctx.moveTo(M.left,y);ctx.lineTo(W-M.right,y);ctx.stroke();
+    ctx.fillStyle='#8b8fa3';ctx.font='10px -apple-system,sans-serif';ctx.textAlign='right';
+    ctx.fillText(yLabel(v),M.left-6,y+3);
+  }
+  // X labels
+  const xStep=Math.max(1,Math.floor(maxEp/8));
+  ctx.textAlign='center';
+  for(let i=0;i<maxEp;i+=xStep){
+    ctx.fillStyle='#8b8fa3';ctx.font='10px -apple-system,sans-serif';
+    ctx.fillText(''+(i+1),xScale(i),H-M.bottom+14);
+  }
+
+  // Reference line (e.g., physical VRAM limit)
+  if(refLine!=null){
+    const ry=yScale(refLine.value);
+    if(ry>=M.top&&ry<=M.top+ph){
+      ctx.save();
+      ctx.strokeStyle=refLine.color||'#8b8fa3';
+      ctx.lineWidth=1.5;
+      if(refLine.dotted)ctx.setLineDash([6,4]);
+      ctx.beginPath();ctx.moveTo(M.left,ry);ctx.lineTo(W-M.right,ry);ctx.stroke();
+      ctx.setLineDash([]);
+      if(refLine.label){
+        ctx.fillStyle=refLine.color||'#8b8fa3';
+        ctx.font='9px -apple-system,sans-serif';
+        ctx.textAlign='right';
+        ctx.fillText(refLine.label,W-M.right,ry-4);
+      }
+      ctx.restore();
+    }
+  }
+
+  // Lines (filtered by solo state — names already filtered above)
+  allNames.forEach((n,si)=>{
+    if(solo&&solo!==n)return;
+    const vals=series[n];
+    const color=colors[si%colors.length];
+    ctx.strokeStyle=color;ctx.lineWidth=solo?3:2;ctx.beginPath();
+    let started=false;
+    vals.forEach((v,i)=>{
+      if(v==null)return;
+      const x=xScale(i),y=yScale(v);
+      if(!started){ctx.moveTo(x,y);started=true}else{ctx.lineTo(x,y)}
+    });
+    ctx.stroke();
+    // Dots for last point
+    if(vals.length>0){
+      const last=vals[vals.length-1];
+      if(last!=null){
+        ctx.fillStyle=color;ctx.beginPath();
+        ctx.arc(xScale(vals.length-1),yScale(last),3,0,Math.PI*2);ctx.fill();
+      }
+    }
+  });
+
+  // Store layout for tooltip
+  canvas._layout={xScale,yScale,maxEp,minV,maxV,series,names:allNames,colors,solo,yFmt:yLabel};
+}
+
+function drawMetrics(){
+  drawChart('metricsChart',metricSeries,COLORS,metricNames,false);
+  updateLegend('metricsLegend',metricNames,COLORS,'metricsChart',drawMetrics);
+}
+function drawResources(){
+  const resNames=['cpu','gpu','ram','vram'];
+  const resLabels={cpu:'CPU',gpu:'GPU',ram:'RAM',vram:'VRAM'};
+  const resColors=[RES_COLORS.cpu,RES_COLORS.gpu,RES_COLORS.ram,RES_COLORS.vram];
+  const solo=soloState['resourceChart'];
+  const lastTotal=resourceRaw.vram_total.length>0?resourceRaw.vram_total[resourceRaw.vram_total.length-1]:null;
+  if(solo==='ram'){
+    const byteSeries={};
+    byteSeries['ram']=resourceRaw.ram_used;
+    drawChart('resourceChart',byteSeries,[RES_COLORS.ram],['ram'],false,fmtBytes);
+  }else if(solo==='vram'){
+    // Solo VRAM: byte scale with solid physical-limit line
+    const byteSeries={};
+    byteSeries['vram']=resourceRaw.vram_alloc;
+    const vramRef=lastTotal?{value:lastTotal,dotted:false,color:'rgba(248,113,113,0.7)',label:'Physical VRAM'}:null;
+    drawChart('resourceChart',byteSeries,[RES_COLORS.vram],['vram'],false,fmtBytes,vramRef);
+  }else if(solo==='cpu'||solo==='gpu'){
+    // Solo percentage metric with % suffix on axis
+    const pctSeries={};
+    pctSeries[solo]=resourceSeries[solo];
+    drawChart('resourceChart',pctSeries,
+      [solo==='cpu'?RES_COLORS.cpu:RES_COLORS.gpu],
+      [solo],true,v=>v.toFixed(0)+'%');
+  }else{
+    // Combined view: dotted VRAM limit at 100%
+    const vramRef=lastTotal?{value:100,dotted:true,color:'rgba(248,113,113,0.4)',label:'VRAM limit'}:null;
+    drawChart('resourceChart',resourceSeries,resColors,resNames,true,null,vramRef);
+  }
+  updateLegend('resourceLegend',resNames,resColors,'resourceChart',drawResources,resLabels);
+}
+
+function updateLegend(id,names,colors,chartId,redrawFn,labels){
+  const el=document.getElementById(id);
+  // Rebuild if count changed
+  if(el.children.length!==names.length){
+    el.innerHTML='';
+    names.forEach((n,i)=>{
+      const item=document.createElement('div');item.className='legend-item';
+      item.dataset.name=n;
+      const dot=document.createElement('div');dot.className='legend-dot';
+      dot.style.background=colors[i%colors.length];
+      const label=(labels&&labels[n])||n;
+      item.appendChild(dot);item.appendChild(document.createTextNode(label));
+      item.addEventListener('click',()=>{
+        const cur=soloState[chartId];
+        soloState[chartId]=(cur===n)?null:n;
+        redrawFn();
+      });
+      el.appendChild(item);
+    });
+  }
+  // Update visual state
+  const solo=soloState[chartId];
+  Array.from(el.children).forEach(item=>{
+    const n=item.dataset.name;
+    item.classList.toggle('solo',solo===n);
+    item.classList.toggle('dimmed',solo!==null&&solo!==n);
+  });
+}
+
+// --- Tooltip ---
+['metricsChart','resourceChart'].forEach(id=>{
+  const canvas=document.getElementById(id);
+  canvas.addEventListener('mousemove',e=>{
+    const L=canvas._layout;if(!L)return;
+    const rect=canvas.getBoundingClientRect();
+    const mx=e.clientX-rect.left;
+    let best=Infinity,bestI=-1;
+    for(let i=0;i<L.maxEp;i++){
+      const d=Math.abs(L.xScale(i)-mx);
+      if(d<best){best=d;bestI=i}
+    }
+    if(best>30){tooltip.style.display='none';return}
+    let html='<b>Epoch '+(bestI+1)+'</b>';
+    const tipFmt=L.yFmt||fmtVal;
+    L.names.forEach((n,si)=>{
+      if(L.solo&&L.solo!==n)return;
+      const v=L.series[n][bestI];
+      if(v!=null){
+        const c=L.colors[si%L.colors.length];
+        html+='<br><span style="color:'+c+'">&#9632;</span> '+n+': '+tipFmt(v);
+      }
+    });
+    const tip=document.getElementById('tooltip');
+    tip.innerHTML=html;tip.style.display='block';
+    let tx=e.clientX+14,ty=e.clientY-10;
+    const tw=tip.offsetWidth,th=tip.offsetHeight;
+    if(tx+tw>window.innerWidth)tx=e.clientX-tw-14;
+    if(ty+th>window.innerHeight)ty=e.clientY-th-10;
+    tip.style.left=tx+'px';tip.style.top=ty+'px';
+  });
+  canvas.addEventListener('mouseleave',()=>{document.getElementById('tooltip').style.display='none'});
+});
+
+// --- SVG toggle ---
+function toggleSvg(){
+  const t=document.getElementById('svgToggle');
+  const c=document.getElementById('svgContainer');
+  const opening=!t.classList.contains('open');
+  t.classList.toggle('open');
+  if(opening){c.style.maxHeight=c.scrollHeight+'px'}
+  else{c.style.maxHeight='0'}
+}
+
+// --- Formatters ---
+function fmtDur(s){
+  if(s<1)return Math.round(s*1000)+'ms';
+  if(s<60){const w=Math.floor(s);const f=Math.floor((s-w)*10);return f>0?w+'.'+f+'s':w+'s'}
+  const h=Math.floor(s/3600),m=Math.floor(s%3600/60),sec=Math.floor(s%60);
+  if(h>0)return h+'h '+String(m).padStart(2,'0')+'m';
+  return m+'m '+String(sec).padStart(2,'0')+'s';
+}
+function fmtBytes(b){
+  const GB=1073741824,MB=1048576;
+  if(b>=GB)return(b/GB).toFixed(1)+' GB';
+  if(b>=MB)return Math.round(b/MB)+' MB';
+  return Math.round(b/1024)+' KB';
+}
+function fmtVal(v){
+  if(Math.abs(v)<0.001&&v!==0)return v.toExponential(2);
+  if(Math.abs(v)>=1000)return v.toFixed(1);
+  if(Math.abs(v)>=1)return v.toFixed(4);
+  return v.toFixed(4);
+}
+
+// --- Resize ---
+window.addEventListener('resize',()=>{drawMetrics();drawResources()});
+</script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+# fbrl-word subscan training (step 2) — REINFORCE + confidence hybrid
+# epochs=100  batch=32  lr=0.0010  max_attempts=100  explore_sigma=0.050
+# noise_x=0.020→0.180  noise_y=0.010→0.080  ramp=60%
+# confidence_threshold=0.80  confidence_weight=1.000→0.000 over 40%
+epoch   1  attempts=100.0(max 0)  success=0.0%  reinf=0.5682  conf=0.0641  mean_conf=0.000  noise=(0.020,0.010)  conf_w=1.000  lr=0.001000  [932.404312498s]  ETA 92522.209466457s
+epoch   2  attempts=100.0(max 0)  success=0.0%  reinf=0.5629  conf=0.0617  mean_conf=0.000  noise=(0.023,0.011)  conf_w=0.975  lr=0.001000  [956.173998895s]  ETA 92761.866279602s

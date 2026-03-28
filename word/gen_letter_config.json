@@ -1,0 +1,7 @@
+{
+  "fonts": "/workspace/fbrl/fonts/*.ttf",
+  "charset": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+  "min_letters": 1,
+  "max_letters": 3,
+  "samples": 50
+}

@@ -1,2 +1,0 @@
-epoch,letter_ce,case_ce,letter_acc,case_acc,recon_mse,recode,content,guide,void,diversity,total,hit_rate,lr
-1,2.85254905,0.71147561,0.11293707,0.51389862,0.02550506,0.02760344,0.57033327,-1.26653092,-1.49154334,0.03540456,1.17963011,0.06830669,0.00100000

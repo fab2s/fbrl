@@ -122,12 +122,16 @@ rebuild-word: image
 	@touch ../rdl/flodl-sys/shim.cpp 2>/dev/null || true
 	$(RUN_WORD) cargo build --release --features $(FEATURES)
 
-# Train SubScan (Step 2: REINFORCE + frozen letter oracle)
-# Usage: make train-subscan WORD_DATA=../python/data/words CHECKPOINT=../letter/runs/v1_relative/model_final.fdl.gz
-#        make train-subscan WORD_DATA=... CHECKPOINT=... EPOCHS=100 MONITOR=3000
+# Train SubScan (Step 2: triangle MSE — independent, no letter model)
+# Usage: make train-subscan WORD_DATA=../python/data/words EPOCHS=100 MONITOR=3000
 SUBSCAN_SAVE ?= training
 train-subscan: rebuild-word
-	$(RUN_WORD) cargo run --release --features $(FEATURES) -- train-subscan --word-data $(WORD_DATA) $(if $(CHECKPOINT),--checkpoint $(CHECKPOINT)) $(if $(SUBSCAN_SAVE),--save-dir $(SUBSCAN_SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(MONITOR),--monitor $(MONITOR))
+	$(RUN_WORD) cargo run --release --features $(FEATURES) -- train-subscan --word-data $(WORD_DATA) $(if $(SUBSCAN_SAVE),--save-dir $(SUBSCAN_SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(LR),--subscan-lr $(LR)) $(if $(MONITOR),--monitor $(MONITOR))
+
+# Eval SubScan + LetterModel composition
+# Usage: make eval-subscan WORD_DATA=../python/data/words SUBSCAN_CKPT=training/subscan_final.fdl.gz LETTER_CKPT=../letter/runs/v1_relative/model_final.fdl.gz
+eval-subscan: rebuild-word
+	$(RUN_WORD) cargo run --release --features $(FEATURES) -- eval-subscan --word-data $(WORD_DATA) --subscan $(SUBSCAN_CKPT) --letter $(LETTER_CKPT) $(if $(NOISE_X),--noise-x $(NOISE_X)) $(if $(NOISE_Y),--noise-y $(NOISE_Y)) $(if $(EVAL_SAVE),--save-dir $(EVAL_SAVE))
 
 # Train word model (Step 3, future)
 # Usage: make train-word DATA=../python/data/words SAVE=runs/v1 MONITOR=3000
