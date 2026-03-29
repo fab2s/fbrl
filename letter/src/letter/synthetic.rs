@@ -20,6 +20,7 @@ pub fn new_synthetic_dataset(n: usize) -> Result<LetterDataset> {
             letter_idx,
             case_label,
             partner_clean: img,
+            font: String::new(),
         });
     }
     Ok(LetterDataset { samples, has_partners: true })

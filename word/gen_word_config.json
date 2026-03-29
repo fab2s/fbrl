@@ -1,0 +1,11 @@
+{
+  "fonts": "/workspace/fbrl/fonts/*.ttf",
+  "charset": "abcdefghijklmnopqrstuvwxyz",
+  "image_height": 128,
+  "image_width": 256,
+  "min_letters": 4,
+  "max_letters": 4,
+  "samples": 500,
+  "fill_ratio": 0.80,
+  "seed": 99999
+}

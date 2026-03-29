@@ -10,7 +10,8 @@ RUN_WORD = $(COMPOSE) run --rm $(if $(MONITOR),--service-ports) -w /workspace/fb
 FEATURES ?= cuda
 
 .PHONY: image build test test-release check clippy doc shell train-letter clean kill \
-        build-word check-word test-word smoke-word rebuild-word train-subscan train-word
+        build-word check-word test-word smoke-word rebuild-word train-subscan train-word \
+        eval-letter-direct
 
 # Build the Docker image (skips if already exists)
 image:
@@ -56,10 +57,17 @@ rebuild: image
 #        make train-letter DATA=path/to/data EPOCHS=100 SAVE=runs/v1 MONITOR=3000
 SAVE ?= training
 train-letter: rebuild
-	$(RUN) cargo run --release --features $(FEATURES) -- $(if $(DATA),--data $(DATA)) $(if $(SYNTHETIC),--synthetic $(SYNTHETIC)) $(if $(SAVE),--save $(SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(LR),--lr $(LR)) $(if $(MONITOR),--monitor $(MONITOR))
+	$(RUN) cargo run --release --features $(FEATURES) -- $(if $(GEN),--generate $(GEN)) $(if $(GEN_SAVE),--gen-save $(GEN_SAVE)) $(if $(DATA),--data $(DATA)) $(if $(SYNTHETIC),--synthetic $(SYNTHETIC)) $(if $(SAVE),--save $(SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(LR),--lr $(LR)) $(if $(MONITOR),--monitor $(MONITOR)) $(if $(LEASH),--leash-weight $(LEASH)) $(if $(LEASH_R),--leash-radius $(LEASH_R))
+
+# Generate test data (no training)
+# Usage: make gen-test GEN_CFG=gen_test_config.json GEN_OUT=runs/v2_gen/test_data
+gen-test: rebuild
+	$(RUN) cargo run --release --features $(FEATURES) -- --generate $(GEN_CFG) --gen-save $(GEN_OUT) --epochs 0
+GEN_CFG ?= gen_test_config.json
+GEN_OUT ?= test_data
 
 # Evaluate trained model
-# Usage: make eval-letter RUN=runs/v1 TEST=../python/data/letter_test
+# Usage: make eval-letter RUN_DIR=runs/v2_gen TEST=runs/v2_gen/test_data
 eval-letter: rebuild
 	$(RUN) cargo run --release --features $(FEATURES) -- --eval $(RUN_DIR) --test-data $(TEST) $(if $(EVAL_SAVE),--save $(EVAL_SAVE))
 RUN_DIR ?= runs/v1
@@ -132,6 +140,11 @@ train-subscan: rebuild-word
 # Usage: make eval-subscan WORD_DATA=../python/data/words SUBSCAN_CKPT=training/subscan_final.fdl.gz LETTER_CKPT=../letter/runs/v1_relative/model_final.fdl.gz
 eval-subscan: rebuild-word
 	$(RUN_WORD) cargo run --release --features $(FEATURES) -- eval-subscan --word-data $(WORD_DATA) --subscan $(SUBSCAN_CKPT) --letter $(LETTER_CKPT) $(if $(NOISE_X),--noise-x $(NOISE_X)) $(if $(NOISE_Y),--noise-y $(NOISE_Y)) $(if $(EVAL_SAVE),--save-dir $(EVAL_SAVE))
+
+# Eval letter model with GT origins (no SubScan — clean baseline)
+# Usage: make eval-letter-direct WORD_DATA=test_words LETTER_CKPT=../letter/runs/v2_gen/model_final.fdl.gz
+eval-letter-direct: rebuild-word
+	$(RUN_WORD) cargo run --release --features $(FEATURES) -- eval-letter-direct --word-data $(WORD_DATA) --letter $(LETTER_CKPT) $(if $(EVAL_SAVE),--save-dir $(EVAL_SAVE)) $(if $(BATCH),--batch-size $(BATCH))
 
 # Train word model (Step 3, future)
 # Usage: make train-word DATA=../python/data/words SAVE=runs/v1 MONITOR=3000

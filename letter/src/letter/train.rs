@@ -15,7 +15,7 @@ use flodl::CpuWorker;
 use serde::{Serialize, Deserialize};
 
 use super::data::{LetterDataset, LetterLoader};
-use super::loss::{attention_guide_loss, build_void_grid, fixation_diversity_loss, fixation_hit_rate, void_repulsion_with_grid};
+use super::loss::{attention_guide_loss, build_void_grid, fixation_diversity_loss, fixation_hit_rate, leash_loss, void_repulsion_with_grid};
 use super::model::LetterModel;
 
 /// Hyperparameters for letter model training.
@@ -30,6 +30,12 @@ pub struct LetterConfig {
     pub n_scales: usize,
     pub latent_dim: i64,
 
+    // Image dimensions (set from dataset during training, read back during eval).
+    #[serde(default = "default_128")]
+    pub img_h: i64,
+    #[serde(default = "default_128")]
+    pub img_w: i64,
+
     // Training.
     pub batch_size: usize,
     pub epochs: usize,
@@ -41,7 +47,8 @@ pub struct LetterConfig {
     pub origin_noise_x: f64,
     pub origin_noise_y: f64,
     pub noise_start: f64,
-    pub noise_ramp_epochs: usize,
+    /// Fraction of total epochs over which noise ramps from noise_start to 1.0.
+    pub noise_ramp_ratio: f64,
 
     // Loss weights.
     pub scan_guide_weight: f64,
@@ -56,6 +63,18 @@ pub struct LetterConfig {
     pub diversity_sigma: f64,
     pub scan_vy: f64,
     pub read_vy: f64,
+
+    // Leash: keeps read fixations near origin.
+    #[serde(default)]
+    pub leash_weight: f64,
+    #[serde(default = "default_leash_radius")]
+    pub leash_radius: f64,
+    /// Fraction of leash_weight applied at epoch 0 (ramps to 1.0 over leash_ramp_ratio).
+    #[serde(default = "default_leash_start")]
+    pub leash_start: f64,
+    /// Fraction of total epochs over which leash ramps from leash_start to 1.0.
+    #[serde(default = "default_leash_ramp")]
+    pub leash_ramp_ratio: f64,
 
     // Checkpointing.
     #[serde(default)]
@@ -79,6 +98,9 @@ impl Default for LetterConfig {
             n_scales: 1,
             latent_dim: 256,
 
+            img_h: 128,
+            img_w: 128,
+
             batch_size: 52,
             epochs: 100,
             lr: 0.001,
@@ -88,7 +110,7 @@ impl Default for LetterConfig {
             origin_noise_x: 0.3,
             origin_noise_y: 0.15,
             noise_start: 0.0,
-            noise_ramp_epochs: 75,
+            noise_ramp_ratio: 0.5,
 
             scan_guide_weight: 8.0,
             read_guide_weight: 0.0,
@@ -103,6 +125,11 @@ impl Default for LetterConfig {
             scan_vy: 0.3,
             read_vy: 1.0,
 
+            leash_weight: 0.0,
+            leash_radius: 0.5,
+            leash_start: 0.3,
+            leash_ramp_ratio: 0.3,
+
             save_dir: "training".into(),
             checkpoint_interval: 50,
 
@@ -111,6 +138,10 @@ impl Default for LetterConfig {
     }
 }
 
+fn default_128() -> i64 { 128 }
+fn default_leash_radius() -> f64 { 0.5 }
+fn default_leash_start() -> f64 { 0.3 }
+fn default_leash_ramp() -> f64 { 0.3 }
 fn default_checkpoint_interval() -> usize { 50 }
 
 /// Per-epoch averaged metrics.
@@ -139,9 +170,12 @@ pub fn train_letter(
     ds: &LetterDataset,
     on_epoch: Option<&dyn Fn(&EpochStats)>,
 ) -> Result<()> {
+    let img_shape = ds.samples[0].image.shape();
+    let (img_h, img_w) = (img_shape[1], img_shape[2]);
+
     let model = LetterModel::new(
         cfg.n_classes, cfg.n_scan, cfg.n_read, cfg.patch_size, cfg.scan_patch_w,
-        cfg.n_scales, cfg.latent_dim,
+        cfg.n_scales, cfg.latent_dim, img_h, img_w,
     )?;
 
     // Move model to CUDA if available.
@@ -231,15 +265,18 @@ pub fn train_letter(
         let epoch_start = Instant::now();
         let mut n_batches = 0usize;
 
-        // Noise curriculum: ramp from noise_start to 1.0 over noise_ramp_epochs.
-        let noise_progress = if cfg.noise_ramp_epochs > 0 {
-            let t = (epoch as f64 / cfg.noise_ramp_epochs as f64).min(1.0);
+        // Noise curriculum: ramp from noise_start to 1.0 over noise_ramp_ratio of total epochs.
+        let noise_progress = if cfg.noise_ramp_ratio > 0.0 {
+            let ramp_epochs = (cfg.noise_ramp_ratio * cfg.epochs as f64).max(1.0);
+            let t = (epoch as f64 / ramp_epochs).min(1.0);
             cfg.noise_start + (1.0 - cfg.noise_start) * t
         } else {
             1.0
         };
         let cur_noise_x = cfg.origin_noise_x * noise_progress;
         let cur_noise_y = cfg.origin_noise_y * noise_progress;
+
+        let cur_leash_weight = cfg.leash_weight;
 
         // Update LR at start of epoch.
         let current_lr = scheduler.lr(epoch);
@@ -363,6 +400,13 @@ pub fn train_letter(
             )?;
             let div_loss = scan_div.add(&read_div)?;
 
+            // Leash: keep reads near origin.
+            let leash = if cur_leash_weight > 0.0 {
+                leash_loss(&result.read_locations, &origin, cfg.leash_radius)?
+            } else {
+                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
+            };
+
             // Total loss.
             let total = letter_loss.add(&case_loss)?;
             let total = total.add(&recon_loss.mul_scalar(cfg.recon_weight)?)?;
@@ -373,6 +417,7 @@ pub fn train_letter(
             let total = total.add(&scan_void.mul_scalar(cfg.scan_void_weight)?)?;
             let total = total.add(&read_void.mul_scalar(cfg.void_weight)?)?;
             let total = total.add(&div_loss.mul_scalar(cfg.diversity_weight)?)?;
+            let total = total.add(&leash.mul_scalar(cur_leash_weight)?)?;
 
             optimizer.zero_grad();
             total.backward()?;
@@ -403,6 +448,7 @@ pub fn train_letter(
                 scan_void.item()? * cfg.scan_void_weight
                 + read_void.item()? * cfg.void_weight);
             model.graph.record_scalar("diversity", div_loss.item()?);
+            model.graph.record_scalar("leash", leash.item()?);
             model.graph.record_scalar("total", total.item()?);
             model.graph.record_scalar("hit_rate", hr);
             model.graph.record_scalar("lr", current_lr);
@@ -513,10 +559,14 @@ pub fn train_letter(
         }
 
         // Save manifest with config + final results.
+        // Inject actual image dimensions (cfg may have defaults).
+        let mut config_json = serde_json::to_value(cfg).unwrap_or_default();
+        config_json["img_h"] = serde_json::json!(img_h);
+        config_json["img_w"] = serde_json::json!(img_w);
         let manifest = serde_json::json!({
             "framework": "flodl",
             "model": "letter",
-            "config": cfg,
+            "config": config_json,
             "results": {
                 "letter_acc": model.graph.trend("letter_acc").latest(),
                 "case_acc": model.graph.trend("case_acc").latest(),

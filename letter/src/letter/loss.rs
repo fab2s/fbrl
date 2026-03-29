@@ -217,6 +217,41 @@ pub fn build_void_grid(
     base_grid.unsqueeze(0)
 }
 
+/// Leash loss: gentle horizontal proximity bias for read fixations.
+///
+/// X-axis only — prevents reads from drifting onto neighbor letters.
+/// Y-axis is free (vertical exploration is fine, void repulsion handles it).
+/// Zero inside radius, gentle quadratic beyond.
+///
+/// ```text
+/// cost(dx) = 0                        when |dx| ≤ radius
+/// cost(dx) = (|dx| - radius)²         when |dx| > radius
+/// ```
+///
+/// locations: read fixation positions (absolute).
+/// origin: [B, 2] letter origin.
+/// radius: free zone in normalized x-coords (0.15 ≈ 60% letter half-width).
+pub fn leash_loss(
+    locations: &[Variable],
+    origin: &Variable,
+    radius: f64,
+) -> Result<Variable> {
+    if locations.is_empty() {
+        let device = origin.data().device();
+        let z = Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?;
+        return Ok(Variable::new(z, false));
+    }
+
+    // Stack all locations: [B, T, 2]
+    let stacked = Variable::stack(locations, 1)?;
+    // X offset from origin: [B, T]
+    let offset_x = stacked.select(2, 0)?.sub(&origin.select(1, 0)?.unsqueeze(1)?)?;
+    // Excess beyond radius (zero inside): [B, T]
+    let excess = offset_x.abs()?.add_scalar(-radius)?.relu()?;
+    // Gentle quadratic.
+    excess.pow_scalar(2.0)?.mean()
+}
+
 /// Reconstruction loss: MSE between reconstructed and target.
 pub fn recode_loss(recon: &Variable, target: &Variable) -> Result<Variable> {
     mse_loss(recon, target)

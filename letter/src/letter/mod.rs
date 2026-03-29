@@ -14,6 +14,7 @@
 mod data;
 mod decoder;
 pub mod eval;
+pub mod font_gen;
 mod glimpse;
 mod loss;
 mod model;
@@ -23,6 +24,7 @@ mod train;
 
 pub use data::*;
 pub use decoder::*;
+pub use font_gen::{GenConfig, generate_letter_dataset, save_letter_dataset};
 pub use glimpse::*;
 pub use loss::*;
 pub use model::*;

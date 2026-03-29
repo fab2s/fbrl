@@ -381,6 +381,9 @@ pub struct CombinedStep {
     step_idx: RefCell<usize>,
     content_head: Option<Linear>,
     content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
+    /// Training mode flag. When true, loc_head outputs absolute positions (old behavior).
+    /// When false (eval), loc_head outputs offsets translated by origin.
+    training: RefCell<bool>,
 }
 
 impl CombinedStep {
@@ -416,6 +419,7 @@ impl CombinedStep {
             step_idx: RefCell::new(0),
             content_head,
             content_logits,
+            training: RefCell::new(true),
         })
     }
 
@@ -460,18 +464,26 @@ impl CombinedStep {
                 buf.borrow_mut().push(logit);
         }
 
-        // Location update — all positions are absolute (same as old code).
-        // Origin translation is isolated: only location_fc sees the difference.
+        // Location update.
+        // Training: absolute positions (stable learning, origin only in location_fc).
+        // Inference: offset + origin (geometric translation for composition).
+        let is_training = *self.training.borrow();
         let new_loc = if is_scan {
-            // Scan: learnable x, free y from loc_head.
             let raw = self.controller.loc_head.forward(&new_h)?.tanh()?;
             let y = raw.select(1, 1)?.unsqueeze(1)?;
             let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
             let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?;
-            x.cat(&y, 1)?
+            let pos = x.cat(&y, 1)?;
+            if is_training { pos } else {
+                let origin_ref = self.origin.borrow();
+                pos.add(origin_ref.as_ref().unwrap())?
+            }
         } else {
-            // Read: free (x, y).
-            self.controller.loc_head.forward(&new_h)?.tanh()?
+            let pos = self.controller.loc_head.forward(&new_h)?.tanh()?;
+            if is_training { pos } else {
+                let origin_ref = self.origin.borrow();
+                pos.add(origin_ref.as_ref().unwrap())?
+            }
         };
 
         *self.location.borrow_mut() = Some(new_loc);
@@ -518,6 +530,10 @@ impl Module for CombinedStep {
             params.extend(head.parameters());
         }
         params
+    }
+
+    fn set_training(&self, training: bool) {
+        *self.training.borrow_mut() = training;
     }
 
     fn sub_modules(&self) -> Vec<Rc<dyn Module>> {

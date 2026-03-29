@@ -207,6 +207,7 @@ pub fn generate_letter_dataset(cfg: &GenConfig) -> Result<GeneratedLetterDataset
             letter_idx,
             case_label,
             partner_clean: image, // dummy — train with recode_weight=0
+            font: lf.name.clone(),
         });
         pixel_buffers.push(pixels);
     }

@@ -14,6 +14,7 @@ pub struct LetterSample {
     pub letter_idx: i64,         // 0-25 (A=0, B=1, ...)
     pub case_label: f32,         // 0.0=upper, 1.0=lower
     pub partner_clean: Tensor,   // [1, H, W] opposite-case clean image (for recode loss)
+    pub font: String,            // font name (for eval/atlas)
 }
 
 /// Stacked mini-batch ready for training.
@@ -120,6 +121,7 @@ pub fn load_letter_dataset(dir: &str) -> Result<LetterDataset> {
             letter_idx: raw.letter_idx,
             case_label: raw.case_label,
             partner_clean,
+            font: raw.font,
         });
     }
 

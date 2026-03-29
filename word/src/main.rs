@@ -3,7 +3,8 @@
 use fbrl_word::word::{
     load_word_dataset,
     SubScanTrainConfig, SubScanEpochStats, train_subscan,
-    SubScanEvalConfig, eval_subscan_composition,
+    SubScanEvalConfig, eval_subscan_composition, load_letter_config_from_manifest,
+    DirectEvalConfig, eval_letter_direct, load_letter_config_for_direct,
     GenConfig, generate_word_dataset, generate_letter_dataset, save_dataset,
 };
 
@@ -24,6 +25,12 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        "eval-letter-direct" => {
+            if let Err(e) = run_eval_letter_direct(&args[2..]) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         "generate" => {
             if let Err(e) = run_generate(&args[2..]) {
                 eprintln!("error: {e}");
@@ -34,9 +41,10 @@ fn main() {
             eprintln!("Usage: fbrl-word <command> [options]");
             eprintln!();
             eprintln!("Commands:");
-            eprintln!("  train-subscan  Step 2: triangle SubScan centering");
-            eprintln!("  eval-subscan   Composition eval: SubScan + LetterModel");
-            eprintln!("  generate       Generate dataset from fonts");
+            eprintln!("  train-subscan       Step 2: triangle SubScan centering");
+            eprintln!("  eval-subscan        Composition eval: SubScan + LetterModel");
+            eprintln!("  eval-letter-direct  Direct letter eval with GT origins (no SubScan)");
+            eprintln!("  generate            Generate dataset from fonts");
             eprintln!();
             eprintln!("train-subscan options:");
             eprintln!("  --word-data <path>      Word dataset directory");
@@ -52,6 +60,11 @@ fn main() {
             eprintln!("  --letter <path>         Letter model checkpoint");
             eprintln!("  --noise-x <f>           Input noise x (default: 0.10)");
             eprintln!("  --noise-y <f>           Input noise y (default: 0.05)");
+            eprintln!("  --save-dir <path>       Output directory for eval.json");
+            eprintln!();
+            eprintln!("eval-letter-direct options:");
+            eprintln!("  --word-data <path>      Word dataset directory");
+            eprintln!("  --letter <path>         Letter model checkpoint");
             eprintln!("  --save-dir <path>       Output directory for eval.json");
             std::process::exit(1);
         }
@@ -147,6 +160,9 @@ fn run_eval_subscan(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("--letter is required".into());
     }
 
+    // Auto-load letter architecture from manifest.json next to checkpoint.
+    load_letter_config_from_manifest(&mut cfg);
+
     eprintln!("=== Composition Eval: SubScan + LetterModel ===");
     eprintln!("Word data:  {}", cfg.word_data);
     eprintln!("SubScan:    {}", cfg.subscan_checkpoint);
@@ -167,6 +183,66 @@ fn run_eval_subscan(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!();
     eprintln!("  TOTAL: {}/{} = {:.1}%  mean_err_x={:.4}",
         results.correct, results.total, results.accuracy * 100.0, results.mean_err_x);
+
+    Ok(())
+}
+
+fn run_eval_letter_direct(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut cfg = DirectEvalConfig::default();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--word-data" => { i += 1; cfg.word_data = args[i].clone(); }
+            "--letter" => { i += 1; cfg.letter_checkpoint = args[i].clone(); }
+            "--save-dir" => { i += 1; cfg.save_dir = args[i].clone(); }
+            "--batch-size" => { i += 1; cfg.batch_size = args[i].parse()?; }
+            other => {
+                return Err(format!("unknown option: {other}").into());
+            }
+        }
+        i += 1;
+    }
+
+    if cfg.word_data.is_empty() {
+        return Err("--word-data is required".into());
+    }
+    if cfg.letter_checkpoint.is_empty() {
+        return Err("--letter is required".into());
+    }
+
+    load_letter_config_for_direct(&mut cfg);
+
+    eprintln!("=== Direct Letter Eval (GT origins, no SubScan) ===");
+    eprintln!("Word data:  {}", cfg.word_data);
+    eprintln!("Letter:     {}", cfg.letter_checkpoint);
+    eprintln!();
+
+    let word_ds = load_word_dataset(&cfg.word_data)?;
+    let results = eval_letter_direct(&cfg, &word_ds)?;
+
+    eprintln!();
+    eprintln!("=== Results ===");
+    for p in &results.positions {
+        let n = p.total.max(1) as f64;
+        let acc = p.correct as f64 / n * 100.0;
+        eprintln!("  pos {} (x={:+.2}): {}/{} = {:.1}%  | pred matches: {}",
+            p.position, p.gt_center, p.correct, p.total, acc,
+            (0..4).map(|op| format!("pos{}={:.1}%", op, p.matched_other_pos[op] as f64 / n * 100.0))
+                .collect::<Vec<_>>().join(" "));
+    }
+    eprintln!();
+    eprintln!("  TOTAL: {}/{} = {:.1}%",
+        results.correct, results.total, results.accuracy * 100.0);
+
+    // Top predicted letters.
+    let mut pred_sorted: Vec<(usize, usize)> = results.pred_histogram.iter()
+        .enumerate().map(|(i, &c)| (i, c)).collect();
+    pred_sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    let top5: String = pred_sorted.iter().take(5).map(|(i, c)| {
+        format!("{}={}", (b'A' + *i as u8) as char, c)
+    }).collect::<Vec<_>>().join(" ");
+    eprintln!("  Top predictions: {}", top5);
 
     Ok(())
 }

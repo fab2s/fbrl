@@ -87,12 +87,14 @@ impl LetterModel {
         scan_patch_w: i64,
         n_scales: usize,
         latent_dim: i64,
+        img_h: i64,
+        img_w: i64,
     ) -> Result<Self> {
         let controller = Rc::new(Controller::new(latent_dim)?);
 
         let letter_head = Linear::new(latent_dim, n_classes as i64)?;
         let case_head = Linear::new(latent_dim, 2)?;
-        let decoder = Rc::new(VisualDecoder::new(latent_dim + 1, 128, 128)?);
+        let decoder = Rc::new(VisualDecoder::new(latent_dim + 1, img_h, img_w)?);
 
         // Content head + shared buffer for scan ink detection (only when scanning).
         let content_logits_buf = Rc::new(RefCell::new(Vec::new()));

@@ -32,6 +32,7 @@ pub struct TestSample {
     pub case_label: f32,     // 0.0=upper, 1.0=lower
     pub case_str: String,    // "upper" or "lower"
     pub font: String,
+    pub png_bytes: Vec<u8>,  // original PNG for atlas embedding
 }
 
 /// Per-sample evaluation result.
@@ -62,6 +63,7 @@ fn load_test_dataset(dir: &str) -> Result<Vec<TestSample>> {
     for entry in meta.values() {
         let img_path = resolve_test_path(dir_path, &entry.image);
         let img_tensor = load_gray_png(&img_path)?;
+        let png_bytes = fs::read(&img_path).unwrap_or_default();
 
         let letter_upper = entry.letter.to_uppercase();
         let ch = match letter_upper.as_bytes().first() {
@@ -78,6 +80,7 @@ fn load_test_dataset(dir: &str) -> Result<Vec<TestSample>> {
             case_label,
             case_str: entry.case.clone(),
             font: if entry.font.is_empty() { "unknown".into() } else { entry.font.clone() },
+            png_bytes,
         });
     }
 
@@ -159,13 +162,15 @@ pub fn eval_letter(
         .unwrap_or("model_final.fdl.gz");
     let model_path = run_path.join(model_file);
 
-    eprintln!("Config: {} scan + {} read, latent_dim={}", cfg.n_scan, cfg.n_read, cfg.latent_dim);
+    let img_h = cfg.img_h;
+    let img_w = cfg.img_w;
+    eprintln!("Config: {} scan + {} read, latent_dim={}, img={}×{}", cfg.n_scan, cfg.n_read, cfg.latent_dim, img_h, img_w);
     eprintln!("Model:  {}", model_path.display());
 
     // Create model and load checkpoint.
     let model = LetterModel::new(
         cfg.n_classes, cfg.n_scan, cfg.n_read, cfg.patch_size, cfg.scan_patch_w,
-        cfg.n_scales, cfg.latent_dim,
+        cfg.n_scales, cfg.latent_dim, cfg.img_h, cfg.img_w,
     )?;
 
     let device = if cuda_available() {
@@ -190,9 +195,30 @@ pub fn eval_letter(
     let mut results: Vec<SampleResult> = Vec::with_capacity(samples.len());
 
     for (i, sample) in samples.iter().enumerate() {
-        let img = sample.image.unsqueeze(0)?.to_device(device)?; // [1, 1, H, W]
+        // Pad input image to model's expected dimensions if needed.
+        let raw_shape = sample.image.shape(); // [1, H, W]
+        let (raw_h, raw_w) = (raw_shape[1], raw_shape[2]);
+        let img = if raw_h != img_h || raw_w != img_w {
+            let src = sample.image.to_f32_vec()?;
+            let mut dst = vec![0.0f32; (img_h * img_w) as usize];
+            let off_y = ((img_h - raw_h) / 2).max(0) as usize;
+            let off_x = ((img_w - raw_w) / 2).max(0) as usize;
+            for y in 0..raw_h as usize {
+                for x in 0..raw_w as usize {
+                    let dy = y + off_y;
+                    let dx = x + off_x;
+                    if dy < img_h as usize && dx < img_w as usize {
+                        dst[dy * img_w as usize + dx] = src[y * raw_w as usize + x];
+                    }
+                }
+            }
+            Tensor::from_f32(&dst, &[1, 1, img_h, img_w], device)?
+        } else {
+            sample.image.unsqueeze(0)?.to_device(device)? // [1, 1, H, W]
+        };
         let case = Tensor::from_f32(&[sample.case_label], &[1, 1], device)?;
 
+        let img_cpu = img.to_device(Device::CPU)?;
         let img_var = Variable::new(img, false);
         let case_var = Variable::new(case, false);
         let origin = Variable::new(Tensor::zeros(&[1, 2], TensorOptions { device, ..Default::default() })?, false);
@@ -205,9 +231,9 @@ pub fn eval_letter(
         let pred_case = result.case_logits.data().argmax(1, false)?
             .to_i64_vec()?[0];
 
-        // Reconstruction MSE.
+        // Reconstruction MSE (compare against model-sized input, not raw).
         let recon_data = result.recon.data().to_device(Device::CPU)?;
-        let input_data = sample.image.unsqueeze(0)?;
+        let input_data = img_cpu;
         let diff = recon_data.sub(&input_data)?;
         let mse = diff.mul(&diff)?.mean()?.item()?;
 
@@ -220,17 +246,7 @@ pub fn eval_letter(
             .squeeze(0)?.squeeze(0)?.to_f32_vec()?;
 
         // Read original PNG bytes for atlas embedding.
-        let display_letter = if sample.case_str == "lower" {
-            sample.letter.to_lowercase()
-        } else {
-            sample.letter.clone()
-        };
-        let img_path = resolve_test_path(Path::new(test_data_dir), &format!(
-            "img_{}_{}.png",
-            &display_letter,
-            if sample.font == "unknown" { "default" } else { &sample.font }
-        ));
-        let png_bytes = fs::read(&img_path).unwrap_or_default();
+        let png_bytes = sample.png_bytes.clone();
 
         let case_idx = if sample.case_str == "lower" { 1i64 } else { 0 };
         results.push(SampleResult {
@@ -266,7 +282,7 @@ pub fn eval_letter(
     fs::write(format!("{}/eval.json", save_path), &eval_json)
         .map_err(|e| TensorError::new(&format!("write eval.json: {e}")))?;
 
-    let atlas = generate_atlas(&results);
+    let atlas = generate_atlas(&results, img_h, img_w);
     fs::write(format!("{}/letter_atlas.html", save_path), &atlas)
         .map_err(|e| TensorError::new(&format!("write atlas: {e}")))?;
 
@@ -393,13 +409,23 @@ fn base64_encode(data: &[u8]) -> String {
     out
 }
 
-/// Generate self-contained HTML attention atlas.
-fn generate_atlas(results: &[SampleResult]) -> String {
+/// Generate self-contained HTML attention atlas with navigation.
+fn generate_atlas(results: &[SampleResult], img_h: i64, img_w: i64) -> String {
+    // Display thumbnails at a reasonable size.
+    let thumb_w: u32 = 128;
+    let thumb_h = (img_h as f64 * thumb_w as f64 / img_w as f64) as u32;
+    let fw = thumb_w as f64;
+    let fh = thumb_h as f64;
 
     let total = results.len();
     let letter_correct = results.iter()
         .filter(|r| r.pred_letter_idx == r.letter_idx).count();
     let case_correct = results.iter().filter(|r| r.case_correct).count();
+
+    // Collect unique fonts (sorted).
+    let mut fonts: Vec<String> = results.iter().map(|r| r.font.clone()).collect();
+    fonts.sort();
+    fonts.dedup();
 
     // Group results by letter string.
     let mut by_letter: Vec<(&str, Vec<&SampleResult>)> = Vec::new();
@@ -412,107 +438,172 @@ fn generate_atlas(results: &[SampleResult]) -> String {
         by_letter.last_mut().unwrap().1.push(r);
     }
 
-    let mut html = String::with_capacity(1024 * 1024);
+    let mut html = String::with_capacity(2 * 1024 * 1024);
 
-    // Header.
+    // Header + CSS + JS.
     html.push_str("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\n");
     html.push_str("<title>Letter Attention Atlas</title>\n");
     html.push_str("<style>\n");
-    html.push_str("body{font-family:system-ui,-apple-system,sans-serif;background:#1a1a2e;color:#e0e0e0;margin:20px}\n");
-    html.push_str("h1{color:#fff;margin-bottom:4px} h2{color:#ccc;margin:24px 0 8px;border-bottom:1px solid #333;padding-bottom:4px}\n");
-    html.push_str(".summary{color:#aaa;margin-bottom:20px}\n");
-    html.push_str(".letter-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}\n");
-    html.push_str(".sample{display:inline-block;text-align:center;background:#252540;border-radius:6px;padding:6px}\n");
+    html.push_str("*{box-sizing:border-box}\n");
+    html.push_str("body{font-family:system-ui,-apple-system,sans-serif;background:#1a1a2e;color:#e0e0e0;margin:0;padding:20px}\n");
+    html.push_str("h1{color:#fff;margin:0 0 4px}\n");
+    html.push_str(".summary{color:#aaa;margin-bottom:12px}\n");
+    html.push_str(".toolbar{position:sticky;top:0;z-index:10;background:#1a1a2e;padding:8px 0 12px;border-bottom:1px solid #333}\n");
+    html.push_str(".nav{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px}\n");
+    html.push_str(".nav a{display:inline-block;padding:4px 8px;background:#252540;color:#ccc;text-decoration:none;border-radius:4px;font-size:13px;min-width:28px;text-align:center}\n");
+    html.push_str(".nav a:hover,.nav a.active{background:#3498db;color:#fff}\n");
+    html.push_str(".nav a.has-error{border:1px solid #e74c3c}\n");
+    html.push_str(".filters{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12px}\n");
+    html.push_str(".filters label{cursor:pointer;color:#aaa}\n");
+    html.push_str(".filters label:hover{color:#fff}\n");
+    html.push_str(".filters input{margin-right:2px}\n");
+    let _ = writeln!(html, ".btn{{padding:3px 8px;background:#252540;color:#aaa;border:1px solid #444;border-radius:4px;cursor:pointer;font-size:11px}}");
+    html.push_str(".btn:hover{background:#333;color:#fff}\n");
+    html.push_str(".btn.active{background:#e74c3c;color:#fff;border-color:#e74c3c}\n");
+    html.push_str(".letter-section{margin-top:16px}\n");
+    html.push_str(".letter-section h2{color:#ccc;margin:0 0 8px;padding-bottom:4px;border-bottom:1px solid #333;font-size:16px}\n");
+    html.push_str(".letter-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}\n");
+    html.push_str(".sample{display:inline-block;text-align:center;background:#252540;border-radius:6px;padding:4px}\n");
     html.push_str(".sample.error{border:2px solid #e74c3c}\n");
-    html.push_str(".label{font-size:11px;color:#888;margin-top:2px}\n");
-    html.push_str(".pred{font-size:11px;font-weight:bold}\n");
+    html.push_str(".sample.hidden{display:none}\n");
+    html.push_str(".label{font-size:10px;color:#888;margin-top:1px}\n");
+    html.push_str(".pred{font-size:10px;font-weight:bold}\n");
     html.push_str(".pred.correct{color:#2ecc71} .pred.wrong{color:#e74c3c}\n");
     html.push_str(".pair{display:flex;gap:2px}\n");
-    html.push_str(".legend{margin:16px 0;padding:10px;background:#252540;border-radius:6px;display:inline-block}\n");
-    html.push_str(".legend span{margin-right:16px}\n");
+    html.push_str(".legend{margin:8px 0;font-size:12px;color:#888}\n");
+    html.push_str(".legend span{margin-right:14px}\n");
     html.push_str("</style></head><body>\n");
 
+    // Summary.
     let _ = writeln!(html, "<h1>Letter Attention Atlas</h1>");
-    let _ = writeln!(html, "<div class=\"summary\">Letter: {}/{} ({:.1}%) &middot; Case: {}/{} ({:.1}%)</div>",
+    let _ = writeln!(html, "<div class=\"summary\">Letter: {}/{} ({:.1}%) &middot; Case: {}/{} ({:.1}%) &middot; {}×{} &middot; {} fonts</div>",
         letter_correct, total, letter_correct as f64 / total as f64 * 100.0,
-        case_correct, total, case_correct as f64 / total as f64 * 100.0);
+        case_correct, total, case_correct as f64 / total as f64 * 100.0,
+        img_h, img_w, fonts.len());
+
+    // Toolbar: letter nav + font filter + errors toggle.
+    html.push_str("<div class=\"toolbar\">\n");
+
+    // Letter nav.
+    html.push_str("<div class=\"nav\" id=\"letter-nav\">\n");
+    for (letter, samples) in &by_letter {
+        let has_error = samples.iter().any(|r| r.pred_letter_idx != r.letter_idx || !r.case_correct);
+        let err_class = if has_error { " has-error" } else { "" };
+        let _ = writeln!(html, "<a href=\"#letter-{}\" class=\"{}\">{}</a>", letter, err_class, letter);
+    }
+    html.push_str("</div>\n");
+
+    // Filters row.
+    html.push_str("<div class=\"filters\">\n");
+    html.push_str("<button class=\"btn\" id=\"errors-btn\" onclick=\"toggleErrors()\">Errors only</button>\n");
+    html.push_str("<span style=\"color:#555\">|</span>\n");
+    for font in &fonts {
+        let font_id = font.replace(|c: char| !c.is_alphanumeric(), "_");
+        let _ = writeln!(html, "<label><input type=\"checkbox\" checked onchange=\"filterFont()\" data-font=\"{}\"> {}</label>",
+            font_id, font);
+    }
+    html.push_str("</div>\n");
 
     // Legend.
     html.push_str("<div class=\"legend\">\n");
-    html.push_str("<span><svg width=\"12\" height=\"12\"><circle cx=\"6\" cy=\"6\" r=\"5\" fill=\"#3498db\"/></svg> Scan</span>\n");
-    html.push_str("<span><svg width=\"12\" height=\"12\"><circle cx=\"6\" cy=\"6\" r=\"5\" fill=\"#e74c3c\"/></svg> Read (numbered)</span>\n");
+    html.push_str("<span><svg width=\"10\" height=\"10\"><circle cx=\"5\" cy=\"5\" r=\"4\" fill=\"#3498db\"/></svg> Scan</span>\n");
+    html.push_str("<span><svg width=\"10\" height=\"10\"><circle cx=\"5\" cy=\"5\" r=\"4\" fill=\"#e74c3c\"/></svg> Read</span>\n");
     html.push_str("<span>Left: input + fixations &middot; Right: reconstruction</span>\n");
     html.push_str("</div>\n");
+    html.push_str("</div>\n"); // .toolbar
 
     // Per-letter sections.
     for (letter, samples) in &by_letter {
+        let _ = writeln!(html, "<div class=\"letter-section\" id=\"letter-{}\">", letter);
         let _ = writeln!(html, "<h2>{}</h2>\n<div class=\"letter-row\">", letter);
 
         for r in samples {
             let is_correct = r.pred_letter_idx == r.letter_idx && r.case_correct;
             let pred = idx_to_letter(r.pred_letter_idx, &r.case_str);
             let error_class = if is_correct { "" } else { " error" };
+            let font_id = r.font.replace(|c: char| !c.is_alphanumeric(), "_");
 
-            let _ = writeln!(html, "<div class=\"sample{}\">\n<div class=\"pair\">", error_class);
+            let _ = writeln!(html, "<div class=\"sample{}\" data-font=\"{}\" data-correct=\"{}\">",
+                error_class, font_id, is_correct);
+            html.push_str("<div class=\"pair\">\n");
 
             // Input image with fixation overlay (SVG).
-            let _ = writeln!(html, "<svg width=\"128\" height=\"128\" viewBox=\"0 0 128 128\">");
+            let _ = writeln!(html, "<svg width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">",
+                thumb_w, thumb_h, thumb_w, thumb_h);
             if !r.image_png.is_empty() {
                 let img_b64 = base64_encode(&r.image_png);
-                let _ = writeln!(html, "<image href=\"data:image/png;base64,{}\" width=\"128\" height=\"128\"/>", img_b64);
+                let _ = writeln!(html, "<image href=\"data:image/png;base64,{}\" width=\"{}\" height=\"{}\"/>",
+                    img_b64, thumb_w, thumb_h);
             }
-            // Build full trajectory: scan locs then read locs.
             let all_locs: Vec<([f64; 2], bool)> = r.scan_locs.iter().map(|l| (*l, true))
                 .chain(r.read_locs.iter().map(|l| (*l, false))).collect();
 
-            // Draw trajectory lines first (behind dots).
             for pair in all_locs.windows(2) {
                 let (p0, _) = pair[0];
                 let (p1, _) = pair[1];
-                let x0 = (p0[0] + 1.0) / 2.0 * 128.0;
-                let y0 = (p0[1] + 1.0) / 2.0 * 128.0;
-                let x1 = (p1[0] + 1.0) / 2.0 * 128.0;
-                let y1 = (p1[1] + 1.0) / 2.0 * 128.0;
-                let _ = writeln!(html, "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#fff\" stroke-width=\"1\" opacity=\"0.4\"/>",
+                let x0 = (p0[0] + 1.0) / 2.0 * fw;
+                let y0 = (p0[1] + 1.0) / 2.0 * fh;
+                let x1 = (p1[0] + 1.0) / 2.0 * fw;
+                let y1 = (p1[1] + 1.0) / 2.0 * fh;
+                let _ = writeln!(html, "<line x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" stroke=\"#fff\" stroke-width=\"0.8\" opacity=\"0.35\"/>",
                     x0, y0, x1, y1);
             }
 
-            // Scan fixations (blue).
             for (i, loc) in r.scan_locs.iter().enumerate() {
-                let px = (loc[0] + 1.0) / 2.0 * 128.0;
-                let py = (loc[1] + 1.0) / 2.0 * 128.0;
-                let _ = writeln!(html, "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"5\" fill=\"#3498db\" opacity=\"0.8\"/>", px, py);
-                let _ = writeln!(html, "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"#fff\" font-size=\"7\" text-anchor=\"middle\" dominant-baseline=\"central\">S{}</text>",
+                let px = (loc[0] + 1.0) / 2.0 * fw;
+                let py = (loc[1] + 1.0) / 2.0 * fh;
+                let _ = writeln!(html, "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\" fill=\"#3498db\" opacity=\"0.8\"/>", px, py);
+                let _ = writeln!(html, "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"#fff\" font-size=\"6\" text-anchor=\"middle\" dominant-baseline=\"central\">S{}</text>",
                     px, py, i + 1);
             }
-            // Read fixations (red, numbered).
             for (i, loc) in r.read_locs.iter().enumerate() {
-                let px = (loc[0] + 1.0) / 2.0 * 128.0;
-                let py = (loc[1] + 1.0) / 2.0 * 128.0;
-                let _ = writeln!(html, "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\" fill=\"#e74c3c\" opacity=\"0.8\"/>", px, py);
-                let _ = writeln!(html, "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"#fff\" font-size=\"7\" text-anchor=\"middle\" dominant-baseline=\"central\">{}</text>",
+                let px = (loc[0] + 1.0) / 2.0 * fw;
+                let py = (loc[1] + 1.0) / 2.0 * fh;
+                let _ = writeln!(html, "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"3\" fill=\"#e74c3c\" opacity=\"0.8\"/>", px, py);
+                let _ = writeln!(html, "<text x=\"{:.1}\" y=\"{:.1}\" fill=\"#fff\" font-size=\"6\" text-anchor=\"middle\" dominant-baseline=\"central\">{}</text>",
                     px, py, i + 1);
             }
             html.push_str("</svg>\n");
 
-            // Reconstruction image (generated from pixel data).
-            if r.recon_data.len() == 128 * 128 {
-                let recon_png = pixels_to_png(&r.recon_data, 128, 128);
+            // Reconstruction.
+            let recon_pixels = (img_h * img_w) as usize;
+            if r.recon_data.len() == recon_pixels {
+                let recon_png = pixels_to_png(&r.recon_data, img_w as usize, img_h as usize);
                 let recon_b64 = base64_encode(&recon_png);
-                let _ = writeln!(html, "<img src=\"data:image/png;base64,{}\" width=\"128\" height=\"128\">", recon_b64);
+                let _ = writeln!(html, "<img src=\"data:image/png;base64,{}\" width=\"{}\" height=\"{}\">",
+                    recon_b64, thumb_w, thumb_h);
             }
 
             html.push_str("</div>\n"); // .pair
-
-            // Labels.
             let _ = writeln!(html, "<div class=\"label\">{}</div>", r.font);
             let correct_class = if is_correct { "correct" } else { "wrong" };
-            let _ = writeln!(html, "<div class=\"pred {}\">→ {}</div>", correct_class, pred);
+            let _ = writeln!(html, "<div class=\"pred {}\">{}</div>", correct_class, pred);
             html.push_str("</div>\n"); // .sample
         }
-        html.push_str("</div>\n"); // .letter-row
+        html.push_str("</div></div>\n"); // .letter-row .letter-section
     }
 
+    // JavaScript for filtering.
+    html.push_str("<script>\n");
+    html.push_str("let errorsOnly = false;\n");
+    html.push_str("function toggleErrors() {\n");
+    html.push_str("  errorsOnly = !errorsOnly;\n");
+    html.push_str("  document.getElementById('errors-btn').classList.toggle('active', errorsOnly);\n");
+    html.push_str("  applyFilters();\n");
+    html.push_str("}\n");
+    html.push_str("function filterFont() { applyFilters(); }\n");
+    html.push_str("function applyFilters() {\n");
+    html.push_str("  const checked = new Set();\n");
+    html.push_str("  document.querySelectorAll('.filters input[type=checkbox]').forEach(cb => {\n");
+    html.push_str("    if (cb.checked) checked.add(cb.dataset.font);\n");
+    html.push_str("  });\n");
+    html.push_str("  document.querySelectorAll('.sample').forEach(el => {\n");
+    html.push_str("    const fontMatch = checked.has(el.dataset.font);\n");
+    html.push_str("    const errMatch = !errorsOnly || el.dataset.correct === 'false';\n");
+    html.push_str("    el.classList.toggle('hidden', !(fontMatch && errMatch));\n");
+    html.push_str("  });\n");
+    html.push_str("}\n");
+    html.push_str("</script>\n");
     html.push_str("</body></html>");
     html
 }

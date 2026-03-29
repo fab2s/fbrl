@@ -128,7 +128,7 @@ pub fn train_letter_on_words(
     let model = LetterModel::new(
         cfg.n_classes, cfg.n_scan, cfg.n_read,
         cfg.patch_size, cfg.scan_patch_w,
-        cfg.n_scales, cfg.latent_dim,
+        cfg.n_scales, cfg.latent_dim, 128, 128,
     )?;
 
     // --- Load pre-trained checkpoint ---

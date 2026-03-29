@@ -15,6 +15,7 @@
 //! ```
 
 pub mod data;
+pub mod direct_eval;
 pub mod font_gen;
 pub mod glimpse;
 pub mod loss;
@@ -27,6 +28,7 @@ pub mod synthetic;
 // pub mod eval;           // step 3 evaluation (future)
 
 pub use data::*;
+pub use direct_eval::*;
 pub use font_gen::*;
 pub use glimpse::*;
 pub use loss::*;
