@@ -5,6 +5,8 @@ docker-compose.override.yml
 **/checkpoint_epoch_*.fdl.gz
 **/*_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9].*
 fonts/
+.flodl-hash
+word/gen_words/
 
 # Runs and eval outputs — force-add keepers with: git add -f runs/vX/
 **/runs/

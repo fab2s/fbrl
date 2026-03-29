@@ -93,11 +93,6 @@ pub fn generate_letter_dataset(cfg: &GenConfig) -> Result<LetterDataset> {
 
     let blur_n = cfg.blur_variants.max(1);
 
-    let spacing = 0.5;
-    let center_norm = 0.0;
-    let left_norm = -spacing;
-    let right_norm = spacing;
-
     let h = cfg.image_height;
     let w = cfg.image_width;
     let mut rng = cfg.seed;
@@ -143,20 +138,39 @@ pub fn generate_letter_dataset(cfg: &GenConfig) -> Result<LetterDataset> {
                 };
 
                 let mut pixels = vec![0.0f32; h * w];
-                render_glyph_at(&lf.font, lf.px_size, lf.baseline_y, target_ch,
-                                center_norm, &mut pixels, h, w);
+
+                // Proportional spacing: use advance_width to place glyphs.
+                let target_advance = lf.font.metrics(target_ch, lf.px_size).advance_width;
+                let center_px = w as f32 / 2.0;
+                let target_cursor = center_px - target_advance / 2.0;
+
+                render_glyph_cursor(&lf.font, lf.px_size, lf.baseline_y, target_ch,
+                                    target_cursor, &mut pixels, h, w);
+
                 if n >= 2 {
                     let neighbor_ch = chars[rng_range(&mut rng, chars.len())];
+                    let neighbor_advance = lf.font.metrics(neighbor_ch, lf.px_size).advance_width;
                     if n == 2 {
-                        let pos = if rng_range(&mut rng, 2) == 0 { left_norm } else { right_norm };
-                        render_glyph_at(&lf.font, lf.px_size, lf.baseline_y, neighbor_ch,
-                                        pos, &mut pixels, h, w);
+                        if rng_range(&mut rng, 2) == 0 {
+                            // Left neighbor.
+                            let cursor = target_cursor - neighbor_advance;
+                            render_glyph_cursor(&lf.font, lf.px_size, lf.baseline_y, neighbor_ch,
+                                                cursor, &mut pixels, h, w);
+                        } else {
+                            // Right neighbor.
+                            let cursor = target_cursor + target_advance;
+                            render_glyph_cursor(&lf.font, lf.px_size, lf.baseline_y, neighbor_ch,
+                                                cursor, &mut pixels, h, w);
+                        }
                     } else {
-                        render_glyph_at(&lf.font, lf.px_size, lf.baseline_y, neighbor_ch,
-                                        left_norm, &mut pixels, h, w);
+                        // Both neighbors.
+                        let left_cursor = target_cursor - neighbor_advance;
+                        render_glyph_cursor(&lf.font, lf.px_size, lf.baseline_y, neighbor_ch,
+                                            left_cursor, &mut pixels, h, w);
                         let right_ch = chars[rng_range(&mut rng, chars.len())];
-                        render_glyph_at(&lf.font, lf.px_size, lf.baseline_y, right_ch,
-                                        right_norm, &mut pixels, h, w);
+                        let right_cursor = target_cursor + target_advance;
+                        render_glyph_cursor(&lf.font, lf.px_size, lf.baseline_y, right_ch,
+                                            right_cursor, &mut pixels, h, w);
                     }
                 }
 
@@ -375,15 +389,15 @@ fn load_fonts(cfg: &GenConfig) -> Result<Vec<LoadedFont>> {
 
 // ── Glyph rendering ─────────────────────────────────────────────────
 
-fn render_glyph_at(
+/// Render a glyph at a pixel cursor position (left edge of advance box).
+fn render_glyph_cursor(
     font: &Font, px_size: f32, baseline_y: i32, ch: char,
-    norm_x: f64, pixels: &mut [f32], img_h: usize, img_w: usize,
+    cursor_x: f32, pixels: &mut [f32], img_h: usize, img_w: usize,
 ) {
     let (metrics, bitmap) = font.rasterize(ch, px_size);
     if metrics.width == 0 || metrics.height == 0 { return; }
 
-    let center_x = ((norm_x + 1.0) / 2.0 * img_w as f64) as i32;
-    let glyph_x = center_x - metrics.width as i32 / 2 + metrics.xmin;
+    let glyph_x = cursor_x as i32 + metrics.xmin;
     let glyph_y = baseline_y - metrics.height as i32 - metrics.ymin;
 
     for gy in 0..metrics.height {

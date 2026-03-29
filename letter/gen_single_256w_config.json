@@ -4,10 +4,9 @@
   "image_height": 128,
   "image_width": 256,
   "min_letters": 1,
-  "max_letters": 4,
-  "samples": 5000,
-  "fill_ratio": 0.80,
-  "seed": 99999,
-  "word_list": "words.txt",
-  "case_mode": "mixed"
+  "max_letters": 1,
+  "samples": 20000,
+  "blur_variants": 3,
+  "blur_sigma_max": 1.5,
+  "noise_level": 0.1
 }

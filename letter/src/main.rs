@@ -124,6 +124,14 @@ fn run_train(args: &[String]) {
                 return;
             }
         }
+        // Save data generation config alongside training output for reproducibility.
+        if !cfg.save_dir.is_empty() {
+            std::fs::create_dir_all(&cfg.save_dir).ok();
+            let _ = std::fs::write(
+                format!("{}/gen_config.json", cfg.save_dir),
+                serde_json::to_string_pretty(&gen_cfg).unwrap_or_default(),
+            );
+        }
         ds
     } else if synthetic > 0 {
         let ds = new_synthetic_dataset(synthetic).expect("synthetic dataset");

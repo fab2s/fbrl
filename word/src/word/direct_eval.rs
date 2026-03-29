@@ -3,22 +3,17 @@
 //! Bypasses SubScan entirely — sets origin to the known letter center
 //! for each position. This gives a clean upper-bound baseline:
 //! "how well does the letter model perform given perfect positioning?"
+//!
+//! Supports variable-length words with per-sample GT centers.
 
 use std::fs;
 
 use flodl::autograd::{no_grad, Variable};
-use flodl::nn::Module;
 use flodl::tensor::{cuda_available, Device, DType, Result, Tensor, TensorError};
 use serde::{Serialize, Deserialize};
 
 use super::data::{WordDataset, WordLoader};
 use fbrl::letter::LetterModel;
-
-/// Number of letter positions in a word image.
-const N_POSITIONS: usize = 4;
-
-/// Normalized x-centers for the 4 letter positions in a 128x256 word image.
-const LETTER_CENTERS: [f64; N_POSITIONS] = [-0.75, -0.25, 0.25, 0.75];
 
 /// Configuration for direct letter eval.
 #[derive(Serialize, Deserialize)]
@@ -73,16 +68,14 @@ impl Default for DirectEvalConfig {
 #[derive(Debug)]
 pub struct DirectPositionResult {
     pub position: usize,
-    pub gt_center: f64,
     pub total: usize,
     pub correct: usize,
-    /// How often the prediction matched another position's letter.
-    pub matched_other_pos: [usize; N_POSITIONS],
+    pub matched_other_pos: Vec<usize>,
 }
 
 /// Overall eval results.
 pub struct DirectEvalResults {
-    pub positions: [DirectPositionResult; N_POSITIONS],
+    pub positions: Vec<DirectPositionResult>,
     pub total: usize,
     pub correct: usize,
     pub accuracy: f64,
@@ -156,10 +149,10 @@ pub fn eval_letter_direct(
     loader.set_device(device);
 
     // --- Per-position accumulators ---
-    let mut pos_correct = [0usize; N_POSITIONS];
-    let mut pos_total = [0usize; N_POSITIONS];
-    // pos_matched_other[asked_pos][other_pos] = count where prediction == letter at other_pos
-    let mut pos_matched_other = [[0usize; N_POSITIONS]; N_POSITIONS];
+    let max_pos = 4;
+    let mut pos_correct = vec![0usize; max_pos];
+    let mut pos_total = vec![0usize; max_pos];
+    let mut pos_matched_other: Vec<Vec<usize>> = (0..max_pos).map(|_| vec![0usize; max_pos]).collect();
     let mut pred_histogram = [0usize; 26];
 
     // --- Eval loop ---
@@ -169,23 +162,21 @@ pub fn eval_letter_direct(
             let b = img_var.shape()[0] as usize;
 
             // Fetch all GT letter indices for cross-position matching.
-            let gt_all: [Vec<i64>; N_POSITIONS] = [
-                batch.letter_idx[0].to_i64_vec()?,
-                batch.letter_idx[1].to_i64_vec()?,
-                batch.letter_idx[2].to_i64_vec()?,
-                batch.letter_idx[3].to_i64_vec()?,
-            ];
+            let gt_all: Vec<Vec<i64>> = (0..batch.word_len)
+                .map(|pos| batch.letter_idx[pos].to_i64_vec())
+                .collect::<Result<_>>()?;
 
-            // Case label (all lowercase).
             let case_var = Variable::new(
                 Tensor::from_f32(&vec![1.0f32; b], &[b as i64, 1], device)?, false,
             );
 
-            for pos in 0..N_POSITIONS {
-                let gt_x = LETTER_CENTERS[pos] as f32;
+            for pos in 0..batch.word_len {
+                let gt_vec = batch.centers[pos].to_f32_vec()?;
 
-                // GT origin: (letter_center_x, 0.0) for every sample in the batch.
-                let origin_data: Vec<f32> = (0..b).flat_map(|_| [gt_x, 0.0f32]).collect();
+                // GT origin: (center_x, 0.0) per sample.
+                let origin_data: Vec<f32> = gt_vec.iter()
+                    .flat_map(|&gt_x| [gt_x, 0.0f32])
+                    .collect();
                 let origin = Variable::new(
                     Tensor::from_f32(&origin_data, &[b as i64, 2], device)?, false,
                 );
@@ -193,7 +184,6 @@ pub fn eval_letter_direct(
                 // ── LetterModel → classification ──
                 let result = letter.forward(&img_var, &case_var, &origin)?;
 
-                // Predictions.
                 let preds = result.letter_logits.data().argmax(1, false)?;
                 let pred_vec = preds.to_i64_vec()?;
                 let correct_mask = preds.eq_tensor(&batch.letter_idx[pos])?
@@ -203,12 +193,12 @@ pub fn eval_letter_direct(
                 pos_correct[pos] += n_correct as usize;
                 pos_total[pos] += b;
 
-                // Cross-position analysis: does the prediction match any other position?
+                // Cross-position analysis.
                 for (sample_i, &pred) in pred_vec.iter().enumerate() {
                     if pred >= 0 && pred < 26 {
                         pred_histogram[pred as usize] += 1;
                     }
-                    for other_pos in 0..N_POSITIONS {
+                    for other_pos in 0..batch.word_len {
                         if pred == gt_all[other_pos][sample_i] {
                             pos_matched_other[pos][other_pos] += 1;
                         }
@@ -224,17 +214,17 @@ pub fn eval_letter_direct(
     // --- Compile results ---
     let mut total = 0usize;
     let mut correct = 0usize;
-    let mut positions = Vec::with_capacity(N_POSITIONS);
+    let mut positions = Vec::new();
 
-    for pos in 0..N_POSITIONS {
+    for pos in 0..max_pos {
+        if pos_total[pos] == 0 { continue; }
         let n = pos_total[pos];
         let c = pos_correct[pos];
         positions.push(DirectPositionResult {
             position: pos,
-            gt_center: LETTER_CENTERS[pos],
             total: n,
             correct: c,
-            matched_other_pos: pos_matched_other[pos],
+            matched_other_pos: pos_matched_other[pos].clone(),
         });
         total += n;
         correct += c;
@@ -243,7 +233,7 @@ pub fn eval_letter_direct(
     let accuracy = if total > 0 { correct as f64 / total as f64 } else { 0.0 };
 
     let results = DirectEvalResults {
-        positions: positions.try_into().unwrap(),
+        positions,
         total,
         correct,
         accuracy,
@@ -255,7 +245,6 @@ pub fn eval_letter_direct(
         fs::create_dir_all(&cfg.save_dir)
             .map_err(|e| TensorError::new(&format!("create save dir: {e}")))?;
 
-        // Top-5 predicted letters.
         let mut pred_sorted: Vec<(usize, usize)> = pred_histogram.iter()
             .enumerate().map(|(i, &c)| (i, c)).collect();
         pred_sorted.sort_by(|a, b| b.1.cmp(&a.1));
@@ -273,13 +262,13 @@ pub fn eval_letter_direct(
                 let n = p.total.max(1) as f64;
                 serde_json::json!({
                     "pos": p.position,
-                    "gt_center": p.gt_center,
                     "total": p.total,
                     "correct": p.correct,
                     "accuracy": format!("{:.1}%", p.correct as f64 / n * 100.0),
-                    "pred_matches_pos": (0..N_POSITIONS).map(|op| {
-                        format!("pos{}={:.1}%", op, p.matched_other_pos[op] as f64 / n * 100.0)
-                    }).collect::<Vec<_>>(),
+                    "pred_matches_pos": p.matched_other_pos.iter().enumerate()
+                        .filter(|&(_, c)| *c > 0)
+                        .map(|(op, c)| format!("pos{}={:.1}%", op, *c as f64 / n * 100.0))
+                        .collect::<Vec<_>>(),
                 })
             }).collect::<Vec<_>>(),
             "letter_checkpoint": cfg.letter_checkpoint,

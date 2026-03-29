@@ -1,4 +1,7 @@
 //! Word dataset and batched loader for training.
+//!
+//! Supports variable-length words (1-4 letters) with per-letter
+//! ground-truth centers from proportional glyph spacing.
 
 use std::collections::HashMap;
 use std::fs;
@@ -9,17 +12,20 @@ use serde::Deserialize;
 
 /// One rendered word with metadata.
 pub struct WordSample {
-    pub image: Tensor,       // [1, 128, 256] noisy image
-    pub clean: Tensor,       // [1, 128, 256] clean image
-    pub letters: [i64; 4],   // letter indices 0-25 per position
-    pub word: String,
+    pub image: Tensor,        // [1, H, W] noisy image
+    pub clean: Tensor,        // [1, H, W] clean image
+    pub word: String,         // the rendered word (with case)
+    pub letters: Vec<i64>,    // letter indices 0-25, length = word length
+    pub centers: Vec<f64>,    // GT x-center per letter (normalized [-1, 1])
 }
 
 /// Stacked mini-batch ready for training.
 pub struct WordBatch {
-    pub image: Tensor,               // [B, 1, 128, 256]
-    pub clean: Tensor,               // [B, 1, 128, 256]
-    pub letter_idx: [Tensor; 4],     // 4 × [B] int64 — per-position targets
+    pub image: Tensor,            // [B, 1, H, W]
+    pub clean: Tensor,            // [B, 1, H, W]
+    pub word_len: usize,          // uniform within this batch
+    pub letter_idx: Vec<Tensor>,  // word_len × [B] int64
+    pub centers: Vec<Tensor>,     // word_len × [B] f32
 }
 
 /// Holds all word samples in memory.
@@ -53,22 +59,18 @@ impl IsolationDataset {
     pub fn is_empty(&self) -> bool { self.samples.is_empty() }
 
     /// Get a random image for the given letter, choosing a random font.
-    /// Matches Python's `iso_font = random.choice(font_list); get_image(letter_idx, iso_font)`.
     pub fn get_random_image(&self, letter_idx: i64, rng: &mut impl FnMut(usize) -> usize) -> &Tensor {
-        // Pick a random font.
         let font_idx = rng(self.font_list.len());
         if let Some(indices) = self.by_letter_font.get(&(letter_idx, font_idx)) {
             let vi = rng(indices.len());
             return &self.samples[indices[vi]].image;
         }
-        // Fallback: try any font for this letter.
         for fi in 0..self.font_list.len() {
             if let Some(indices) = self.by_letter_font.get(&(letter_idx, fi)) {
                 let vi = rng(indices.len());
                 return &self.samples[indices[vi]].image;
             }
         }
-        // Last resort: first sample (should not happen with well-formed data).
         &self.samples[0].image
     }
 }
@@ -116,28 +118,31 @@ pub fn load_gray_png(path: &Path) -> Result<Tensor> {
 
 // --- Metadata ---
 
+/// Legacy fixed centers for backward compat with old 4-position datasets.
+const LEGACY_CENTERS: [f64; 4] = [-0.75, -0.25, 0.25, 0.75];
+
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct WordMetaEntry {
     image: String,
+    #[serde(default)]
     clean: String,
+    #[serde(default)]
     word: String,
+    // New format: variable-length arrays
+    #[serde(default)]
+    letters: Vec<String>,
+    #[serde(default)]
+    centers: Vec<f64>,
+    // Legacy format: fixed 4 positions
+    #[serde(default)]
     letter1: String,
+    #[serde(default)]
     letter2: String,
+    #[serde(default)]
     letter3: String,
+    #[serde(default)]
     letter4: String,
-    #[serde(default)]
-    font: String,
-}
-
-#[derive(Deserialize)]
-struct LetterMetaEntry {
-    image: String,
-    #[serde(default)]
-    clean: String,
-    letter: String,
-    #[serde(default)]
-    case: String,
     #[serde(default)]
     font: String,
 }
@@ -151,7 +156,10 @@ fn letter_to_idx(s: &str) -> Option<i64> {
     }
 }
 
-/// Load word dataset from a Python-generated directory with metadata.json.
+/// Load word dataset from a directory with metadata.json.
+///
+/// Supports both new format (variable-length `letters`/`centers` arrays)
+/// and legacy format (`letter1`..`letter4` with fixed grid centers).
 pub fn load_word_dataset(dir: &str) -> Result<WordDataset> {
     let dir_path = Path::new(dir);
     let meta_path = dir_path.join("metadata.json");
@@ -167,7 +175,8 @@ pub fn load_word_dataset(dir: &str) -> Result<WordDataset> {
         let img_path = resolve_data_path(dir_path, &entry.image);
         let img_tensor = load_gray_png(&img_path)?;
 
-        let clean_path = resolve_data_path(dir_path, &entry.clean);
+        let clean_src = if entry.clean.is_empty() { &entry.image } else { &entry.clean };
+        let clean_path = resolve_data_path(dir_path, clean_src);
         let clean_tensor = if let Some(cached) = clean_cache.get(&clean_path) {
             cached.clone()
         } else {
@@ -176,17 +185,38 @@ pub fn load_word_dataset(dir: &str) -> Result<WordDataset> {
             t
         };
 
-        let l1 = letter_to_idx(&entry.letter1);
-        let l2 = letter_to_idx(&entry.letter2);
-        let l3 = letter_to_idx(&entry.letter3);
-        let l4 = letter_to_idx(&entry.letter4);
-        let (Some(l1), Some(l2), Some(l3), Some(l4)) = (l1, l2, l3, l4) else { continue };
+        // Parse letters and centers — new format or legacy
+        let (letters, centers) = if !entry.letters.is_empty() {
+            // New format
+            let letters: Vec<i64> = entry.letters.iter()
+                .filter_map(|s| letter_to_idx(s))
+                .collect();
+            let centers = entry.centers.clone();
+            if letters.len() != centers.len() || letters.is_empty() {
+                continue; // malformed entry
+            }
+            (letters, centers)
+        } else {
+            // Legacy format: letter1..letter4
+            let legacy = [&entry.letter1, &entry.letter2, &entry.letter3, &entry.letter4];
+            let mut letters = Vec::new();
+            let mut centers = Vec::new();
+            for (i, s) in legacy.iter().enumerate() {
+                if let Some(idx) = letter_to_idx(s) {
+                    letters.push(idx);
+                    centers.push(LEGACY_CENTERS[i]);
+                }
+            }
+            if letters.is_empty() { continue; }
+            (letters, centers)
+        };
 
         samples.push(WordSample {
             image: img_tensor,
             clean: clean_tensor,
-            letters: [l1, l2, l3, l4],
             word: entry.word.clone(),
+            letters,
+            centers,
         });
     }
 
@@ -198,34 +228,39 @@ pub fn load_word_dataset(dir: &str) -> Result<WordDataset> {
 }
 
 /// Load isolation dataset from a letter data directory.
-///
-/// Matches Python's IsolationLetterDataset: indexes images by (letter_idx, font)
-/// for random font selection during training.
 pub fn load_isolation_dataset(dir: &str) -> Result<IsolationDataset> {
     let dir_path = Path::new(dir);
     let meta_path = dir_path.join("metadata.json");
     let meta_str = fs::read_to_string(&meta_path)
         .map_err(|e| TensorError::new(&format!("read isolation metadata: {e}")))?;
+
+    #[derive(Deserialize)]
+    struct LetterMetaEntry {
+        image: String,
+        #[serde(default)]
+        clean: String,
+        letter: String,
+        #[serde(default)]
+        case: String,
+        #[serde(default)]
+        font: String,
+    }
+
     let meta: HashMap<String, LetterMetaEntry> = serde_json::from_str(&meta_str)
         .map_err(|e| TensorError::new(&format!("parse isolation metadata: {e}")))?;
 
-    // Collect all fonts and build (letter_idx, font) → images map.
     let mut font_set = std::collections::BTreeSet::new();
     let mut raw_entries: Vec<(i64, String, Tensor)> = Vec::new();
 
     for entry in meta.values() {
-        // Only lowercase (matching Python).
         if entry.case != "lower" { continue; }
-
         let Some(letter_idx) = letter_to_idx(&entry.letter) else { continue };
 
-        // Use clean image for isolation (no noise).
         let path = if !entry.clean.is_empty() {
             resolve_data_path(dir_path, &entry.clean)
         } else {
             resolve_data_path(dir_path, &entry.image)
         };
-
         if !path.exists() { continue; }
 
         let font = if entry.font.is_empty() { "default".to_string() } else { entry.font.clone() };
@@ -277,84 +312,121 @@ fn resolve_data_path(dir: &Path, path: &str) -> PathBuf {
     joined
 }
 
-// --- Batched loader ---
+// --- Batched loader with length-grouped batching ---
 
 pub struct WordLoader<'a> {
     ds: &'a WordDataset,
     batch_size: usize,
     shuffle: bool,
     device: Option<Device>,
-    perm: Vec<usize>,
-    pos: usize,
+    /// Indices grouped by word length (bucket 0 = length 1, etc.)
+    buckets: Vec<Vec<usize>>,
+    /// Current position within each bucket.
+    bucket_pos: Vec<usize>,
+    /// Which bucket to serve next (round-robin among non-exhausted).
+    next_bucket: usize,
 }
 
 impl<'a> WordLoader<'a> {
     pub fn new(ds: &'a WordDataset, batch_size: usize, shuffle: bool) -> Self {
         let mut loader = WordLoader {
             ds, batch_size, shuffle,
-            device: None, perm: Vec::new(), pos: 0,
+            device: None,
+            buckets: Vec::new(),
+            bucket_pos: Vec::new(),
+            next_bucket: 0,
         };
-        loader.init_perm();
+        loader.init_buckets();
         loader
     }
 
     pub fn set_device(&mut self, device: Device) { self.device = Some(device); }
 
-    fn init_perm(&mut self) {
-        let n = self.ds.len();
-        self.perm = (0..n).collect();
+    fn init_buckets(&mut self) {
+        // Group by word length (1-indexed: bucket[0] = 1-letter words, etc.)
+        let max_len = self.ds.samples.iter().map(|s| s.letters.len()).max().unwrap_or(0);
+        self.buckets = vec![Vec::new(); max_len];
+        for (i, s) in self.ds.samples.iter().enumerate() {
+            let len = s.letters.len();
+            if len > 0 && len <= max_len {
+                self.buckets[len - 1].push(i);
+            }
+        }
+
         if self.shuffle {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            use std::time::SystemTime;
             let mut seed = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                use std::time::SystemTime;
                 let mut h = DefaultHasher::new();
                 SystemTime::now().hash(&mut h);
                 h.finish()
             };
-            for i in (1..n).rev() {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let j = (seed >> 33) as usize % (i + 1);
-                self.perm.swap(i, j);
+            for bucket in &mut self.buckets {
+                for i in (1..bucket.len()).rev() {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let j = (seed >> 33) as usize % (i + 1);
+                    bucket.swap(i, j);
+                }
             }
         }
-        self.pos = 0;
+
+        self.bucket_pos = vec![0; self.buckets.len()];
+        self.next_bucket = 0;
     }
 
     pub fn next_batch(&mut self) -> Result<Option<WordBatch>> {
-        let n = self.ds.len();
-        if self.pos >= n { return Ok(None); }
-        let end = (self.pos + self.batch_size).min(n);
-        if end - self.pos < self.batch_size { return Ok(None); } // drop last
+        // Find next non-exhausted bucket with enough samples (round-robin).
+        let n_buckets = self.buckets.len();
+        if n_buckets == 0 { return Ok(None); }
 
-        let indices = &self.perm[self.pos..end];
-        self.pos = end;
+        for _ in 0..n_buckets {
+            let bi = self.next_bucket % n_buckets;
+            self.next_bucket = bi + 1;
+
+            let remaining = self.buckets[bi].len().saturating_sub(self.bucket_pos[bi]);
+            if remaining >= self.batch_size {
+                let start = self.bucket_pos[bi];
+                let end = start + self.batch_size;
+                self.bucket_pos[bi] = end;
+
+                let indices = &self.buckets[bi][start..end];
+                let word_len = bi + 1; // bucket 0 = 1-letter words
+                return self.build_batch(indices, word_len).map(Some);
+            }
+        }
+
+        Ok(None) // all buckets exhausted
+    }
+
+    fn build_batch(&self, indices: &[usize], word_len: usize) -> Result<WordBatch> {
         let b = indices.len();
 
         let mut images = Vec::with_capacity(b);
         let mut cleans = Vec::with_capacity(b);
-        let mut letters: [Vec<i64>; 4] = [
-            Vec::with_capacity(b), Vec::with_capacity(b),
-            Vec::with_capacity(b), Vec::with_capacity(b),
-        ];
+        let mut letters_per_pos: Vec<Vec<i64>> = (0..word_len).map(|_| Vec::with_capacity(b)).collect();
+        let mut centers_per_pos: Vec<Vec<f32>> = (0..word_len).map(|_| Vec::with_capacity(b)).collect();
 
         for &idx in indices {
             let s = &self.ds.samples[idx];
             images.push(&s.image);
             cleans.push(&s.clean);
-            for (p, letter_vec) in letters.iter_mut().enumerate() {
-                letter_vec.push(s.letters[p]);
+            for pos in 0..word_len {
+                letters_per_pos[pos].push(s.letters[pos]);
+                centers_per_pos[pos].push(s.centers[pos] as f32);
             }
         }
 
         let img_batch = Tensor::stack(&images, 0)?;
         let clean_batch = Tensor::stack(&cleans, 0)?;
-        let letter_idx = [
-            Tensor::from_i64(&letters[0], &[b as i64], Device::CPU)?,
-            Tensor::from_i64(&letters[1], &[b as i64], Device::CPU)?,
-            Tensor::from_i64(&letters[2], &[b as i64], Device::CPU)?,
-            Tensor::from_i64(&letters[3], &[b as i64], Device::CPU)?,
-        ];
+
+        let letter_idx: Vec<Tensor> = letters_per_pos.iter()
+            .map(|v| Tensor::from_i64(v, &[b as i64], Device::CPU))
+            .collect::<Result<_>>()?;
+
+        let centers: Vec<Tensor> = centers_per_pos.iter()
+            .map(|v| Tensor::from_f32(v, &[b as i64], Device::CPU))
+            .collect::<Result<_>>()?;
 
         let batch = if let Some(device) = self.device {
             let use_pin = device.is_cuda() && cuda_available();
@@ -364,19 +436,20 @@ impl<'a> WordLoader<'a> {
             WordBatch {
                 image: pin(img_batch)?.to_device(device)?,
                 clean: pin(clean_batch)?.to_device(device)?,
-                letter_idx: [
-                    pin(letter_idx[0].clone())?.to_device(device)?,
-                    pin(letter_idx[1].clone())?.to_device(device)?,
-                    pin(letter_idx[2].clone())?.to_device(device)?,
-                    pin(letter_idx[3].clone())?.to_device(device)?,
-                ],
+                word_len,
+                letter_idx: letter_idx.into_iter()
+                    .map(|t| pin(t)?.to_device(device))
+                    .collect::<Result<_>>()?,
+                centers: centers.into_iter()
+                    .map(|t| pin(t)?.to_device(device))
+                    .collect::<Result<_>>()?,
             }
         } else {
-            WordBatch { image: img_batch, clean: clean_batch, letter_idx }
+            WordBatch { image: img_batch, clean: clean_batch, word_len, letter_idx, centers }
         };
 
-        Ok(Some(batch))
+        Ok(batch)
     }
 
-    pub fn reset(&mut self) { self.init_perm(); }
+    pub fn reset(&mut self) { self.init_buckets(); }
 }

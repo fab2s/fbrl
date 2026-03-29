@@ -66,6 +66,11 @@ fn main() {
             eprintln!("  --word-data <path>      Word dataset directory");
             eprintln!("  --letter <path>         Letter model checkpoint");
             eprintln!("  --save-dir <path>       Output directory for eval.json");
+            eprintln!();
+            eprintln!("generate options:");
+            eprintln!("  --config <path.json>    Generator config");
+            eprintln!("  --save <dir>            Save dataset to directory");
+            eprintln!("  --mode <word|letter>    Generation mode (default: word)");
             std::process::exit(1);
         }
     }
@@ -160,7 +165,6 @@ fn run_eval_subscan(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("--letter is required".into());
     }
 
-    // Auto-load letter architecture from manifest.json next to checkpoint.
     load_letter_config_from_manifest(&mut cfg);
 
     eprintln!("=== Composition Eval: SubScan + LetterModel ===");
@@ -177,8 +181,8 @@ fn run_eval_subscan(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("=== Results ===");
     for p in &results.positions {
         let acc = if p.total > 0 { p.correct as f64 / p.total as f64 * 100.0 } else { 0.0 };
-        eprintln!("  pos {} (x={:+.2}): {}/{} = {:.1}%  err_x={:.4}",
-            p.position, p.gt_center, p.correct, p.total, acc, p.mean_err_x);
+        eprintln!("  pos {}: {}/{} = {:.1}%  err_x={:.4}",
+            p.position, p.correct, p.total, acc, p.mean_err_x);
     }
     eprintln!();
     eprintln!("  TOTAL: {}/{} = {:.1}%  mean_err_x={:.4}",
@@ -226,16 +230,17 @@ fn run_eval_letter_direct(args: &[String]) -> Result<(), Box<dyn std::error::Err
     for p in &results.positions {
         let n = p.total.max(1) as f64;
         let acc = p.correct as f64 / n * 100.0;
-        eprintln!("  pos {} (x={:+.2}): {}/{} = {:.1}%  | pred matches: {}",
-            p.position, p.gt_center, p.correct, p.total, acc,
-            (0..4).map(|op| format!("pos{}={:.1}%", op, p.matched_other_pos[op] as f64 / n * 100.0))
-                .collect::<Vec<_>>().join(" "));
+        let matches: String = p.matched_other_pos.iter().enumerate()
+            .filter(|&(_, c)| *c > 0)
+            .map(|(op, c)| format!("pos{}={:.1}%", op, *c as f64 / n * 100.0))
+            .collect::<Vec<_>>().join(" ");
+        eprintln!("  pos {}: {}/{} = {:.1}%  | pred matches: {}",
+            p.position, p.correct, p.total, acc, matches);
     }
     eprintln!();
     eprintln!("  TOTAL: {}/{} = {:.1}%",
         results.correct, results.total, results.accuracy * 100.0);
 
-    // Top predicted letters.
     let mut pred_sorted: Vec<(usize, usize)> = results.pred_histogram.iter()
         .enumerate().map(|(i, &c)| (i, c)).collect();
     pred_sorted.sort_by(|a, b| b.1.cmp(&a.1));
@@ -274,11 +279,15 @@ fn run_generate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("=== Generate Dataset ===");
     eprintln!("Config:     {}", config_path);
+    eprintln!("Mode:       {}", mode);
     eprintln!("Fonts:      {}", cfg.fonts);
-    eprintln!("Charset:    {} chars", cfg.charset.len());
     eprintln!("Letters:    {}-{} per image", cfg.min_letters, cfg.max_letters);
     eprintln!("Samples:    {}", cfg.samples);
     eprintln!("Image:      {}×{}", cfg.image_height, cfg.image_width);
+    if !cfg.word_list.is_empty() {
+        eprintln!("Word list:  {}", cfg.word_list);
+    }
+    eprintln!("Case mode:  {}", cfg.case_mode);
     eprintln!();
 
     match mode.as_str() {
@@ -286,7 +295,6 @@ fn run_generate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             let gds = generate_letter_dataset(&cfg)?;
             eprintln!("Dataset: {} letter samples in memory", gds.dataset.samples.len());
             if !save_dir.is_empty() {
-                // Save letter dataset as PNGs + metadata.
                 let dir_path = std::path::Path::new(&save_dir);
                 std::fs::create_dir_all(dir_path)?;
                 let mut meta = std::collections::HashMap::<String, serde_json::Value>::new();

@@ -1,11 +1,9 @@
 //! In-memory font-based dataset generator.
 //!
-//! Loads TTF/OTF fonts, rasterizes letters, and composes word images
-//! with variable neighbor counts. Returns a `WordDataset` directly
-//! in RAM — no disk I/O needed. Optional `--save` dumps PNGs + metadata.json.
+//! Loads TTF/OTF fonts and a word list, rasterizes words with proportional
+//! glyph spacing. Returns a `WordDataset` directly in RAM.
 //!
-//! Images are white-on-black (ink=1.0, background=0.0) to match the
-//! existing training data convention.
+//! Images are white-on-black (ink=1.0, background=0.0).
 
 use std::collections::HashMap;
 use std::fs;
@@ -18,18 +16,12 @@ use serde::{Serialize, Deserialize};
 use fbrl::letter::{LetterDataset, LetterSample};
 use super::data::{WordDataset, WordSample};
 
-/// Number of letter positions in a word image.
-const N_POSITIONS: usize = 4;
-
-/// Normalized x-centers for the 4 letter positions in a 128x256 word image.
-const LETTER_CENTERS: [f64; N_POSITIONS] = [-0.75, -0.25, 0.25, 0.75];
-
 /// Generator configuration — loaded from JSON.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct GenConfig {
     /// Glob pattern for TTF/OTF font files.
     pub fonts: String,
-    /// Characters to use (e.g., "abcdefghijklmnopqrstuvwxyz").
+    /// Characters to use (for letter-mode and random fallback).
     pub charset: String,
     /// Image height in pixels.
     #[serde(default = "default_height")]
@@ -37,10 +29,10 @@ pub struct GenConfig {
     /// Image width in pixels.
     #[serde(default = "default_width")]
     pub image_width: usize,
-    /// Minimum letters per image (1-4).
+    /// Minimum letters per image.
     #[serde(default = "default_min_letters")]
     pub min_letters: usize,
-    /// Maximum letters per image (1-4).
+    /// Maximum letters per image.
     #[serde(default = "default_max_letters")]
     pub max_letters: usize,
     /// Number of samples to generate.
@@ -52,6 +44,12 @@ pub struct GenConfig {
     /// RNG seed for reproducibility.
     #[serde(default = "default_seed")]
     pub seed: u64,
+    /// Path to word list file (one word per line). Empty = random chars.
+    #[serde(default)]
+    pub word_list: String,
+    /// Case mode: "mixed" (default), "lower", "upper".
+    #[serde(default = "default_case_mode")]
+    pub case_mode: String,
 }
 
 fn default_height() -> usize { 128 }
@@ -61,55 +59,67 @@ fn default_max_letters() -> usize { 4 }
 fn default_samples() -> usize { 10000 }
 fn default_fill() -> f64 { 0.80 }
 fn default_seed() -> u64 { 0xF0D1_CAFE }
+fn default_case_mode() -> String { "mixed".to_string() }
 
 /// A loaded font with precomputed sizing.
 struct LoadedFont {
     font: Font,
     px_size: f32,
-    baseline_y: i32, // pixel y of baseline from top of image
+    baseline_y: i32,
     name: String,
 }
 
 /// Generated dataset with raw pixel buffers for fast saving.
 pub struct GeneratedDataset {
     pub dataset: WordDataset,
-    /// Raw pixel buffers (one per sample) for PNG saving without tensor extraction.
     pub pixel_buffers: Vec<Vec<f32>>,
     pub image_height: usize,
     pub image_width: usize,
 }
 
-/// Generate a `WordDataset` in memory from font files.
+/// Generate a `WordDataset` in memory from font files and a word list.
 ///
-/// Each sample is a 128×256 image with 1-4 letters placed at standard
-/// word positions. Empty positions have letter_idx = -1.
+/// Each sample is a word image with proportionally-spaced glyphs.
+/// GT centers are computed from actual font advance widths.
 pub fn generate_word_dataset(cfg: &GenConfig) -> Result<GeneratedDataset> {
     let fonts = load_fonts(cfg)?;
     if fonts.is_empty() {
         return Err(TensorError::new("no fonts loaded"));
     }
 
+    let words = load_word_list(cfg)?;
     let chars: Vec<char> = cfg.charset.chars().collect();
-    if chars.is_empty() {
-        return Err(TensorError::new("empty charset"));
-    }
 
-    eprintln!("Generator: {} fonts, {} chars, {} samples, {}-{} letters/image",
-        fonts.len(), chars.len(), cfg.samples, cfg.min_letters, cfg.max_letters);
+    eprintln!("Word generator: {} fonts, {} words, {} samples, case={}",
+        fonts.len(), words.len(), cfg.samples, cfg.case_mode);
 
     let mut rng = cfg.seed;
     let mut samples = Vec::with_capacity(cfg.samples);
     let mut pixel_buffers = Vec::with_capacity(cfg.samples);
+    let mut skipped = 0usize;
 
-    for _ in 0..cfg.samples {
-        let (sample, pixels) = generate_one_sample(
-            &fonts, &chars, cfg, &mut rng,
+    let mut generated = 0;
+    while generated < cfg.samples {
+        let result = generate_one_word_sample(
+            &fonts, &words, &chars, cfg, &mut rng,
         )?;
-        samples.push(sample);
-        pixel_buffers.push(pixels);
+        if let Some((sample, pixels)) = result {
+            samples.push(sample);
+            pixel_buffers.push(pixels);
+            generated += 1;
+        } else {
+            skipped += 1;
+            if skipped > cfg.samples * 10 {
+                return Err(TensorError::new("too many skipped samples — fonts may be too wide for canvas"));
+            }
+        }
     }
 
-    eprintln!("Generated {} samples in memory", samples.len());
+    if skipped > 0 {
+        eprintln!("Skipped {} overflows ({:.1}%)", skipped,
+            skipped as f64 / (generated + skipped) as f64 * 100.0);
+    }
+    eprintln!("Generated {} word samples in memory", samples.len());
     Ok(GeneratedDataset {
         dataset: WordDataset { samples },
         pixel_buffers,
@@ -128,9 +138,7 @@ pub struct GeneratedLetterDataset {
 
 /// Generate a `LetterDataset` with target letter centered and 0-2 neighbors.
 ///
-/// Uses the same GenConfig. `min_letters`/`max_letters` control neighbor count
-/// (1 = alone, 2 = one neighbor, 3 = both neighbors). Images are 128×256
-/// matching word-image format for inference compatibility.
+/// Uses proportional spacing from font advance widths.
 pub fn generate_letter_dataset(cfg: &GenConfig) -> Result<GeneratedLetterDataset> {
     let fonts = load_fonts(cfg)?;
     if fonts.is_empty() {
@@ -142,86 +150,128 @@ pub fn generate_letter_dataset(cfg: &GenConfig) -> Result<GeneratedLetterDataset
         return Err(TensorError::new("empty charset"));
     }
 
-    // Letter spacing in normalized coords (matches word layout).
-    let spacing = 0.5;
-    // Positions: center=0.0, left=-spacing, right=+spacing.
-    let center_norm = 0.0;
-    let left_norm = -spacing;
-    let right_norm = spacing;
-
-    eprintln!("Letter generator: {} fonts, {} chars, {} samples, {}-{} letters/image",
-        fonts.len(), chars.len(), cfg.samples, cfg.min_letters, cfg.max_letters);
-
-    let mut rng = cfg.seed;
-    let mut samples = Vec::with_capacity(cfg.samples);
-    let mut pixel_buffers = Vec::with_capacity(cfg.samples);
     let h = cfg.image_height;
     let w = cfg.image_width;
+    let mut rng = cfg.seed;
 
-    for _ in 0..cfg.samples {
-        let font_idx = rng_range(&mut rng, fonts.len());
-        let lf = &fonts[font_idx];
+    // Balanced distribution: every (font, char) combo gets equal representation.
+    let n_combos = fonts.len() * chars.len();
+    let per_combo = cfg.samples / n_combos;
+    let remainder = cfg.samples % n_combos;
+    let total_base = per_combo * n_combos + remainder;
 
-        // Pick target letter.
-        let ch_idx = rng_range(&mut rng, chars.len());
-        let target_ch = chars[ch_idx];
-        let letter_idx = char_to_idx(target_ch);
-        let case_label = if target_ch.is_lowercase() { 1.0f32 } else { 0.0f32 };
+    eprintln!("Letter generator: {} fonts × {} chars = {} combos, {} per combo (+{} extra) = {} samples",
+        fonts.len(), chars.len(), n_combos, per_combo, remainder, total_base);
 
-        // Pick number of total letters (1 = alone, 2 = one neighbor, 3 = both).
-        let n = if cfg.min_letters == cfg.max_letters {
-            cfg.min_letters
-        } else {
-            cfg.min_letters + rng_range(&mut rng, cfg.max_letters - cfg.min_letters + 1)
-        };
+    let mut raw_samples = Vec::with_capacity(total_base);
+    let mut clean_by_id: HashMap<(i64, bool, String), Tensor> = HashMap::new();
 
-        let mut pixels = vec![0.0f32; h * w];
+    let mut combo_idx = 0usize;
+    for lf in &fonts {
+        for &target_ch in &chars {
+            let letter_idx = char_to_idx(target_ch);
+            let case_label = if target_ch.is_lowercase() { 1.0f32 } else { 0.0f32 };
+            let repeats = per_combo + if combo_idx < remainder { 1 } else { 0 };
+            combo_idx += 1;
 
-        // Always render target at center.
-        render_glyph_at(&lf.font, lf.px_size, lf.baseline_y, target_ch,
-                        center_norm, &mut pixels, h, w);
+            for _ in 0..repeats {
+                let n = if cfg.min_letters == cfg.max_letters {
+                    cfg.min_letters
+                } else {
+                    cfg.min_letters + rng_range(&mut rng, cfg.max_letters - cfg.min_letters + 1)
+                };
 
-        if n >= 2 {
-            // At least one neighbor. Pick left or right (or both if n=3).
-            let neighbor_ch = chars[rng_range(&mut rng, chars.len())];
-            if n == 2 {
-                // One neighbor: randomly left or right.
-                let pos = if rng_range(&mut rng, 2) == 0 { left_norm } else { right_norm };
-                render_glyph_at(&lf.font, lf.px_size, lf.baseline_y, neighbor_ch,
-                                pos, &mut pixels, h, w);
-            } else {
-                // Both neighbors.
-                render_glyph_at(&lf.font, lf.px_size, lf.baseline_y, neighbor_ch,
-                                left_norm, &mut pixels, h, w);
-                let right_ch = chars[rng_range(&mut rng, chars.len())];
-                render_glyph_at(&lf.font, lf.px_size, lf.baseline_y, right_ch,
-                                right_norm, &mut pixels, h, w);
+                let mut pixels = vec![0.0f32; h * w];
+
+                // Layout: target centered, neighbors spaced by advance width.
+                let target_metrics = lf.font.metrics(target_ch, lf.px_size);
+                let target_advance = target_metrics.advance_width;
+
+                // Render target at center.
+                let center_px = w as f32 / 2.0;
+                let target_cursor = center_px - target_advance / 2.0;
+                render_glyph_cursor(&lf.font, lf.px_size, lf.baseline_y, target_ch,
+                                    target_cursor, &mut pixels, h, w);
+
+                if n >= 2 {
+                    let neighbor_ch = chars[rng_range(&mut rng, chars.len())];
+                    let neighbor_advance = lf.font.metrics(neighbor_ch, lf.px_size).advance_width;
+                    if n == 2 {
+                        if rng_range(&mut rng, 2) == 0 {
+                            // Left neighbor.
+                            let cursor = target_cursor - neighbor_advance;
+                            render_glyph_cursor(&lf.font, lf.px_size, lf.baseline_y, neighbor_ch,
+                                                cursor, &mut pixels, h, w);
+                        } else {
+                            // Right neighbor.
+                            let cursor = target_cursor + target_advance;
+                            render_glyph_cursor(&lf.font, lf.px_size, lf.baseline_y, neighbor_ch,
+                                                cursor, &mut pixels, h, w);
+                        }
+                    } else {
+                        // Both neighbors.
+                        let left_cursor = target_cursor - neighbor_advance;
+                        render_glyph_cursor(&lf.font, lf.px_size, lf.baseline_y, neighbor_ch,
+                                            left_cursor, &mut pixels, h, w);
+                        let right_ch = chars[rng_range(&mut rng, chars.len())];
+                        let right_cursor = target_cursor + target_advance;
+                        render_glyph_cursor(&lf.font, lf.px_size, lf.baseline_y, right_ch,
+                                            right_cursor, &mut pixels, h, w);
+                    }
+                }
+
+                let clean = Tensor::from_f32(&pixels, &[1, h as i64, w as i64], Device::CPU)?;
+                let is_lower = case_label > 0.5;
+                clean_by_id.entry((letter_idx, is_lower, lf.name.clone()))
+                    .or_insert_with(|| clean.clone());
+
+                raw_samples.push((clean, letter_idx, case_label, lf.name.clone()));
             }
         }
-
-        let image = Tensor::from_f32(&pixels, &[1, h as i64, w as i64], Device::CPU)?;
-
-        samples.push(LetterSample {
-            image: image.clone(),
-            clean: image.clone(),
-            letter_idx,
-            case_label,
-            partner_clean: image, // dummy — train with recode_weight=0
-            font: lf.name.clone(),
-        });
-        pixel_buffers.push(pixels);
     }
 
-    eprintln!("Generated {} letter samples in memory", samples.len());
+    // Resolve partners (opposite case, same letter, same font).
+    let mut has_partners = true;
+    let mut samples = Vec::with_capacity(raw_samples.len());
+    let mut pixel_buffers = Vec::with_capacity(raw_samples.len());
+
+    for (clean, letter_idx, case_label, font_name) in raw_samples {
+        let is_lower = case_label > 0.5;
+        let partner_clean = if let Some(p) = clean_by_id.get(&(letter_idx, !is_lower, font_name.clone())) {
+            p.clone()
+        } else {
+            has_partners = false;
+            Tensor::zeros(&clean.shape(), Default::default())?
+        };
+
+        let pixels = clean.to_f32_vec()?;
+        pixel_buffers.push(pixels);
+
+        samples.push(LetterSample {
+            image: clean.clone(),
+            clean,
+            letter_idx,
+            case_label,
+            font: font_name,
+            partner_clean,
+        });
+    }
+
+    if !has_partners {
+        eprintln!("Note: some letters missing opposite-case partners");
+    }
+    eprintln!("Generated {} letter samples in memory ({} with partners)",
+        samples.len(), if has_partners { "all" } else { "some" });
+
     Ok(GeneratedLetterDataset {
-        dataset: LetterDataset { samples, has_partners: false },
+        dataset: LetterDataset { samples, has_partners },
         pixel_buffers,
         image_height: h,
         image_width: w,
     })
 }
 
-/// Save a generated dataset to disk (PNGs + metadata.json).
+/// Save a generated word dataset to disk (PNGs + metadata.json).
 pub fn save_dataset(gds: &GeneratedDataset, dir: &str) -> Result<()> {
     let dir_path = Path::new(dir);
     fs::create_dir_all(dir_path)
@@ -233,12 +283,10 @@ pub fn save_dataset(gds: &GeneratedDataset, dir: &str) -> Result<()> {
         let img_name = format!("img_{:05}.png", i);
         let img_path = dir_path.join(&img_name);
 
-        // Write image from raw pixel buffer (fast — no tensor extraction).
         save_tensor_png(&gds.pixel_buffers[i], gds.image_height, gds.image_width, &img_path)?;
 
-        // Metadata entry (clean = image for generated data).
         let letters: Vec<String> = sample.letters.iter().map(|&idx| {
-            if idx >= 0 { ((idx as u8 + b'a') as char).to_string() }
+            if idx >= 0 { ((idx as u8 + b'A') as char).to_string() }
             else { "_".to_string() }
         }).collect();
 
@@ -246,10 +294,8 @@ pub fn save_dataset(gds: &GeneratedDataset, dir: &str) -> Result<()> {
             "image": img_name,
             "clean": img_name,
             "word": sample.word,
-            "letter1": letters[0],
-            "letter2": letters[1],
-            "letter3": letters[2],
-            "letter4": letters[3],
+            "letters": letters,
+            "centers": sample.centers,
         }));
     }
 
@@ -261,7 +307,150 @@ pub fn save_dataset(gds: &GeneratedDataset, dir: &str) -> Result<()> {
     Ok(())
 }
 
-// ── Internal ─────────────────────────────────────────────────────────
+// ── Word generation ─────────────────────────────────────────────────
+
+/// Generate one word sample with proportional glyph spacing.
+/// Returns None if the word overflows the canvas.
+fn generate_one_word_sample(
+    fonts: &[LoadedFont],
+    words: &[String],
+    chars: &[char],
+    cfg: &GenConfig,
+    rng: &mut u64,
+) -> Result<Option<(WordSample, Vec<f32>)>> {
+    let h = cfg.image_height;
+    let w = cfg.image_width;
+
+    let font_idx = rng_range(rng, fonts.len());
+    let lf = &fonts[font_idx];
+
+    // Pick a word and apply case.
+    let base_word = if !words.is_empty() {
+        words[rng_range(rng, words.len())].clone()
+    } else {
+        // Random char fallback.
+        let n = if cfg.min_letters == cfg.max_letters {
+            cfg.min_letters
+        } else {
+            cfg.min_letters + rng_range(rng, cfg.max_letters - cfg.min_letters + 1)
+        };
+        (0..n).map(|_| chars[rng_range(rng, chars.len())]).collect()
+    };
+
+    let word = apply_case(&base_word, &cfg.case_mode, rng);
+    let word_chars: Vec<char> = word.chars().collect();
+
+    if word_chars.is_empty() {
+        return Ok(None);
+    }
+
+    // Layout pass: rasterize all glyphs, compute positions.
+    let mut glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = Vec::with_capacity(word_chars.len());
+    let mut total_advance = 0.0f32;
+
+    for &ch in &word_chars {
+        let (metrics, bitmap) = lf.font.rasterize(ch, lf.px_size);
+        total_advance += metrics.advance_width;
+        glyphs.push((metrics, bitmap));
+    }
+
+    // Skip if word overflows canvas (with some margin).
+    if total_advance > w as f32 * 0.95 {
+        return Ok(None);
+    }
+
+    // Center the word on the canvas.
+    let start_x = (w as f32 - total_advance) / 2.0;
+    let mut cursor = start_x;
+
+    let mut pixels = vec![0.0f32; h * w];
+    let mut letters = Vec::with_capacity(word_chars.len());
+    let mut centers = Vec::with_capacity(word_chars.len());
+
+    for (i, &ch) in word_chars.iter().enumerate() {
+        let (ref metrics, ref bitmap) = glyphs[i];
+        letters.push(char_to_idx(ch));
+
+        // Center of this glyph in pixel space.
+        let center_px = cursor + metrics.advance_width / 2.0;
+        // Normalize: pixel / width * 2 - 1.
+        let norm_x = (center_px as f64 / w as f64) * 2.0 - 1.0;
+        centers.push(norm_x);
+
+        // Render from pre-rasterized bitmap.
+        render_from_bitmap(
+            metrics, bitmap, lf.baseline_y, cursor,
+            &mut pixels, h, w,
+        );
+
+        cursor += metrics.advance_width;
+    }
+
+    let image = Tensor::from_f32(&pixels, &[1, h as i64, w as i64], Device::CPU)?;
+
+    Ok(Some((WordSample {
+        image: image.clone(),
+        clean: image,
+        word,
+        letters,
+        centers,
+    }, pixels)))
+}
+
+/// Apply random casing to a word.
+fn apply_case(word: &str, mode: &str, rng: &mut u64) -> String {
+    match mode {
+        "lower" => word.to_lowercase(),
+        "upper" => word.to_uppercase(),
+        _ => {
+            // Mixed: ~50% lower, ~25% upper, ~25% title.
+            match rng_range(rng, 4) {
+                0 => word.to_uppercase(),
+                1 => {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(c) => c.to_uppercase().to_string() + &chars.as_str().to_lowercase(),
+                    }
+                }
+                _ => word.to_lowercase(),
+            }
+        }
+    }
+}
+
+// ── Word list loading ───────────────────────────────────────────────
+
+fn load_word_list(cfg: &GenConfig) -> Result<Vec<String>> {
+    if cfg.word_list.is_empty() {
+        return Ok(Vec::new()); // random char fallback
+    }
+
+    let text = fs::read_to_string(&cfg.word_list)
+        .map_err(|e| TensorError::new(&format!("read word list '{}': {e}", cfg.word_list)))?;
+
+    let words: Vec<String> = text.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter(|l| {
+            let n = l.chars().count();
+            n >= cfg.min_letters && n <= cfg.max_letters
+        })
+        .map(|l| l.to_string())
+        .collect();
+
+    if words.is_empty() {
+        return Err(TensorError::new(&format!(
+            "no words with {}-{} letters in '{}'", cfg.min_letters, cfg.max_letters, cfg.word_list
+        )));
+    }
+
+    eprintln!("Loaded {} words from '{}' ({}-{} letters)",
+        words.len(), cfg.word_list, cfg.min_letters, cfg.max_letters);
+    Ok(words)
+}
+
+// ── Font loading ────────────────────────────────────────────────────
 
 fn load_fonts(cfg: &GenConfig) -> Result<Vec<LoadedFont>> {
     let paths: Vec<_> = glob::glob(&cfg.fonts)
@@ -288,14 +477,10 @@ fn load_fonts(cfg: &GenConfig) -> Result<Vec<LoadedFont>> {
             }
         };
 
-        // Compute px_size so line height fills `fill_ratio` of image.
         let target_px = (cfg.image_height as f64 * cfg.fill_ratio) as f32;
-
-        // Start with a guess and refine.
         let mut px_size = target_px;
         for _ in 0..5 {
-            let lm = font.horizontal_line_metrics(px_size);
-            if let Some(lm) = lm {
+            if let Some(lm) = font.horizontal_line_metrics(px_size) {
                 let actual_height = lm.ascent - lm.descent;
                 if actual_height > 0.1 {
                     px_size = px_size * target_px / actual_height;
@@ -303,7 +488,6 @@ fn load_fonts(cfg: &GenConfig) -> Result<Vec<LoadedFont>> {
             }
         }
 
-        // Compute baseline position (pixels from top of image).
         let baseline_y = if let Some(lm) = font.horizontal_line_metrics(px_size) {
             let total = lm.ascent - lm.descent;
             let top_margin = ((cfg.image_height as f32 - total) / 2.0).max(0.0);
@@ -323,82 +507,26 @@ fn load_fonts(cfg: &GenConfig) -> Result<Vec<LoadedFont>> {
     Ok(fonts)
 }
 
-fn generate_one_sample(
-    fonts: &[LoadedFont],
-    chars: &[char],
-    cfg: &GenConfig,
-    rng: &mut u64,
-) -> Result<(WordSample, Vec<f32>)> {
-    let h = cfg.image_height;
-    let w = cfg.image_width;
+// ── Glyph rendering ─────────────────────────────────────────────────
 
-    // Pick random font.
-    let font_idx = rng_range(rng, fonts.len());
-    let lf = &fonts[font_idx];
-
-    // Pick number of letters.
-    let n_letters = if cfg.min_letters == cfg.max_letters {
-        cfg.min_letters
-    } else {
-        cfg.min_letters + rng_range(rng, cfg.max_letters - cfg.min_letters + 1)
-    };
-
-    // Pick which positions to fill (contiguous block).
-    let max_start = N_POSITIONS.saturating_sub(n_letters);
-    let start_pos = if max_start > 0 { rng_range(rng, max_start + 1) } else { 0 };
-
-    // Pick letters for each position.
-    let mut letters = [-1i64; N_POSITIONS];
-    let mut word = String::new();
-    for i in 0..n_letters {
-        let pos = start_pos + i;
-        let ch_idx = rng_range(rng, chars.len());
-        let ch = chars[ch_idx];
-        letters[pos] = char_to_idx(ch);
-        word.push(ch);
-    }
-
-    // Render to pixel buffer.
-    let mut pixels = vec![0.0f32; h * w];
-
-    for pos in 0..N_POSITIONS {
-        if letters[pos] < 0 { continue; }
-        let ch = idx_to_char(letters[pos], chars);
-        render_glyph(&lf.font, lf.px_size, lf.baseline_y, ch, pos,
-                      &mut pixels, h, w);
-    }
-
-    // Create tensors.
-    let image = Tensor::from_f32(&pixels, &[1, h as i64, w as i64], Device::CPU)?;
-
-    Ok((WordSample {
-        image: image.clone(),
-        clean: image,
-        letters,
-        word,
-    }, pixels))
-}
-
-fn render_glyph(
+/// Render a glyph at a pixel cursor position (left edge of advance box).
+fn render_glyph_cursor(
     font: &Font, px_size: f32, baseline_y: i32, ch: char,
-    position: usize, pixels: &mut [f32], img_h: usize, img_w: usize,
-) {
-    render_glyph_at(font, px_size, baseline_y, ch,
-                    LETTER_CENTERS[position], pixels, img_h, img_w);
-}
-
-fn render_glyph_at(
-    font: &Font, px_size: f32, baseline_y: i32, ch: char,
-    norm_x: f64, pixels: &mut [f32], img_h: usize, img_w: usize,
+    cursor_x: f32, pixels: &mut [f32], img_h: usize, img_w: usize,
 ) {
     let (metrics, bitmap) = font.rasterize(ch, px_size);
+    render_from_bitmap(&metrics, &bitmap, baseline_y, cursor_x, pixels, img_h, img_w);
+}
+
+/// Render a pre-rasterized glyph bitmap at a cursor position.
+fn render_from_bitmap(
+    metrics: &fontdue::Metrics, bitmap: &[u8],
+    baseline_y: i32, cursor_x: f32,
+    pixels: &mut [f32], img_h: usize, img_w: usize,
+) {
     if metrics.width == 0 || metrics.height == 0 { return; }
 
-    // Normalized x → pixel center.
-    let center_x = ((norm_x + 1.0) / 2.0 * img_w as f64) as i32;
-
-    // Glyph pixel origin.
-    let glyph_x = center_x - metrics.width as i32 / 2 + metrics.xmin;
+    let glyph_x = cursor_x as i32 + metrics.xmin;
     let glyph_y = baseline_y - metrics.height as i32 - metrics.ymin;
 
     for gy in 0..metrics.height {
@@ -424,24 +552,12 @@ fn char_to_idx(ch: char) -> i64 {
     }
 }
 
-fn idx_to_char(idx: i64, chars: &[char]) -> char {
-    // Find a char in charset matching this letter index.
-    let target_upper = (idx as u8 + b'A') as char;
-    for &ch in chars {
-        if ch.to_ascii_uppercase() == target_upper {
-            return ch;
-        }
-    }
-    target_upper
-}
-
 /// Save a float pixel buffer as a grayscale PNG.
 pub fn save_letter_png(pixels: &[f32], h: usize, w: usize, path: &Path) -> Result<()> {
     save_tensor_png(pixels, h, w, path)
 }
 
 fn save_tensor_png(pixels: &[f32], h: usize, w: usize, path: &Path) -> Result<()> {
-    // Convert float pixels [0, 1] to u8 [0, 255].
     let bytes: Vec<u8> = pixels.iter()
         .map(|&v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
         .collect();

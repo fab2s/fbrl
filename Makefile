@@ -4,10 +4,11 @@
 # Working directory is letter/ (set in docker-compose.yml).
 # The override mounts the parent so flodl path dependency resolves.
 
-COMPOSE = docker compose
-RUN     = $(COMPOSE) run --rm $(if $(MONITOR),--service-ports) dev
+COMPOSE  = docker compose
+RUN      = $(COMPOSE) run --rm $(if $(MONITOR),--service-ports) dev
 RUN_WORD = $(COMPOSE) run --rm $(if $(MONITOR),--service-ports) -w /workspace/fbrl/word dev
 FEATURES ?= cuda
+FLODL_DIR ?= ../rdl
 
 .PHONY: image build test test-release check clippy doc shell train-letter clean kill \
         build-word check-word test-word smoke-word rebuild-word train-subscan train-word \
@@ -47,9 +48,23 @@ clippy: image
 doc: image
 	$(RUN) cargo doc --features $(FEATURES) --no-deps --document-private-items
 
-# Force flodl recompilation (touch shim to bust cargo cache, then build)
+# Smart flodl rebuild: only touch shim when flodl source actually changed.
+# Uses git describe --always --dirty to detect commits + uncommitted edits.
+FLODL_HASH_FILE := .flodl-hash
+define check_flodl
+	@NEW_HASH=$$(find $(FLODL_DIR) -type f \( -name '*.rs' -o -name '*.cpp' -o -name '*.h' -o -name 'Cargo.toml' \) | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-16); \
+	OLD_HASH=$$(cat $(FLODL_HASH_FILE) 2>/dev/null || echo "none"); \
+	if [ "$$NEW_HASH" != "$$OLD_HASH" ]; then \
+		echo "flodl changed ($$OLD_HASH → $$NEW_HASH), busting cache"; \
+		touch $(FLODL_DIR)/flodl-sys/shim.cpp 2>/dev/null || true; \
+		echo "$$NEW_HASH" > $(FLODL_HASH_FILE); \
+	else \
+		echo "flodl unchanged ($$OLD_HASH), skipping recompile"; \
+	fi
+endef
+
 rebuild: image
-	@touch ../rdl/flodl-sys/shim.cpp 2>/dev/null || true
+	$(check_flodl)
 	$(RUN) cargo build --release --features $(FEATURES)
 
 # Train letter model
@@ -125,9 +140,9 @@ test-word: image
 smoke-word: image
 	$(RUN_WORD) cargo run --features $(FEATURES)
 
-# Force recompile + build word (release)
+# Smart recompile + build word (release)
 rebuild-word: image
-	@touch ../rdl/flodl-sys/shim.cpp 2>/dev/null || true
+	$(check_flodl)
 	$(RUN_WORD) cargo build --release --features $(FEATURES)
 
 # Train SubScan (Step 2: triangle MSE — independent, no letter model)

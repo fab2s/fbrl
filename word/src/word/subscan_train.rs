@@ -4,8 +4,7 @@
 //! glimpses. Trained independently — no letter model in the loop.
 //!
 //! Loss: MSE(predicted_center_x, gt_center_x).
-//! The ink density is the input (through blurred glimpse features),
-//! not the loss. SubScan learns spatial patterns → center position.
+//! GT centers come from proportional glyph spacing (per-sample, per-position).
 
 use std::fs;
 use std::io::Write;
@@ -20,12 +19,6 @@ use serde::{Serialize, Deserialize};
 
 use super::data::{WordDataset, WordLoader};
 use super::subscan::{SubScanModel, SubScanConfig};
-
-/// Number of letter positions in a word image.
-const N_POSITIONS: usize = 4;
-
-/// Normalized x-centers for the 4 letter positions in a 128x256 word image.
-const LETTER_CENTERS: [f64; N_POSITIONS] = [-0.75, -0.25, 0.25, 0.75];
 
 /// SubScan training configuration.
 #[derive(Serialize, Deserialize)]
@@ -127,9 +120,6 @@ pub struct SubScanEpochStats {
 }
 
 /// Train SubScan with supervised MSE on center_x.
-///
-/// No letter model in the loop. SubScan learns from ink structure
-/// (through triangle glimpse features) to predict letter centers.
 pub fn train_subscan(
     cfg: &SubScanTrainConfig,
     word_ds: &WordDataset,
@@ -263,16 +253,18 @@ pub fn train_subscan(
                 Tensor::from_f32(&half_w_data, &[b as i64, 1], device)?, false,
             );
 
-            // Shuffle letter order.
-            let mut letter_order = [0usize, 1, 2, 3];
+            // Shuffle letter order for this batch.
+            let mut letter_order: Vec<usize> = (0..batch.word_len).collect();
             shuffle(&mut letter_order, &mut rng_state);
 
             for &pos in &letter_order {
-                let gt_x = LETTER_CENTERS[pos];
+                // Per-sample GT centers.
+                let gt_centers = &batch.centers[pos]; // [B] f32 on device
+                let gt_vec = gt_centers.to_f32_vec()?;
 
-                // Noisy starting position.
-                let start_data: Vec<f32> = (0..b).flat_map(|_| {
-                    let x = (gt_x + rng_uniform(&mut rng_state) * noise_x) as f32;
+                // Noisy starting position (per-sample).
+                let start_data: Vec<f32> = gt_vec.iter().flat_map(|&gt_x| {
+                    let x = gt_x + (rng_uniform(&mut rng_state) * noise_x) as f32;
                     let y = (rng_uniform(&mut rng_state) * noise_y) as f32;
                     [x, y]
                 }).collect();
@@ -281,9 +273,8 @@ pub fn train_subscan(
                 );
 
                 // GT target: center_x [B, 1].
-                let gt_data: Vec<f32> = vec![gt_x as f32; b];
                 let gt_target = Variable::new(
-                    Tensor::from_f32(&gt_data, &[b as i64, 1], device)?, false,
+                    gt_centers.reshape(&[b as i64, 1])?, false,
                 );
 
                 // SubScan forward → center_x [B, 1].

@@ -196,6 +196,9 @@ pub fn train_letter(
 
     let mut loader = LetterLoader::new(ds, cfg.batch_size, true);
     loader.set_device(device);
+    if device.is_cuda() {
+        loader.make_resident()?;
+    }
 
     // Ensure save directory exists and rotate prior run artifacts.
     if !cfg.save_dir.is_empty() {

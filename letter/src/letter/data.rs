@@ -209,21 +209,70 @@ fn resolve_data_path(dir: &Path, path: &str) -> PathBuf {
     joined
 }
 
+// --- VRAM-resident data (pre-stacked on GPU) ---
+
+/// All dataset tensors stacked contiguously on a device.
+struct ResidentData {
+    images: Tensor,      // [N, 1, H, W]
+    cleans: Tensor,      // [N, 1, H, W]
+    partners: Tensor,    // [N, 1, H, W]
+    letters: Tensor,     // [N]
+    cases: Tensor,       // [N, 1]
+}
+
+impl ResidentData {
+    /// Stack all samples and move to device. Reports VRAM usage.
+    fn from_dataset(ds: &LetterDataset, device: Device) -> Result<Self> {
+        let n = ds.len();
+        let images_ref: Vec<&Tensor> = ds.samples.iter().map(|s| &s.image).collect();
+        let cleans_ref: Vec<&Tensor> = ds.samples.iter().map(|s| &s.clean).collect();
+        let partners_ref: Vec<&Tensor> = ds.samples.iter().map(|s| &s.partner_clean).collect();
+        let letter_data: Vec<i64> = ds.samples.iter().map(|s| s.letter_idx).collect();
+        let case_data: Vec<f32> = ds.samples.iter().map(|s| s.case_label).collect();
+
+        eprintln!("Stacking {} samples to {}...", n, if device.is_cuda() { "VRAM" } else { "RAM" });
+
+        let images = Tensor::stack(&images_ref, 0)?.to_device(device)?;
+        let cleans = Tensor::stack(&cleans_ref, 0)?.to_device(device)?;
+        let partners = Tensor::stack(&partners_ref, 0)?.to_device(device)?;
+        let letters = Tensor::from_i64(&letter_data, &[n as i64], Device::CPU)?.to_device(device)?;
+        let cases = Tensor::from_f32(&case_data, &[n as i64, 1], Device::CPU)?.to_device(device)?;
+
+        let data_bytes = images.nbytes() + cleans.nbytes() + partners.nbytes()
+            + letters.nbytes() + cases.nbytes();
+        eprintln!("Resident data: {:.1} MB on {:?}", data_bytes as f64 / 1024.0 / 1024.0, device);
+
+        Ok(ResidentData { images, cleans, partners, letters, cases })
+    }
+
+    /// Extract a batch via index_select — single GPU kernel per tensor.
+    fn batch(&self, idx: &Tensor) -> Result<LetterBatch> {
+        Ok(LetterBatch {
+            image: self.images.index_select(0, idx)?,
+            clean: self.cleans.index_select(0, idx)?,
+            partner_clean: self.partners.index_select(0, idx)?,
+            letter_idx: self.letters.index_select(0, idx)?,
+            case_label: self.cases.index_select(0, idx)?,
+        })
+    }
+}
+
+// --- Batched loader ---
+
 /// Iterates over a LetterDataset in shuffled batches.
 ///
-/// ```ignore
-/// let mut loader = LetterLoader::new(&ds, 32, true);
-/// while let Some(batch) = loader.next_batch()? {
-///     // ... training step ...
-/// }
-/// loader.reset(); // new epoch
-/// ```
+/// Supports two modes:
+/// - **Resident** (CUDA): all data pre-stacked on GPU, batches via `index_select`.
+/// - **Transfer** (fallback): per-batch `pin_memory` + `to_device`.
+///
+/// The mode is chosen automatically when `set_device()` is called.
 pub struct LetterLoader<'a> {
     ds: &'a LetterDataset,
     batch_size: usize,
     shuffle: bool,
     drop_last: bool,
     device: Option<Device>,
+    resident: Option<ResidentData>,
     perm: Vec<usize>,
     pos: usize,
 }
@@ -236,6 +285,7 @@ impl<'a> LetterLoader<'a> {
             shuffle,
             drop_last: true,
             device: None,
+            resident: None,
             perm: Vec::new(),
             pos: 0,
         };
@@ -244,15 +294,31 @@ impl<'a> LetterLoader<'a> {
     }
 
     /// Set the target device for batch tensors.
+    /// On CUDA, automatically enables VRAM-resident mode if data fits.
     pub fn set_device(&mut self, device: Device) {
         self.device = Some(device);
+    }
+
+    /// Pre-load all data to device. Called after set_device().
+    /// On failure, falls back to per-batch transfer silently.
+    pub fn make_resident(&mut self) -> Result<()> {
+        let Some(device) = self.device else { return Ok(()); };
+        match ResidentData::from_dataset(self.ds, device) {
+            Ok(data) => {
+                self.resident = Some(data);
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("warning: resident mode failed ({e}), using per-batch transfer");
+                Ok(())
+            }
+        }
     }
 
     fn init_perm(&mut self) {
         let n = self.ds.len();
         self.perm = (0..n).collect();
         if self.shuffle {
-            // Simple Fisher-Yates shuffle
             use std::collections::hash_map::DefaultHasher;
             use std::hash::{Hash, Hasher};
             use std::time::SystemTime;
@@ -285,9 +351,17 @@ impl<'a> LetterLoader<'a> {
 
         let indices = &self.perm[self.pos..end];
         self.pos = end;
-        let b = indices.len();
 
-        // Collect per-sample data.
+        if let Some(ref resident) = self.resident {
+            // VRAM-resident path: index_select on GPU tensors.
+            let device = self.device.unwrap_or(Device::CPU);
+            let idx_data: Vec<i64> = indices.iter().map(|&i| i as i64).collect();
+            let idx = Tensor::from_i64(&idx_data, &[idx_data.len() as i64], device)?;
+            return resident.batch(&idx).map(Some);
+        }
+
+        // Fallback: per-batch stack + transfer.
+        let b = indices.len();
         let mut images = Vec::with_capacity(b);
         let mut cleans = Vec::with_capacity(b);
         let mut partners = Vec::with_capacity(b);
@@ -303,14 +377,12 @@ impl<'a> LetterLoader<'a> {
             case_data.push(s.case_label);
         }
 
-        // Stack into batch tensors.
         let img_batch = Tensor::stack(&images, 0)?;
         let clean_batch = Tensor::stack(&cleans, 0)?;
         let partner_batch = Tensor::stack(&partners, 0)?;
         let letter_idx = Tensor::from_i64(&letter_data, &[b as i64], Device::CPU)?;
         let case_label = Tensor::from_f32(&case_data, &[b as i64, 1], Device::CPU)?;
 
-        // Move to target device if set. Pin memory first for async transfer on CUDA.
         let batch = if let Some(device) = self.device {
             let use_pin = device.is_cuda() && cuda_available();
             let pin = |t: Tensor| -> Result<Tensor> {
@@ -341,4 +413,3 @@ impl<'a> LetterLoader<'a> {
         self.init_perm();
     }
 }
-

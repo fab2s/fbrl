@@ -4,7 +4,7 @@
 //! The model learns: given a word image and a starting position,
 //! read the letter at that position, ignore everything else.
 //!
-//! This produces the frozen oracle for SubScan composition (Step 2).
+//! Supports variable-length words with per-sample GT centers.
 
 use std::fs;
 use std::io::Write;
@@ -23,12 +23,6 @@ use serde::{Serialize, Deserialize};
 use super::data::{WordDataset, WordLoader};
 
 use fbrl::letter::LetterModel;
-
-/// Number of letter positions in a word image.
-const N_POSITIONS: usize = 4;
-
-/// Normalized x-centers for the 4 letter positions in a 128x256 word image.
-const LETTER_CENTERS: [f64; N_POSITIONS] = [-0.75, -0.25, 0.25, 0.75];
 
 /// Configuration for letter model word-image training.
 #[derive(Serialize, Deserialize)]
@@ -115,10 +109,6 @@ pub struct LetterWordEpochStats {
 }
 
 /// Train the letter model on word images with position injection.
-///
-/// Each batch: pick a random letter position, inject noisy starting position
-/// via origin injection, forward on the word image, CE loss on the target letter.
-/// The model learns to focus on one letter in a multi-letter image.
 pub fn train_letter_on_words(
     cfg: &LetterWordConfig,
     word_ds: &WordDataset,
@@ -212,7 +202,6 @@ pub fn train_letter_on_words(
         *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         *state
     }
-    /// Uniform in [-1, 1].
     #[inline]
     fn rng_f(state: &mut u64) -> f64 {
         let v = rng_next(state);
@@ -234,14 +223,16 @@ pub fn train_letter_on_words(
             let img_var = Variable::new(batch.image, false);
             let b = img_var.shape()[0] as usize;
 
-            // Pick a random letter position.
-            let pos = (rng_next(&mut rng_state) >> 33) as usize % N_POSITIONS;
-            let gt_center = LETTER_CENTERS[pos];
+            // Pick a random letter position within this batch's word length.
+            let pos = (rng_next(&mut rng_state) >> 33) as usize % batch.word_len;
 
-            // Noisy starting position: ground truth + noise.
+            // Per-sample GT center for this position.
+            let gt_vec = batch.centers[pos].to_f32_vec()?;
+
+            // Noisy starting position: per-sample GT center + noise.
             let mut offsets = Vec::with_capacity(b * 2);
-            for _ in 0..b {
-                offsets.push((gt_center + rng_f(&mut rng_state) * cfg.noise_x) as f32);
+            for &gt_x in &gt_vec {
+                offsets.push(gt_x + (rng_f(&mut rng_state) * cfg.noise_x) as f32);
                 offsets.push((rng_f(&mut rng_state) * cfg.noise_y) as f32);
             }
             let scan_start = Variable::new(

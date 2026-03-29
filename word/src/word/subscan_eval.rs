@@ -7,7 +7,7 @@
 //! For each letter position in each word:
 //!   noisy_start → SubScan → center_x → LetterModel → predicted letter
 //!
-//! Reports per-position accuracy, overall accuracy, and position error.
+//! Supports variable-length words with per-sample GT centers.
 
 use std::fs;
 
@@ -20,12 +20,6 @@ use super::data::{WordDataset, WordLoader};
 use super::subscan::{SubScanModel, SubScanConfig};
 
 use fbrl::letter::LetterModel;
-
-/// Number of letter positions in a word image.
-const N_POSITIONS: usize = 4;
-
-/// Normalized x-centers for the 4 letter positions in a 128x256 word image.
-const LETTER_CENTERS: [f64; N_POSITIONS] = [-0.75, -0.25, 0.25, 0.75];
 
 /// Configuration for composition eval.
 #[derive(Serialize, Deserialize)]
@@ -115,7 +109,6 @@ impl Default for SubScanEvalConfig {
 #[derive(Debug)]
 pub struct PositionResult {
     pub position: usize,
-    pub gt_center: f64,
     pub total: usize,
     pub correct: usize,
     pub mean_err_x: f64,
@@ -123,7 +116,7 @@ pub struct PositionResult {
 
 /// Overall eval results.
 pub struct EvalResults {
-    pub positions: [PositionResult; N_POSITIONS],
+    pub positions: Vec<PositionResult>,
     pub total: usize,
     pub correct: usize,
     pub accuracy: f64,
@@ -208,7 +201,6 @@ pub fn eval_subscan_composition(
         Device::CPU
     };
 
-    // Both models in eval mode, all params frozen.
     subscan.graph.eval();
     letter.eval();
     for p in &subscan.parameters() { p.freeze()?; }
@@ -231,10 +223,11 @@ pub fn eval_subscan_composition(
         ((v >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
     }
 
-    // --- Per-position accumulators ---
-    let mut pos_correct = [0usize; N_POSITIONS];
-    let mut pos_total = [0usize; N_POSITIONS];
-    let mut pos_err_sum = [0.0f64; N_POSITIONS];
+    // --- Per-position accumulators (up to 4 positions) ---
+    let max_pos = 4;
+    let mut pos_correct = vec![0usize; max_pos];
+    let mut pos_total = vec![0usize; max_pos];
+    let mut pos_err_sum = vec![0.0f64; max_pos];
 
     // --- Eval loop ---
     no_grad(|| {
@@ -242,24 +235,23 @@ pub fn eval_subscan_composition(
             let img_var = Variable::new(batch.image, false);
             let b = img_var.shape()[0] as usize;
 
-            // Region half-width.
             let half_w_data = vec![cfg.region_half_w as f32; b];
             let region_half_w = Variable::new(
                 Tensor::from_f32(&half_w_data, &[b as i64, 1], device)?, false,
             );
 
-            // Case label (all lowercase).
             let case_data = vec![1.0f32; b];
             let case_var = Variable::new(
                 Tensor::from_f32(&case_data, &[b as i64, 1], device)?, false,
             );
 
-            for pos in 0..N_POSITIONS {
-                let gt_x = LETTER_CENTERS[pos];
+            for pos in 0..batch.word_len {
+                let gt_centers = &batch.centers[pos]; // [B] f32
+                let gt_vec = gt_centers.to_f32_vec()?;
 
-                // Noisy starting position (simulates word model).
-                let start_data: Vec<f32> = (0..b).flat_map(|_| {
-                    let x = (gt_x + rng_uniform(&mut rng_state) * cfg.noise_x) as f32;
+                // Noisy starting position (per-sample).
+                let start_data: Vec<f32> = gt_vec.iter().flat_map(|&gt_x| {
+                    let x = gt_x + (rng_uniform(&mut rng_state) * cfg.noise_x) as f32;
                     let y = (rng_uniform(&mut rng_state) * cfg.noise_y) as f32;
                     [x, y]
                 }).collect();
@@ -275,7 +267,7 @@ pub fn eval_subscan_composition(
                 let y_var = Variable::new(
                     Tensor::from_f32(&y_data, &[b as i64, 1], device)?, false,
                 );
-                let origin = center_x.cat(&y_var, 1)?; // [B, 2]
+                let origin = center_x.cat(&y_var, 1)?;
 
                 // ── LetterModel → classification ──
                 let result = letter.forward(&img_var, &case_var, &origin)?;
@@ -287,9 +279,8 @@ pub fn eval_subscan_composition(
                 let n_correct: f64 = correct_mask.sum_dim(0, false)?.item()?;
 
                 // Position error.
-                let gt_data = vec![gt_x as f32; b];
-                let gt_tensor = Tensor::from_f32(&gt_data, &[b as i64, 1], device)?;
-                let err: f64 = center_x.data().sub(&gt_tensor)?
+                let gt_target = gt_centers.reshape(&[b as i64, 1])?;
+                let err: f64 = center_x.data().sub(&gt_target)?
                     .abs()?.mean()?.item()?;
 
                 pos_correct[pos] += n_correct as usize;
@@ -307,15 +298,15 @@ pub fn eval_subscan_composition(
     let mut total = 0usize;
     let mut correct = 0usize;
     let mut err_sum = 0.0f64;
-    let mut positions = Vec::with_capacity(N_POSITIONS);
+    let mut positions = Vec::new();
 
-    for pos in 0..N_POSITIONS {
+    for pos in 0..max_pos {
+        if pos_total[pos] == 0 { continue; }
         let n = pos_total[pos];
         let c = pos_correct[pos];
-        let err = if n > 0 { pos_err_sum[pos] / n as f64 } else { 0.0 };
+        let err = pos_err_sum[pos] / n as f64;
         positions.push(PositionResult {
             position: pos,
-            gt_center: LETTER_CENTERS[pos],
             total: n,
             correct: c,
             mean_err_x: err,
@@ -329,7 +320,7 @@ pub fn eval_subscan_composition(
     let mean_err_x = if total > 0 { err_sum / total as f64 } else { 0.0 };
 
     let results = EvalResults {
-        positions: positions.try_into().unwrap(),
+        positions,
         total,
         correct,
         accuracy,
@@ -352,7 +343,6 @@ pub fn eval_subscan_composition(
             "per_position": results.positions.iter().map(|p| {
                 serde_json::json!({
                     "pos": p.position,
-                    "gt_center": p.gt_center,
                     "total": p.total,
                     "correct": p.correct,
                     "accuracy": format!("{:.1}%", if p.total > 0 { p.correct as f64 / p.total as f64 * 100.0 } else { 0.0 }),
