@@ -72,7 +72,7 @@ rebuild: image
 #        make train-letter DATA=path/to/data EPOCHS=100 SAVE=runs/v1 MONITOR=3000
 SAVE ?= training
 train-letter: rebuild
-	$(RUN) cargo run --release --features $(FEATURES) -- $(if $(GEN),--generate $(GEN)) $(if $(GEN_SAVE),--gen-save $(GEN_SAVE)) $(if $(DATA),--data $(DATA)) $(if $(SYNTHETIC),--synthetic $(SYNTHETIC)) $(if $(SAVE),--save $(SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(LR),--lr $(LR)) $(if $(MONITOR),--monitor $(MONITOR)) $(if $(LEASH),--leash-weight $(LEASH)) $(if $(LEASH_R),--leash-radius $(LEASH_R))
+	$(RUN) cargo run --release --features $(FEATURES) -- $(if $(GEN),--generate $(GEN)) $(if $(GEN_SAVE),--gen-save $(GEN_SAVE)) $(if $(DATA),--data $(DATA)) $(if $(SYNTHETIC),--synthetic $(SYNTHETIC)) $(if $(SAVE),--save $(SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(LR),--lr $(LR)) $(if $(MIN_LR),--min-lr $(MIN_LR)) $(if $(MONITOR),--monitor $(MONITOR)) $(if $(LEASH),--leash-weight $(LEASH)) $(if $(LEASH_R),--leash-radius $(LEASH_R)) $(if $(RECON),--recon-weight $(RECON)) $(if $(RECODE),--recode-weight $(RECODE)) $(if $(PATCH),--patch-size $(PATCH)) $(if $(SCAN_W),--scan-patch-w $(SCAN_W))
 
 # Generate test data (no training)
 # Usage: make gen-test GEN_CFG=gen_test_config.json GEN_OUT=runs/v2_gen/test_data
@@ -83,8 +83,9 @@ GEN_OUT ?= test_data
 
 # Evaluate trained model
 # Usage: make eval-letter RUN_DIR=runs/v2_gen TEST=runs/v2_gen/test_data
+#        make eval-letter RUN_DIR=runs/v6 GEN=letter/gen_clean_config.json
 eval-letter: rebuild
-	$(RUN) cargo run --release --features $(FEATURES) -- --eval $(RUN_DIR) --test-data $(TEST) $(if $(EVAL_SAVE),--save $(EVAL_SAVE))
+	$(RUN) cargo run --release --features $(FEATURES) -- --eval $(RUN_DIR) $(if $(GEN),--generate $(GEN),--test-data $(TEST)) $(if $(EVAL_SAVE),--save $(EVAL_SAVE))
 RUN_DIR ?= runs/v1
 TEST ?= ../python/data/letter_test
 

@@ -16,15 +16,15 @@ fn main() {
 fn run_eval(args: &[String]) {
     let mut eval_dir = String::new();
     let mut test_data = String::new();
+    let mut gen_config_path = String::new();
     let mut save_dir = String::new();
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--eval" => {
-                eval_dir = next_arg(args, &mut i);
-            }
+            "--eval" => { eval_dir = next_arg(args, &mut i); }
             "--test-data" => { test_data = next_arg(args, &mut i); }
+            "--generate" => { gen_config_path = next_arg(args, &mut i); }
             "--save" => { save_dir = next_arg(args, &mut i); }
             "--help" | "-h" => { usage(); std::process::exit(0); }
             _ => { i += 1; continue; }
@@ -32,13 +32,24 @@ fn run_eval(args: &[String]) {
         i += 1;
     }
 
-    if eval_dir.is_empty() || test_data.is_empty() {
-        eprintln!("Usage: fbrl --eval <run-dir> --test-data <test-data-dir> [--save <eval-dir>]");
+    if eval_dir.is_empty() || (test_data.is_empty() && gen_config_path.is_empty()) {
+        eprintln!("Usage: fbrl --eval <run-dir> (--test-data <dir> | --generate <config.json>) [--save <eval-dir>]");
         std::process::exit(1);
     }
 
+    let test_source = if !gen_config_path.is_empty() {
+        let text = std::fs::read_to_string(&gen_config_path)
+            .unwrap_or_else(|e| { eprintln!("read {gen_config_path}: {e}"); std::process::exit(1); });
+        let gen_cfg: GenConfig = serde_json::from_str(&text)
+            .unwrap_or_else(|e| { eprintln!("parse {gen_config_path}: {e}"); std::process::exit(1); });
+        let ds = generate_letter_dataset(&gen_cfg).expect("generate dataset");
+        eval::TestSource::Dataset(ds)
+    } else {
+        eval::TestSource::Directory(test_data.leak())
+    };
+
     let save = if save_dir.is_empty() { None } else { Some(save_dir.as_str()) };
-    eval::eval_letter(&eval_dir, &test_data, save)
+    eval::eval_letter(&eval_dir, test_source, save)
         .expect("evaluation failed");
 }
 
@@ -207,6 +218,7 @@ fn usage() {
     eprintln!();
     eprintln!("Evaluation:");
     eprintln!("  fbrl --eval <run-dir> --test-data <dir> [--save <eval-dir>]");
+    eprintln!("  fbrl --eval <run-dir> --generate <config.json> [--save <eval-dir>]");
     eprintln!();
     eprintln!("Data:");
     eprintln!("  --generate <config.json> generate in-memory from fonts (see gen_letter_config.json)");
