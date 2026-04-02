@@ -677,6 +677,7 @@ fn generate_atlas(results: &[SampleResult], img_h: i64, img_w: i64) -> String {
 
 // --- Latent space analysis ---
 
+#[allow(dead_code)]
 fn cosine_dist(a: &[f32], b: &[f32]) -> f64 {
     let mut dot = 0.0f64;
     let mut na = 0.0f64;
@@ -986,7 +987,7 @@ fn analyze_latent_clustering(results: &[SampleResult]) -> String {
         let pct = ev / full_var * 100.0;
         let cum_pct = cumsum / full_var * 100.0;
         let bar_len = (ev / bar_max * 30.0) as usize;
-        let bar: String = std::iter::repeat('█').take(bar_len).collect();
+        let bar: String = "█".repeat(bar_len);
         let _ = writeln!(s, "| {} | {:.2} | {:.1}% | {:.1}% | {} |", i + 1, ev, pct, cum_pct, bar);
     }
 
@@ -1176,8 +1177,8 @@ fn generate_latent_viz(results: &[SampleResult]) -> String {
     let _ = write!(html, "<div class=\"scard\"><h3>Overall Silhouette</h3><div class=\"val\" style=\"color:{}\">{:.3}</div>", sil_color(avg_sil), avg_sil);
     html.push_str("<div class=\"metric-help\">How well letter+case groups separate in 256-dim latent space. +1 = perfect, 0 = boundary, -1 = wrong cluster.</div>");
     html.push_str("</div>\n");
-    let _ = write!(html, "<div class=\"scard\"><h3>Upper Case</h3><div class=\"val\" style=\"color:{}\">{:.3}</div></div>\n", sil_color(upper_sil), upper_sil);
-    let _ = write!(html, "<div class=\"scard\"><h3>Lower Case</h3><div class=\"val\" style=\"color:{}\">{:.3}</div></div>\n", sil_color(lower_sil), lower_sil);
+    let _ = writeln!(html, "<div class=\"scard\"><h3>Upper Case</h3><div class=\"val\" style=\"color:{}\">{:.3}</div></div>", sil_color(upper_sil), upper_sil);
+    let _ = writeln!(html, "<div class=\"scard\"><h3>Lower Case</h3><div class=\"val\" style=\"color:{}\">{:.3}</div></div>", sil_color(lower_sil), lower_sil);
 
     // Capacity card
     let cap_color = if active_dims > dim * 80 / 100 { "#f44336" }

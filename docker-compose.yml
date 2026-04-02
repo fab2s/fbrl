@@ -2,20 +2,27 @@ services:
   dev:
     build:
       context: .
+      args:
+        CUDA_VERSION: ${CUDA_VERSION:-12.8.0}
     image: fbrl-dev
     user: "${UID:-1000}:${GID:-1000}"
     environment:
       - CARGO_HOME=/tmp/cargo
-      - LD_LIBRARY_PATH=/usr/local/libtorch/lib
+      - LD_LIBRARY_PATH=/usr/local/libtorch/lib:/usr/local/cuda/lib64
+      - LIBTORCH_PATH=/usr/local/libtorch
+      - CUDA_HOME=/usr/local/cuda
     volumes:
       - .:/workspace
+      # flodl source for [patch.crates-io] resolution
+      - ../rdl:/rdl:ro
+      # libtorch mounted at runtime (custom build for SM 6.1 + SM 12.0)
+      - ${LIBTORCH_HOST_PATH:-../rdl/libtorch/builds/sm61-sm120}:/usr/local/libtorch:ro
       # Persist Rust caches across --rm runs (bind mount, not named volume)
       - ./.cargo-cache/registry:/tmp/cargo/registry
       - ./.cargo-cache/git:/tmp/cargo/git
     working_dir: /workspace/letter
     ports:
       - "3000:3000"
-    runtime: nvidia
     stdin_open: true
     tty: true
     deploy:

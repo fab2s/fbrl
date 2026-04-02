@@ -1,12 +1,14 @@
-# fbrl development image
-# Rust + libtorch + CUDA, ready for flodl/fbrl development and training.
+# fbrl CUDA image -- libtorch mounted at runtime.
+#
+# No libtorch is baked into this image. Mount the appropriate variant
+# via docker-compose volumes.
 
-# --- Layer 1: Base image ---
-FROM nvidia/cuda:12.8.0-devel-ubuntu24.04
+ARG CUDA_VERSION=12.8.0
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# --- Layer 2: System dependencies ---
+# --- System dependencies ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
@@ -19,24 +21,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     graphviz \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Layer 3: Rust (installed globally so non-root user can access) ---
-ENV RUSTUP_HOME=/usr/local/rustup
-ENV CARGO_HOME=/usr/local/cargo
-ENV PATH="/usr/local/cargo/bin:${PATH}"
+# --- Rust ---
+ENV CARGO_HOME="/usr/local/cargo"
+ENV RUSTUP_HOME="/usr/local/rustup"
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable \
-    && chmod -R a+rwx /usr/local/rustup /usr/local/cargo
+    && chmod -R a+rwx "$CARGO_HOME" "$RUSTUP_HOME"
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
 
-# --- Layer 4: libtorch (CUDA 12.8) ---
-ARG LIBTORCH_VERSION=2.10.0
-RUN --mount=type=cache,target=/tmp/libtorch-cache \
-    ZIPFILE="libtorch-shared-with-deps-${LIBTORCH_VERSION}+cu128.zip" && \
-    if [ ! -f "/tmp/libtorch-cache/${ZIPFILE}" ]; then \
-        wget -q "https://download.pytorch.org/libtorch/cu128/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu128.zip" \
-            -O "/tmp/libtorch-cache/${ZIPFILE}"; \
-    fi && \
-    unzip -q "/tmp/libtorch-cache/${ZIPFILE}" -d /usr/local
-
-# --- Layer 5: Environment ---
+# libtorch is bind-mounted at runtime to /usr/local/libtorch
 ENV LIBTORCH_PATH="/usr/local/libtorch"
 ENV LD_LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"
 ENV LIBRARY_PATH="${LIBTORCH_PATH}/lib:/usr/local/cuda/lib64"

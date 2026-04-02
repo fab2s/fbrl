@@ -102,6 +102,9 @@ fn run_train(args: &[String]) {
             "--content-weight" => { cfg.content_weight = next_arg(args, &mut i).parse().expect("--content-weight F"); }
             "--scan-vy" => { cfg.scan_vy = next_arg(args, &mut i).parse().expect("--scan-vy F"); }
             "--read-vy" => { cfg.read_vy = next_arg(args, &mut i).parse().expect("--read-vy F"); }
+            "--void-weight" => { cfg.void_weight = next_arg(args, &mut i).parse().expect("--void-weight F"); }
+            "--scan-void-weight" => { cfg.scan_void_weight = next_arg(args, &mut i).parse().expect("--scan-void-weight F"); }
+            "--recon-end-weight" => { cfg.recon_end_weight = Some(next_arg(args, &mut i).parse().expect("--recon-end-weight F")); }
             "--leash-weight" => { cfg.leash_weight = next_arg(args, &mut i).parse().expect("--leash-weight F"); }
             "--leash-radius" => { cfg.leash_radius = next_arg(args, &mut i).parse().expect("--leash-radius F"); }
 

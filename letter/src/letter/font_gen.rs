@@ -390,6 +390,7 @@ fn load_fonts(cfg: &GenConfig) -> Result<Vec<LoadedFont>> {
 // ── Glyph rendering ─────────────────────────────────────────────────
 
 /// Render a glyph at a pixel cursor position (left edge of advance box).
+#[allow(clippy::too_many_arguments)]
 fn render_glyph_cursor(
     font: &Font, px_size: f32, baseline_y: i32, ch: char,
     cursor_x: f32, pixels: &mut [f32], img_h: usize, img_w: usize,

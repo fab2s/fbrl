@@ -79,6 +79,7 @@ impl LetterModel {
     ///
     /// n_scan=0: read-only (v1 baseline).
     /// n_scan=1: 1 wide scan + n_read reads (v2, matches Python v7).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         n_classes: usize,
         n_scan: usize,
@@ -160,6 +161,12 @@ impl LetterModel {
     /// Content logits from the most recent forward pass (one per scan step).
     pub fn content_logits(&self) -> Vec<Variable> {
         self.content_logits_buf.borrow().clone()
+    }
+
+    /// Extract the graph for use as a DDP replica.
+    /// Consumes the LetterModel; the graph's internal nodes retain all state via Rc.
+    pub fn into_graph(self) -> Graph {
+        self.graph
     }
 
     /// Parameters returns all learnable parameters.

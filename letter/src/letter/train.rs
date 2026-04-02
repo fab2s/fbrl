@@ -1,22 +1,36 @@
 //! Training loop and configuration for the letter model.
 
+use std::cell::Cell;
 use std::fs;
 use std::io::Write;
+use std::rc::Rc;
 use std::time::Instant;
 
 use flodl::autograd::{Variable, grid_sample};
 use flodl::nn::{
     cross_entropy_loss, mse_loss, bce_with_logits_loss, clip_grad_norm,
-    Adam, CosineScheduler, Module, Optimizer,
+    Adam, CosineScheduler, Module,
+    Ddp, DdpConfig,
 };
 use flodl::monitor::Monitor;
-use flodl::tensor::{cuda_available, Device, DType, Result, Tensor, TensorError, TensorOptions};
-use flodl::CpuWorker;
+use flodl::tensor::{
+    cuda_available, cuda_device_count, Device, DType, Result, Tensor, TensorError, TensorOptions,
+};
+use flodl::{CpuWorker, LossContext};
 use serde::{Serialize, Deserialize};
 
-use super::data::{LetterDataset, LetterLoader};
+use super::data::{LetterBatchAdapter, LetterDataset, BATCH_NAMES};
 use super::loss::{attention_guide_loss, build_void_grid, fixation_diversity_loss, fixation_hit_rate, leash_loss, void_repulsion_with_grid};
 use super::model::LetterModel;
+
+/// Arc wrapper so LetterBatchAdapter can be shared between training loop and DataLoader.
+struct ArcAdapter(std::sync::Arc<LetterBatchAdapter>);
+unsafe impl Send for ArcAdapter {}
+unsafe impl Sync for ArcAdapter {}
+impl flodl::BatchDataSet for ArcAdapter {
+    fn len(&self) -> usize { self.0.dataset.samples.len() }
+    fn get_batch(&self, indices: &[usize]) -> Result<Vec<Tensor>> { self.0.get_batch(indices) }
+}
 
 /// Hyperparameters for letter model training.
 #[derive(Serialize, Deserialize)]
@@ -63,6 +77,11 @@ pub struct LetterConfig {
     pub diversity_sigma: f64,
     pub scan_vy: f64,
     pub read_vy: f64,
+
+    // Recon annealing: cosine decay from recon_weight to recon_end_weight.
+    // Set recon_end_weight < recon_weight to anneal reconstruction pressure.
+    #[serde(default = "default_none_f64")]
+    pub recon_end_weight: Option<f64>,
 
     // Leash: keeps read fixations near origin.
     #[serde(default)]
@@ -125,6 +144,8 @@ impl Default for LetterConfig {
             scan_vy: 0.3,
             read_vy: 1.0,
 
+            recon_end_weight: None,
+
             leash_weight: 0.0,
             leash_radius: 0.5,
             leash_start: 0.3,
@@ -138,6 +159,7 @@ impl Default for LetterConfig {
     }
 }
 
+fn default_none_f64() -> Option<f64> { None }
 fn default_128() -> i64 { 128 }
 fn default_leash_radius() -> f64 { 0.5 }
 fn default_leash_start() -> f64 { 0.3 }
@@ -164,6 +186,188 @@ pub struct EpochStats {
     pub eta: std::time::Duration,
 }
 
+/// Lightweight metrics for El Che: only classification + recon from gathered tags.
+/// Avoids image-scale ops (recode, void, guide, blur) that OOM on gathered data
+/// (anchor×devices batches concatenated).
+fn record_el_che_metrics(
+    model: &LetterModel,
+    batch: &flodl::Batch,
+    device: Device,
+) -> Result<()> {
+    let to_dev = |t: &Tensor| -> Result<Tensor> {
+        if t.device() == device { Ok(t.clone()) } else { t.to_device(device) }
+    };
+
+    let letter_logits = model.graph.tagged("heads_0").expect("heads_0");
+    let case_logits = model.graph.tagged("heads_1").expect("heads_1");
+    let recon = model.graph.tagged("recon").expect("recon");
+
+    let letter_idx = to_dev(&batch["letter_idx"])?;
+    let case_idx = case_idx_from_float(&to_dev(&batch["case"])?)?;
+    let img = to_dev(&batch["image"])?;
+
+    let letter_ce = cross_entropy_loss(&letter_logits, &Variable::new(letter_idx.clone(), false))?.item()?;
+    let case_ce = cross_entropy_loss(&case_logits, &Variable::new(case_idx.clone(), false))?.item()?;
+    let recon_mse = mse_loss(&recon, &Variable::new(img, false))?.item()?;
+
+    model.graph.record_scalar("letter_ce", letter_ce);
+    model.graph.record_scalar("case_ce", case_ce);
+    model.graph.record_scalar("letter_acc", accuracy(&letter_logits.data(), &letter_idx)?);
+    model.graph.record_scalar("case_acc", accuracy(&case_logits.data(), &case_idx)?);
+    model.graph.record_scalar("recon_mse", recon_mse);
+    model.graph.record_scalar("recode", 0.0);
+    model.graph.record_scalar("content", 0.0);
+    model.graph.record_scalar("guide", 0.0);
+    model.graph.record_scalar("void", 0.0);
+    model.graph.record_scalar("diversity", 0.0);
+    model.graph.record_scalar("leash", 0.0);
+    model.graph.record_scalar("total", letter_ce + case_ce + recon_mse);
+    model.graph.record_scalar("hit_rate", 0.0);
+
+    Ok(())
+}
+
+/// Compute full loss stack from gathered tags, traces, and batch targets.
+/// Works identically for 1 or N GPUs — all data is on the gather device.
+#[allow(clippy::too_many_arguments)]
+fn compute_loss(
+    cfg: &LetterConfig,
+    model: &LetterModel,
+    batch: &flodl::Batch,
+    device: Device,
+    cur_recon_weight: f64,
+    cur_leash_weight: f64,
+    has_partners: bool,
+    scan_void_grid: Option<&Tensor>,
+    read_void_grid: Option<&Tensor>,
+) -> Result<Variable> {
+    // Move batch tensors to model device (gather device may be CPU when streaming).
+    let to_dev = |t: &Tensor| -> Result<Tensor> {
+        if t.device() == device { Ok(t.clone()) } else { t.to_device(device) }
+    };
+    let zero = || Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() }).unwrap(), false);
+
+    // Read gathered outputs from graph tags + traces.
+    let letter_logits = model.graph.tagged("heads_0").expect("heads_0");
+    let case_logits = model.graph.tagged("heads_1").expect("heads_1");
+    let recon = model.graph.tagged("recon").expect("recon");
+    let latent = model.graph.tagged("latent").expect("latent");
+
+    let all_traces = model.graph.traces("attn").unwrap_or_default();
+    let (scan_locs, read_locs) = if cfg.n_scan > 0 && all_traces.len() > cfg.n_scan {
+        let (s, r) = all_traces.split_at(cfg.n_scan);
+        (s.to_vec(), r.to_vec())
+    } else {
+        (Vec::new(), all_traces)
+    };
+
+    let img_var = Variable::new(to_dev(&batch["image"])?, false);
+    let case_var = Variable::new(to_dev(&batch["case"])?, false);
+    let clean_var = Variable::new(to_dev(&batch["clean"])?, false);
+    let origin_var = Variable::new(to_dev(&batch["origin"])?, false);
+
+    // Classification.
+    let letter_target = Variable::new(to_dev(&batch["letter_idx"])?, false);
+    let case_idx = case_idx_from_float(&to_dev(&batch["case"])?)?;
+    let case_target = Variable::new(case_idx.clone(), false);
+    let letter_loss = cross_entropy_loss(&letter_logits, &letter_target)?;
+    let case_loss = cross_entropy_loss(&case_logits, &case_target)?;
+
+    // Reconstruction.
+    let recon_loss = mse_loss(&recon, &img_var)?;
+
+    // Recode.
+    let recode_loss = if cfg.recode_weight > 0.0 && has_partners {
+        let b = batch["case"].shape()[0];
+        let ones_t = Tensor::from_f32(&vec![1.0f32; b as usize], &[b, 1], device)?;
+        let ones_var = Variable::new(ones_t, false);
+        let flipped_case = ones_var.sub(&case_var)?;
+        let z_recode = latent.cat(&flipped_case, 1)?;
+        let recode = model.decoder.forward(&z_recode)?;
+        mse_loss(&recode, &Variable::new(to_dev(&batch["partner_clean"])?, false))?
+    } else { zero() };
+
+    // Content (from main graph's RefCell — not gathered across replicas).
+    // Skip when batch sizes don't match (El Che gathers traces but not RefCell state).
+    let content_loss = if cfg.content_weight > 0.0 && cfg.n_scan > 0 {
+        let scan_logits = model.content_logits();
+        let logit_b = scan_logits.first().map(|l| l.shape()[0]).unwrap_or(0);
+        let trace_b = scan_locs.first().map(|l| l.shape()[0]).unwrap_or(0);
+        if !scan_logits.is_empty() && !scan_locs.is_empty() && logit_b == trace_b {
+            let mut loss_sum = zero();
+            for (loc, logit) in scan_locs.iter().zip(scan_logits.iter()) {
+                let grid = loc.unsqueeze(1)?.unsqueeze(2)?;
+                let sampled = grid_sample(&clean_var, &grid, 0, 0, true)?;
+                let label_t = sampled.data().reshape(&[-1, 1])?.gt_scalar(0.1)?.to_dtype(DType::Float32)?;
+                let label = Variable::new(label_t, false);
+                loss_sum = loss_sum.add(&bce_with_logits_loss(logit, &label)?)?;
+            }
+            loss_sum.mul_scalar(1.0 / scan_logits.len() as f64)?
+        } else { zero() }
+    } else { zero() };
+
+    // Attention guide (gathered traces).
+    let scan_guide = if cfg.scan_guide_weight > 0.0 && !scan_locs.is_empty() {
+        attention_guide_loss(&clean_var, &scan_locs, cfg.blur_sigma_ratio)?
+    } else { zero() };
+    let read_guide = if cfg.read_guide_weight > 0.0 && !read_locs.is_empty() {
+        attention_guide_loss(&clean_var, &read_locs, cfg.blur_sigma_ratio)?
+    } else { zero() };
+
+    // Void repulsion (gathered traces).
+    let scan_void = if cfg.scan_void_weight > 0.0 && !scan_locs.is_empty() {
+        void_repulsion_with_grid(&clean_var, &scan_locs, cfg.patch_size, cfg.scan_patch_w, 0.1, scan_void_grid)?
+    } else { zero() };
+    let read_void = if cfg.void_weight > 0.0 && !read_locs.is_empty() {
+        void_repulsion_with_grid(&clean_var, &read_locs, cfg.patch_size, cfg.patch_size, 0.1, read_void_grid)?
+    } else { zero() };
+
+    // Diversity (gathered traces).
+    let div_loss = if !scan_locs.is_empty() || !read_locs.is_empty() {
+        let sd = fixation_diversity_loss(&scan_locs, cfg.diversity_sigma, cfg.scan_vy)?;
+        let rd = fixation_diversity_loss(&read_locs, cfg.diversity_sigma, cfg.read_vy)?;
+        sd.add(&rd)?
+    } else { zero() };
+
+    // Leash (gathered traces + gathered origin).
+    let leash = if cur_leash_weight > 0.0 && !read_locs.is_empty() {
+        leash_loss(&read_locs, &origin_var, cfg.leash_radius)?
+    } else { zero() };
+
+    // Total.
+    let total = letter_loss.add(&case_loss)?;
+    let total = total.add(&recon_loss.mul_scalar(cur_recon_weight)?)?;
+    let total = total.add(&recode_loss.mul_scalar(cfg.recode_weight)?)?;
+    let total = total.add(&content_loss.mul_scalar(cfg.content_weight)?)?;
+    let total = total.add(&scan_guide.mul_scalar(cfg.scan_guide_weight)?)?;
+    let total = total.add(&read_guide.mul_scalar(cfg.read_guide_weight)?)?;
+    let total = total.add(&scan_void.mul_scalar(cfg.scan_void_weight)?)?;
+    let total = total.add(&read_void.mul_scalar(cfg.void_weight)?)?;
+    let total = total.add(&div_loss.mul_scalar(cfg.diversity_weight)?)?;
+    let total = total.add(&leash.mul_scalar(cur_leash_weight)?)?;
+
+    // Record scalar metrics on graph (for monitor/plotting).
+    let all_locs: Vec<Variable> = scan_locs.iter().chain(read_locs.iter()).cloned().collect();
+    let (hr, _) = fixation_hit_rate(&clean_var, &all_locs, 0.3)?;
+    model.graph.record_scalar("letter_ce", letter_loss.item()?);
+    model.graph.record_scalar("case_ce", case_loss.item()?);
+    model.graph.record_scalar("letter_acc", accuracy(&letter_logits.data(), &to_dev(&batch["letter_idx"])?)?);
+    model.graph.record_scalar("case_acc", accuracy(&case_logits.data(), &case_idx)?);
+    model.graph.record_scalar("recon_mse", recon_loss.item()?);
+    model.graph.record_scalar("recode", recode_loss.item()?);
+    model.graph.record_scalar("content", content_loss.item()?);
+    model.graph.record_scalar("guide",
+        scan_guide.item()? * cfg.scan_guide_weight + read_guide.item()? * cfg.read_guide_weight);
+    model.graph.record_scalar("void",
+        scan_void.item()? * cfg.scan_void_weight + read_void.item()? * cfg.void_weight);
+    model.graph.record_scalar("diversity", div_loss.item()?);
+    model.graph.record_scalar("leash", leash.item()?);
+    model.graph.record_scalar("total", total.item()?);
+    model.graph.record_scalar("hit_rate", hr);
+
+    Ok(total)
+}
+
 /// Run the full training loop for the letter model.
 pub fn train_letter(
     cfg: &LetterConfig,
@@ -180,7 +384,6 @@ pub fn train_letter(
 
     // Move model to CUDA if available.
     let device = if cuda_available() {
-        eprintln!("Using CUDA");
         flodl::tensor::set_cudnn_benchmark(true);
         model.graph.set_device(Device::CUDA(0));
         Device::CUDA(0)
@@ -189,16 +392,143 @@ pub fn train_letter(
         Device::CPU
     };
 
-    let params = model.parameters();
-    let mut optimizer = Adam::new(&params, cfg.lr);
     let scheduler = CosineScheduler::new(cfg.lr, cfg.min_lr, cfg.epochs);
-    model.train();
 
-    let mut loader = LetterLoader::new(ds, cfg.batch_size, true);
-    loader.set_device(device);
-    if device.is_cuda() {
-        loader.make_resident()?;
+    // Transparent DDP: Ddp::auto_with detects GPUs, creates replicas,
+    // sets per-replica optimizers, enables El Che for heterogeneous hardware.
+    // Training loop is identical for 1 or N GPUs.
+    let n_classes = cfg.n_classes;
+    let n_scan = cfg.n_scan;
+    let n_read = cfg.n_read;
+    let patch_size = cfg.patch_size;
+    let scan_patch_w = cfg.scan_patch_w;
+    let n_scales = cfg.n_scales;
+    let latent_dim = cfg.latent_dim;
+    let lr = cfg.lr;
+
+    Ddp::auto_with(
+        &model.graph,
+        |dev| {
+            let replica = LetterModel::new(
+                n_classes, n_scan, n_read, patch_size, scan_patch_w,
+                n_scales, latent_dim, img_h, img_w,
+            )?;
+            replica.graph.set_device(dev);
+            Ok(replica.into_graph())
+        },
+        |p| Adam::new(&p, lr),
+        DdpConfig::new()
+            .speed_hint(1, 2.3)
+            .overhead_target(0.10),
+            // max_anchor removed — per-batch backward keeps VRAM constant
+    )?;
+
+    // El Che per-batch backward: loss closure runs inside forward_batch,
+    // one activation graph in VRAM at a time. Anchor scales freely.
+    let is_el_che = cuda_device_count() > 1;
+
+    // Per-epoch dynamic values shared with loss closure via interior mutability.
+    let recon_w_cell = Rc::new(Cell::new(cfg.recon_weight));
+    let leash_w_cell = Rc::new(Cell::new(cfg.leash_weight));
+
+    if is_el_che {
+        let n_scan = cfg.n_scan;
+        let patch_size = cfg.patch_size;
+        let scan_patch_w = cfg.scan_patch_w;
+        let scan_gw = cfg.scan_guide_weight;
+        let read_gw = cfg.read_guide_weight;
+        let scan_vw = cfg.scan_void_weight;
+        let void_w = cfg.void_weight;
+        let div_w = cfg.diversity_weight;
+        let blur_sr = cfg.blur_sigma_ratio;
+        let div_sigma = cfg.diversity_sigma;
+        let s_vy = cfg.scan_vy;
+        let r_vy = cfg.read_vy;
+        let l_radius = cfg.leash_radius;
+        let rw = recon_w_cell.clone();
+        let lw = leash_w_cell.clone();
+
+        // Pure loss computation — no .item() calls, no GPU→CPU syncs.
+        // Metrics are computed AFTER forward_batch from gathered detached data.
+        model.graph.set_loss_fn(move |ctx: &LossContext| {
+            let dev = ctx.output.device();
+            let zero = || Variable::new(
+                Tensor::zeros(&[1], TensorOptions { device: dev, ..Default::default() }).unwrap(), false
+            );
+
+            let letter_logits = ctx.tags.get("heads_0").expect("heads_0");
+            let case_logits = ctx.tags.get("heads_1").expect("heads_1");
+            let recon = ctx.tags.get("recon").expect("recon");
+
+            let all_traces = ctx.traces.get("attn").map(|v| v.as_slice()).unwrap_or(&[]);
+            let (scan_locs, read_locs) = if n_scan > 0 && all_traces.len() > n_scan {
+                all_traces.split_at(n_scan)
+            } else {
+                (&[][..], all_traces)
+            };
+
+            let img = Variable::new(ctx.batch["image"].clone(), false);
+            let clean = Variable::new(ctx.batch["clean"].clone(), false);
+            let origin = Variable::new(ctx.batch["origin"].clone(), false);
+            let letter_target = Variable::new(ctx.batch["letter_idx"].clone(), false);
+            let case_idx = case_idx_from_float(&ctx.batch["case"])?;
+            let case_target = Variable::new(case_idx, false);
+
+            let letter_loss = cross_entropy_loss(letter_logits, &letter_target)?;
+            let case_loss = cross_entropy_loss(case_logits, &case_target)?;
+            let recon_loss = mse_loss(recon, &img)?;
+
+            let scan_guide = if scan_gw > 0.0 && !scan_locs.is_empty() {
+                attention_guide_loss(&clean, scan_locs, blur_sr)?
+            } else { zero() };
+            let read_guide = if read_gw > 0.0 && !read_locs.is_empty() {
+                attention_guide_loss(&clean, read_locs, blur_sr)?
+            } else { zero() };
+
+            let scan_void = if scan_vw > 0.0 && !scan_locs.is_empty() {
+                void_repulsion_with_grid(&clean, scan_locs, patch_size, scan_patch_w, 0.1, None)?
+            } else { zero() };
+            let read_void = if void_w > 0.0 && !read_locs.is_empty() {
+                void_repulsion_with_grid(&clean, read_locs, patch_size, patch_size, 0.1, None)?
+            } else { zero() };
+
+            let div_loss = if !scan_locs.is_empty() || !read_locs.is_empty() {
+                fixation_diversity_loss(scan_locs, div_sigma, s_vy)?
+                    .add(&fixation_diversity_loss(read_locs, div_sigma, r_vy)?)?
+            } else { zero() };
+
+            let cur_leash = lw.get();
+            let leash = if cur_leash > 0.0 && !read_locs.is_empty() {
+                leash_loss(read_locs, &origin, l_radius)?
+            } else { zero() };
+
+            let cur_recon = rw.get();
+            letter_loss.add(&case_loss)?
+                .add(&recon_loss.mul_scalar(cur_recon)?)?
+                .add(&scan_guide.mul_scalar(scan_gw)?)?
+                .add(&read_guide.mul_scalar(read_gw)?)?
+                .add(&scan_void.mul_scalar(scan_vw)?)?
+                .add(&read_void.mul_scalar(void_w)?)?
+                .add(&div_loss.mul_scalar(div_w)?)?
+                .add(&leash.mul_scalar(cur_leash)?)
+        });
+
+        eprintln!("  El Che: per-batch backward enabled, anchor auto-tuned");
     }
+
+    // flodl DataLoader: VRAM-aware auto-depth, origin noise injected per batch.
+    let adapter = std::sync::Arc::new(LetterBatchAdapter::new(ds.clone()));
+    let loader = {
+        let a = std::sync::Arc::clone(&adapter);
+        flodl::DataLoader::from_batch_dataset(ArcAdapter(a))
+            .batch_size(cfg.batch_size)
+            .device(device)
+            .vram_margin(0.10)
+            .names(BATCH_NAMES)
+            .build()?
+    };
+    eprintln!("  loader: {} (depth {})", if loader.is_resident() { "resident" } else { "streaming" }, loader.prefetch_depth());
+    model.graph.set_data_loader(loader, "image")?;
 
     // Ensure save directory exists and rotate prior run artifacts.
     if !cfg.save_dir.is_empty() {
@@ -264,10 +594,6 @@ pub fn train_letter(
             model.graph.enable_profiling();
         }
 
-        loader.reset();
-        let epoch_start = Instant::now();
-        let mut n_batches = 0usize;
-
         // Noise curriculum: ramp from noise_start to 1.0 over noise_ramp_ratio of total epochs.
         let noise_progress = if cfg.noise_ramp_ratio > 0.0 {
             let ramp_epochs = (cfg.noise_ramp_ratio * cfg.epochs as f64).max(1.0);
@@ -276,186 +602,52 @@ pub fn train_letter(
         } else {
             1.0
         };
-        let cur_noise_x = cfg.origin_noise_x * noise_progress;
-        let cur_noise_y = cfg.origin_noise_y * noise_progress;
+        adapter.set_noise(cfg.origin_noise_x * noise_progress, cfg.origin_noise_y * noise_progress);
 
+        // Per-epoch dynamic weights.
         let cur_leash_weight = cfg.leash_weight;
+        let cur_recon_weight = match cfg.recon_end_weight {
+            Some(end_w) if end_w < cfg.recon_weight => {
+                let t = epoch as f64 / (cfg.epochs.max(1) - 1) as f64;
+                let cos_decay = 0.5 * (1.0 + (std::f64::consts::PI * t).cos());
+                end_w + (cfg.recon_weight - end_w) * cos_decay
+            }
+            _ => cfg.recon_weight,
+        };
 
-        // Update LR at start of epoch.
+        // Push per-epoch values into shared cells (read by El Che loss closure).
+        recon_w_cell.set(cur_recon_weight);
+        leash_w_cell.set(cur_leash_weight);
+
         let current_lr = scheduler.lr(epoch);
-        optimizer.set_lr(current_lr);
+        model.graph.set_lr(current_lr);
 
-        while let Some(batch) = loader.next_batch()? {
-            let b = batch.image.shape()[0];
+        let epoch_start = Instant::now();
+        let mut n_batches = 0usize;
 
-            // Origin with noise curriculum — defines the tolerance band for composition.
-            let origin = if cur_noise_x > 0.0 || cur_noise_y > 0.0 {
-                let noise = Tensor::randn(&[b, 2], TensorOptions { device, ..Default::default() })?;
-                let scale = Tensor::from_f32(
-                    &[cur_noise_x as f32, cur_noise_y as f32], &[1, 2], device,
+        for batch in model.graph.epoch(epoch).activate() {
+            let batch = batch?;
+            let _out = model.graph.forward_batch(&batch)?;
+
+            if is_el_che {
+                // Per-batch backward already happened inside forward_batch.
+                // Lightweight metrics from gathered detached tags (small tensors only).
+                // Avoid image-scale ops (recode, void, guide) — they OOM on gathered data.
+                record_el_che_metrics(&model, &batch, device)?;
+            } else {
+                // Single-GPU: external loss + backward.
+                let total = compute_loss(
+                    cfg, &model, &batch, device,
+                    cur_recon_weight, cur_leash_weight, ds.has_partners,
+                    scan_void_grid.as_ref(), read_void_grid.as_ref(),
                 )?;
-                Variable::new(noise.mul(&scale)?, false)
-            } else {
-                Variable::new(Tensor::zeros(&[b, 2], TensorOptions { device, ..Default::default() })?, false)
-            };
+                total.backward()?;
+            }
 
-            let img_var = Variable::new(batch.image, false);
-            let case_var = Variable::new(batch.case_label.clone(), false);
-            let clean_var = Variable::new(batch.clean, false);
-            let partner_clean_var = Variable::new(batch.partner_clean, false);
+            clip_grad_norm(&model.parameters(), cfg.max_grad_norm)?;
+            model.graph.step()?;
 
-            let result = model.forward(&img_var, &case_var, &origin)?;
-
-            // Classification losses (cross_entropy accepts [B] int64 indices).
-            let letter_idx = batch.letter_idx;
-            let case_idx = case_idx_from_float(&batch.case_label)?;
-            let letter_target = Variable::new(letter_idx.clone(), false);
-            let case_target = Variable::new(case_idx.clone(), false);
-            let letter_loss = cross_entropy_loss(&result.letter_logits, &letter_target)?;
-            let case_loss = cross_entropy_loss(&result.case_logits, &case_target)?;
-
-            // Reconstruction loss.
-            let recon_loss = mse_loss(&result.recon, &img_var)?;
-
-            // Recode loss: decode latent with flipped case, compare to partner clean.
-            let recode_loss = if cfg.recode_weight > 0.0 && ds.has_partners {
-                let b = batch.case_label.shape()[0];
-                let ones_t = Tensor::from_f32(
-                    &vec![1.0f32; b as usize], &[b, 1], device,
-                )?;
-                let ones_var = Variable::new(ones_t, false);
-                let flipped_case = ones_var.sub(&case_var)?;
-                let z_recode = result.latent.cat(&flipped_case, 1)?;
-                let recode = model.decoder.forward(&z_recode)?;
-                mse_loss(&recode, &partner_clean_var)?
-            } else {
-                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
-            };
-
-            // Content loss: BCE on whether scan fixation has ink.
-            let content_loss = if cfg.content_weight > 0.0 && cfg.n_scan > 0 {
-                let scan_logits = model.content_logits();
-                let scan_locs = &result.scan_locations;
-                if !scan_logits.is_empty() {
-                    let zero = Variable::new(
-                        Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false,
-                    );
-                    let mut loss_sum = zero;
-                    for (loc, logit) in scan_locs.iter().zip(scan_logits.iter()) {
-                        let grid = loc.unsqueeze(1)?.unsqueeze(2)?; // [B, 1, 1, 2]
-                        let sampled = grid_sample(&clean_var, &grid, 0, 0, true)?;
-                        let label_t = sampled.data().reshape(&[-1, 1])?
-                            .gt_scalar(0.1)?.to_dtype(DType::Float32)?;
-                        let label = Variable::new(label_t, false);
-                        let step_loss = bce_with_logits_loss(logit, &label)?;
-                        loss_sum = loss_sum.add(&step_loss)?;
-                    }
-                    loss_sum.mul_scalar(1.0 / scan_logits.len() as f64)?
-                } else {
-                    Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
-                }
-            } else {
-                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
-            };
-
-            // Attention losses — separate guide weights for scan vs read.
-            let scan_guide = if cfg.scan_guide_weight > 0.0 {
-                attention_guide_loss(
-                    &clean_var, &result.scan_locations, cfg.blur_sigma_ratio,
-                )?
-            } else {
-                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
-            };
-            let read_guide = if cfg.read_guide_weight > 0.0 {
-                attention_guide_loss(
-                    &clean_var, &result.read_locations, cfg.blur_sigma_ratio,
-                )?
-            } else {
-                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
-            };
-
-            // Void repulsion — penalize fixations landing in empty space.
-            let scan_void = if cfg.scan_void_weight > 0.0 {
-                void_repulsion_with_grid(
-                    &clean_var, &result.scan_locations,
-                    cfg.patch_size, cfg.scan_patch_w, 0.1,
-                    scan_void_grid.as_ref(),
-                )?
-            } else {
-                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
-            };
-            let read_void = if cfg.void_weight > 0.0 {
-                void_repulsion_with_grid(
-                    &clean_var, &result.read_locations,
-                    cfg.patch_size, cfg.patch_size, 0.1,
-                    read_void_grid.as_ref(),
-                )?
-            } else {
-                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
-            };
-
-            // Split diversity: separate scan/read with different VY scaling.
-            let scan_div = fixation_diversity_loss(
-                &result.scan_locations, cfg.diversity_sigma, cfg.scan_vy,
-            )?;
-            let read_div = fixation_diversity_loss(
-                &result.read_locations, cfg.diversity_sigma, cfg.read_vy,
-            )?;
-            let div_loss = scan_div.add(&read_div)?;
-
-            // Leash: keep reads near origin.
-            let leash = if cur_leash_weight > 0.0 {
-                leash_loss(&result.read_locations, &origin, cfg.leash_radius)?
-            } else {
-                Variable::new(Tensor::zeros(&[1], TensorOptions { device, ..Default::default() })?, false)
-            };
-
-            // Total loss.
-            let total = letter_loss.add(&case_loss)?;
-            let total = total.add(&recon_loss.mul_scalar(cfg.recon_weight)?)?;
-            let total = total.add(&recode_loss.mul_scalar(cfg.recode_weight)?)?;
-            let total = total.add(&content_loss.mul_scalar(cfg.content_weight)?)?;
-            let total = total.add(&scan_guide.mul_scalar(cfg.scan_guide_weight)?)?;
-            let total = total.add(&read_guide.mul_scalar(cfg.read_guide_weight)?)?;
-            let total = total.add(&scan_void.mul_scalar(cfg.scan_void_weight)?)?;
-            let total = total.add(&read_void.mul_scalar(cfg.void_weight)?)?;
-            let total = total.add(&div_loss.mul_scalar(cfg.diversity_weight)?)?;
-            let total = total.add(&leash.mul_scalar(cur_leash_weight)?)?;
-
-            optimizer.zero_grad();
-            total.backward()?;
-            clip_grad_norm(&params, cfg.max_grad_norm)?;
-            optimizer.step()?;
-
-            // Break gradient chain.
-            model.graph.detach_state();
-
-            // Record metrics.
-            let all_locs: Vec<Variable> = result.scan_locations.iter()
-                .chain(result.read_locations.iter()).cloned().collect();
-            let (hr, _) = fixation_hit_rate(&clean_var, &all_locs, 0.3)?;
-            let letter_acc = accuracy(&result.letter_logits.data(), &letter_idx)?;
-            let case_acc_val = accuracy(&result.case_logits.data(), &case_idx)?;
-
-            model.graph.record_scalar("letter_ce", letter_loss.item()?);
-            model.graph.record_scalar("case_ce", case_loss.item()?);
-            model.graph.record_scalar("letter_acc", letter_acc);
-            model.graph.record_scalar("case_acc", case_acc_val);
-            model.graph.record_scalar("recon_mse", recon_loss.item()?);
-            model.graph.record_scalar("recode", recode_loss.item()?);
-            model.graph.record_scalar("content", content_loss.item()?);
-            model.graph.record_scalar("guide",
-                scan_guide.item()? * cfg.scan_guide_weight
-                + read_guide.item()? * cfg.read_guide_weight);
-            model.graph.record_scalar("void",
-                scan_void.item()? * cfg.scan_void_weight
-                + read_void.item()? * cfg.void_weight);
-            model.graph.record_scalar("diversity", div_loss.item()?);
-            model.graph.record_scalar("leash", leash.item()?);
-            model.graph.record_scalar("total", total.item()?);
-            model.graph.record_scalar("hit_rate", hr);
             model.graph.record_scalar("lr", current_lr);
-
             n_batches += 1;
         }
 

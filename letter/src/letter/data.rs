@@ -8,6 +8,7 @@ use flodl::tensor::{cuda_available, Device, Result, Tensor, TensorError};
 use serde::Deserialize;
 
 /// One rendered letter with metadata.
+#[derive(Clone)]
 pub struct LetterSample {
     pub image: Tensor,           // [1, H, W] noisy image
     pub clean: Tensor,           // [1, H, W] clean image (for attention guide)
@@ -27,6 +28,7 @@ pub struct LetterBatch {
 }
 
 /// Holds all samples in memory.
+#[derive(Clone)]
 pub struct LetterDataset {
     pub samples: Vec<LetterSample>,
     pub has_partners: bool,
@@ -36,6 +38,83 @@ impl LetterDataset {
     pub fn len(&self) -> usize { self.samples.len() }
     pub fn is_empty(&self) -> bool { self.samples.is_empty() }
 }
+
+/// Adapter for flodl's DataLoader with origin noise injection.
+///
+/// Returns [image, clean, partner_clean, letter_idx, case, origin] per batch.
+/// Noise parameters are updated per-epoch via `set_noise()` (atomic, thread-safe).
+/// Batch field names match graph inputs: "case" (not "case_label"), "origin".
+pub struct LetterBatchAdapter {
+    pub dataset: LetterDataset,
+    noise_x_bits: std::sync::atomic::AtomicU64,
+    noise_y_bits: std::sync::atomic::AtomicU64,
+}
+
+// Safety: LetterDataset contains Tensor (internally reference-counted) and primitives.
+// AtomicU64 is Send+Sync by definition.
+unsafe impl Send for LetterBatchAdapter {}
+unsafe impl Sync for LetterBatchAdapter {}
+
+impl LetterBatchAdapter {
+    pub fn new(dataset: LetterDataset) -> Self {
+        LetterBatchAdapter {
+            dataset,
+            noise_x_bits: std::sync::atomic::AtomicU64::new(0f64.to_bits()),
+            noise_y_bits: std::sync::atomic::AtomicU64::new(0f64.to_bits()),
+        }
+    }
+
+    /// Update origin noise parameters (called per-epoch from training loop).
+    pub fn set_noise(&self, x: f64, y: f64) {
+        self.noise_x_bits.store(x.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.noise_y_bits.store(y.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn noise_x(&self) -> f64 {
+        f64::from_bits(self.noise_x_bits.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    fn noise_y(&self) -> f64 {
+        f64::from_bits(self.noise_y_bits.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl flodl::BatchDataSet for LetterBatchAdapter {
+    fn len(&self) -> usize { self.dataset.samples.len() }
+
+    fn get_batch(&self, indices: &[usize]) -> Result<Vec<Tensor>> {
+        let b = indices.len();
+        let images: Vec<&Tensor> = indices.iter().map(|&i| &self.dataset.samples[i].image).collect();
+        let cleans: Vec<&Tensor> = indices.iter().map(|&i| &self.dataset.samples[i].clean).collect();
+        let partners: Vec<&Tensor> = indices.iter().map(|&i| &self.dataset.samples[i].partner_clean).collect();
+        let letter_data: Vec<i64> = indices.iter().map(|&i| self.dataset.samples[i].letter_idx).collect();
+        let case_data: Vec<f32> = indices.iter().map(|&i| self.dataset.samples[i].case_label).collect();
+
+        // Origin noise: generated per-batch with current noise params.
+        let nx = self.noise_x();
+        let ny = self.noise_y();
+        let n = b as i64;
+        let origin = if nx > 0.0 || ny > 0.0 {
+            let noise = Tensor::randn(&[n, 2], Default::default())?;
+            let scale = Tensor::from_f32(&[nx as f32, ny as f32], &[1, 2], Device::CPU)?;
+            noise.mul(&scale)?
+        } else {
+            Tensor::zeros(&[n, 2], Default::default())?
+        };
+
+        Ok(vec![
+            Tensor::stack(&images, 0)?,
+            Tensor::stack(&cleans, 0)?,
+            Tensor::stack(&partners, 0)?,
+            Tensor::from_i64(&letter_data, &[n], Device::CPU)?,
+            Tensor::from_f32(&case_data, &[n, 1], Device::CPU)?,
+            origin,
+        ])
+    }
+}
+
+/// Batch field names matching graph inputs. Use with DataLoader `.names()`.
+pub const BATCH_NAMES: &[&str] = &["image", "clean", "partner_clean", "letter_idx", "case", "origin"];
 
 // --- Data loading from Python-generated directories ---
 
