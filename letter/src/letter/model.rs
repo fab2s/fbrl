@@ -180,3 +180,13 @@ impl LetterModel {
     /// Set eval mode.
     pub fn eval(&self) { self.graph.eval(); }
 }
+
+impl Module for LetterModel {
+    fn name(&self) -> &str { "LetterModel" }
+    fn forward(&self, input: &Variable) -> Result<Variable> { self.graph.forward(input) }
+    fn parameters(&self) -> Vec<Parameter> { self.graph.parameters() }
+    fn buffers(&self) -> Vec<Buffer> { self.graph.buffers() }
+    fn set_training(&self, training: bool) { self.graph.set_training(training) }
+    fn move_to_device(&self, device: Device) { self.graph.move_to_device(device) }
+    fn as_graph(&self) -> Option<&flodl::Graph> { Some(&self.graph) }
+}

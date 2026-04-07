@@ -108,6 +108,21 @@ fn run_train(args: &[String]) {
             "--leash-weight" => { cfg.leash_weight = next_arg(args, &mut i).parse().expect("--leash-weight F"); }
             "--leash-radius" => { cfg.leash_radius = next_arg(args, &mut i).parse().expect("--leash-radius F"); }
 
+            // DDP mode.
+            "--ddp-mode" => {
+                let mode = next_arg(args, &mut i);
+                cfg.ddp_mode = match mode.as_str() {
+                    "sync" | "SyncElChe" => DdpMode::SyncElChe,
+                    "async-nccl-sync" => DdpMode::Async { policy: AsyncPolicy::Sync, backend: AsyncBackend::Nccl },
+                    "async-nccl-cadence" => DdpMode::Async { policy: AsyncPolicy::Cadence, backend: AsyncBackend::Nccl },
+                    "async-nccl-async" => DdpMode::Async { policy: AsyncPolicy::Async, backend: AsyncBackend::Nccl },
+                    "async-cpu-sync" => DdpMode::Async { policy: AsyncPolicy::Sync, backend: AsyncBackend::Cpu },
+                    "async-cpu-cadence" => DdpMode::Async { policy: AsyncPolicy::Cadence, backend: AsyncBackend::Cpu },
+                    "async-cpu-async" => DdpMode::Async { policy: AsyncPolicy::Async, backend: AsyncBackend::Cpu },
+                    _ => { eprintln!("unknown --ddp-mode: {mode}"); eprintln!("  valid: sync, async-nccl-sync, async-nccl-cadence, async-nccl-async, async-cpu-sync, async-cpu-cadence, async-cpu-async"); std::process::exit(1); }
+                };
+            }
+
             // Checkpointing & monitoring.
             "--checkpoint-interval" => { cfg.checkpoint_interval = next_arg(args, &mut i).parse().expect("--checkpoint-interval N"); }
             "--monitor" => { cfg.monitor_port = Some(next_arg(args, &mut i).parse().expect("--monitor PORT")); }

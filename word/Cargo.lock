@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "flodl"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "flate2",
  "flodl-sys",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "flodl-sys"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "cc",
 ]

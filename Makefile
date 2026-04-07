@@ -5,7 +5,7 @@
 # The override mounts the parent so flodl path dependency resolves.
 
 COMPOSE  = docker compose
-RUN      = $(COMPOSE) run --rm $(if $(MONITOR),--service-ports) dev
+RUN      = $(COMPOSE) run --rm $(if $(MONITOR),--service-ports) $(if $(GPU),-e CUDA_VISIBLE_DEVICES=$(GPU)) dev
 RUN_WORD = $(COMPOSE) run --rm $(if $(MONITOR),--service-ports) -w /workspace/fbrl/word dev
 FEATURES ?= cuda
 FLODL_DIR ?= ../rdl
@@ -72,7 +72,7 @@ rebuild: image
 #        make train-letter DATA=path/to/data EPOCHS=100 SAVE=runs/v1 MONITOR=3000
 SAVE ?= training
 train-letter: rebuild
-	$(RUN) cargo run --release --features $(FEATURES) -- $(if $(GEN),--generate $(GEN)) $(if $(GEN_SAVE),--gen-save $(GEN_SAVE)) $(if $(DATA),--data $(DATA)) $(if $(SYNTHETIC),--synthetic $(SYNTHETIC)) $(if $(SAVE),--save $(SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(LR),--lr $(LR)) $(if $(MIN_LR),--min-lr $(MIN_LR)) $(if $(MONITOR),--monitor $(MONITOR)) $(if $(LEASH),--leash-weight $(LEASH)) $(if $(LEASH_R),--leash-radius $(LEASH_R)) $(if $(RECON),--recon-weight $(RECON)) $(if $(RECON_END),--recon-end-weight $(RECON_END)) $(if $(RECODE),--recode-weight $(RECODE)) $(if $(PATCH),--patch-size $(PATCH)) $(if $(SCAN_W),--scan-patch-w $(SCAN_W)) $(if $(SCAN_GUIDE),--scan-guide-weight $(SCAN_GUIDE)) $(if $(VOID),--void-weight $(VOID)) $(if $(SCAN_VOID),--scan-void-weight $(SCAN_VOID)) $(if $(READ_GUIDE),--read-guide-weight $(READ_GUIDE)) $(if $(READ_VY),--read-vy $(READ_VY))
+	$(RUN) cargo run --release --features $(FEATURES) -- $(if $(GEN),--generate $(GEN)) $(if $(GEN_SAVE),--gen-save $(GEN_SAVE)) $(if $(DATA),--data $(DATA)) $(if $(SYNTHETIC),--synthetic $(SYNTHETIC)) $(if $(SAVE),--save $(SAVE)) $(if $(EPOCHS),--epochs $(EPOCHS)) $(if $(BATCH),--batch-size $(BATCH)) $(if $(LR),--lr $(LR)) $(if $(MIN_LR),--min-lr $(MIN_LR)) $(if $(MONITOR),--monitor $(MONITOR)) $(if $(LEASH),--leash-weight $(LEASH)) $(if $(LEASH_R),--leash-radius $(LEASH_R)) $(if $(RECON),--recon-weight $(RECON)) $(if $(RECON_END),--recon-end-weight $(RECON_END)) $(if $(RECODE),--recode-weight $(RECODE)) $(if $(PATCH),--patch-size $(PATCH)) $(if $(SCAN_W),--scan-patch-w $(SCAN_W)) $(if $(SCAN_GUIDE),--scan-guide-weight $(SCAN_GUIDE)) $(if $(VOID),--void-weight $(VOID)) $(if $(SCAN_VOID),--scan-void-weight $(SCAN_VOID)) $(if $(READ_GUIDE),--read-guide-weight $(READ_GUIDE)) $(if $(READ_VY),--read-vy $(READ_VY)) $(if $(DDP),--ddp-mode $(DDP))
 
 # Generate test data (no training)
 # Usage: make gen-test GEN_CFG=gen_test_config.json GEN_OUT=runs/v2_gen/test_data
