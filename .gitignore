@@ -12,3 +12,4 @@ word/gen_words/
 **/runs/
 **/eval_*/
 **/test_words/
+/data/

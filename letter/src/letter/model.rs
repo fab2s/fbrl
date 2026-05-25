@@ -14,7 +14,6 @@
 //! offsets, `location_fc` sees these offsets (always near zero), and
 //! `grid_sample` receives `origin + offset` for correct image sampling.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -68,10 +67,6 @@ pub struct LetterModel {
     pub graph: Graph,
     /// Decoder reference for recode (shared with graph node via Rc).
     pub decoder: Rc<VisualDecoder>,
-    /// Content logits buffer shared with CombinedStep (populated during forward).
-    content_logits_buf: Rc<RefCell<Vec<Variable>>>,
-    /// Number of scan steps — used to split traces into scan/read.
-    n_scan: usize,
 }
 
 impl LetterModel {
@@ -97,8 +92,7 @@ impl LetterModel {
         let case_head = Linear::new(latent_dim, 2)?;
         let decoder = Rc::new(VisualDecoder::new(latent_dim + 1, img_h, img_w)?);
 
-        // Content head + shared buffer for scan ink detection (only when scanning).
-        let content_logits_buf = Rc::new(RefCell::new(Vec::new()));
+        // Content head: predicts ink presence at each scan-step location.
         let content_head = if n_scan > 0 {
             Some(Linear::new(latent_dim, 1)?)
         } else {
@@ -111,7 +105,7 @@ impl LetterModel {
 
         let combined = CombinedStep::new(
             scan_sensor, read_sensor, controller,
-            n_scan, content_head, Some(content_logits_buf.clone()),
+            n_scan, content_head,
         )?;
 
         let graph = FlowBuilder::from(Identity)
@@ -120,14 +114,14 @@ impl LetterModel {
             .input(&["case", "origin"])
             .through(H0Init::new(latent_dim)?)
             .loop_body(combined).for_n(total_steps)
-            .using(&["image", "origin"]).tag("attn")
+            .using(&["image", "origin"])
             .through(Linear::new(latent_dim, latent_dim)?).tag("latent")
             .fork(letter_head).tag("heads_0")
             .fork(case_head).tag("heads_1")
             .through(SharedDecoder(decoder.clone())).using(&["latent", "case"]).tag("recon")
             .build()?;
 
-        Ok(LetterModel { graph, decoder, content_logits_buf, n_scan })
+        Ok(LetterModel { graph, decoder })
     }
 
     /// Run the full pipeline: encode → classify → decode.
@@ -139,28 +133,20 @@ impl LetterModel {
     pub fn forward(&self, img: &Variable, case_label: &Variable, origin: &Variable) -> Result<LetterResult> {
         self.graph.forward_multi(&[img.clone(), case_label.clone(), origin.clone()])?;
 
-        // Split flat traces into scan and read portions.
-        let all_traces = self.graph.traces("attn").unwrap_or_default();
-        let (scan_locs, read_locs) = if self.n_scan > 0 && all_traces.len() > self.n_scan {
-            let (s, r) = all_traces.split_at(self.n_scan);
-            (s.to_vec(), r.to_vec())
-        } else {
-            (Vec::new(), all_traces)
-        };
-
         Ok(LetterResult {
             letter_logits: self.graph.tagged("heads_0").expect("heads_0"),
             case_logits: self.graph.tagged("heads_1").expect("heads_1"),
             latent: self.graph.tagged("latent").expect("latent"),
-            scan_locations: scan_locs,
-            read_locations: read_locs,
+            scan_locations: self.graph.traces("scan_loc").unwrap_or_default(),
+            read_locations: self.graph.traces("read_loc").unwrap_or_default(),
             recon: self.graph.tagged("recon").expect("recon"),
         })
     }
 
     /// Content logits from the most recent forward pass (one per scan step).
+    /// Sourced from emit-published `"content"` trace stream.
     pub fn content_logits(&self) -> Vec<Variable> {
-        self.content_logits_buf.borrow().clone()
+        self.graph.traces("content").unwrap_or_default()
     }
 
     /// Extract the graph for use as a DDP replica.

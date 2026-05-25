@@ -1,0 +1,63 @@
+description: fbrl — foveal attention recognition (built on flodl)
+
+# Cargo workspace at fbrl root with members `fbrl` (letter/) and
+# `fbrl-word` (word/). Container working_dir is /workspace/fbrl
+# (workspace root) so plain `cargo check` covers all members.
+# Per-member: `cargo check -p fbrl` or `-p fbrl-word`.
+#
+# The dev service has libtorch=/usr/local/libtorch (mounted from rdl's
+# SM 6.1 + 12.0 build) and parent dir mounted so the path-dep
+# `flodl = { path = "../rdl/flodl" }` resolves to /workspace/rdl/flodl.
+
+commands:
+  # --- Workspace (CPU type-check / build) ---
+  check:
+    description: Type-check workspace without building
+    run: cargo check
+    docker: dev
+  build:
+    description: Build workspace (debug)
+    run: cargo build
+    docker: dev
+  test:
+    description: Run workspace CPU tests
+    run: cargo test -- --nocapture
+    docker: dev
+  clippy:
+    description: Lint workspace (including tests)
+    run: cargo clippy --tests -- -W clippy::all
+    docker: dev
+
+  # --- CUDA (full feature flag wired through flodl/cuda) ---
+  cuda-check:
+    description: Type-check workspace with CUDA feature
+    run: cargo check --features cuda --workspace
+    docker: dev
+  cuda-build:
+    description: Build workspace with CUDA feature
+    run: cargo build --features cuda --workspace
+    docker: dev
+  cuda-test:
+    description: Run workspace CUDA tests
+    run: cargo test --features cuda --workspace -- --nocapture
+    docker: dev
+  cuda-clippy:
+    description: Lint workspace with CUDA feature
+    run: cargo clippy --features cuda --workspace --tests -- -W clippy::all
+    docker: dev
+
+  # --- Per-member shortcuts ---
+  letter-check:
+    description: Type-check just the letter crate (fbrl)
+    run: cargo check -p fbrl
+    docker: dev
+  word-check:
+    description: Type-check just the word crate (fbrl-word)
+    run: cargo check -p fbrl-word
+    docker: dev
+
+  # --- Interactive ---
+  shell:
+    description: Interactive shell in dev container (cwd=/workspace/fbrl)
+    run: bash
+    docker: dev

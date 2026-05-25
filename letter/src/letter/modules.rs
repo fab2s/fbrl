@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use flodl::autograd::Variable;
-use flodl::nn::{Linear, Module, NamedInputModule, Parameter};
+use flodl::nn::{Linear, LoopBody, Module, NamedInputModule, Parameter, TraceEmit, forward_via_step};
 use flodl::tensor::{Result, Tensor, TensorOptions};
 
 pub use flodl::Identity;
@@ -366,22 +366,24 @@ impl NamedInputModule for AttentionStep {
 /// origin, `location_fc` in the sensor sees these relative offsets, and
 /// `grid_sample` receives `origin + offset` for correct image sampling.
 ///
-/// The graph sees one loop of `n_scan + n_read` iterations. Traces are split
-/// into scan and read portions by the model's `forward()`.
+/// Implements `LoopBody`: per-step fixations are published via `emit` under
+/// the names `"scan_loc"` (first n_scan iters) and `"read_loc"` (remaining
+/// iters); content head logits are published under `"content"` on scan iters
+/// only. Sparse emits mean read-step iterations don't appear in `"content"`,
+/// and scan/read traces split themselves at the read site without `n_scan`.
 pub struct CombinedStep {
     scan_sensor: Rc<dyn Module>,
     read_sensor: Rc<dyn Module>,
     controller: Rc<Controller>,
     n_scan: usize,
     scan_xs: Vec<Parameter>,
-    /// Current position as relative offset from origin.
+    /// Current position carried across loop iterations (recurrent state).
     location: RefCell<Option<Variable>>,
     /// Origin position (set from graph input on first step, constant within a forward pass).
     origin: RefCell<Option<Variable>>,
     step_idx: RefCell<usize>,
     content_head: Option<Linear>,
-    content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
-    /// Training mode flag. When true, loc_head outputs absolute positions (old behavior).
+    /// Training mode flag. When true, loc_head outputs absolute positions.
     /// When false (eval), loc_head outputs offsets translated by origin.
     training: RefCell<bool>,
 }
@@ -393,7 +395,6 @@ impl CombinedStep {
         controller: Rc<Controller>,
         n_scan: usize,
         content_head: Option<Linear>,
-        content_logits: Option<Rc<RefCell<Vec<Variable>>>>,
     ) -> Result<Self> {
         let mut scan_xs = Vec::with_capacity(n_scan);
         for i in 0..n_scan {
@@ -418,78 +419,8 @@ impl CombinedStep {
             origin: RefCell::new(None),
             step_idx: RefCell::new(0),
             content_head,
-            content_logits,
             training: RefCell::new(true),
         })
-    }
-
-    fn step(&self, h: &Variable, image: &Variable, origin: &Variable) -> Result<Variable> {
-        let idx = *self.step_idx.borrow();
-        let is_scan = idx < self.n_scan;
-
-        // Store origin on first step (constant within a forward pass).
-        if self.origin.borrow().is_none() {
-            *self.origin.borrow_mut() = Some(origin.clone());
-        }
-
-        let new_h = {
-            // Lazy init: start at origin position.
-            if self.location.borrow().is_none() {
-                *self.location.borrow_mut() = Some(origin.clone());
-            }
-
-            let loc_guard = self.location.borrow();
-            let location = loc_guard.as_ref().unwrap();
-
-            // location_fc sees position relative to origin (always near zero).
-            // grid_sample sees absolute position (unchanged from old code).
-            let relative = location.sub(origin)?;
-
-            let mut refs = HashMap::new();
-            refs.insert("location".to_string(), location.clone());
-            refs.insert("relative_location".to_string(), relative);
-
-            // Pick sensor based on phase.
-            let sensor = if is_scan { &self.scan_sensor } else { &self.read_sensor };
-            let glimpse = sensor.as_named_input().unwrap()
-                .forward_named(image, &refs)?;
-
-            self.controller.gru.forward_step(&glimpse, Some(h))?
-        };
-
-        // Content head (scan phase only).
-        if is_scan
-            && let (Some(head), Some(buf)) = (&self.content_head, &self.content_logits) {
-                let logit = head.forward(&new_h)?;
-                buf.borrow_mut().push(logit);
-        }
-
-        // Location update.
-        // Training: absolute positions (stable learning, origin only in location_fc).
-        // Inference: offset + origin (geometric translation for composition).
-        let is_training = *self.training.borrow();
-        let new_loc = if is_scan {
-            let raw = self.controller.loc_head.forward(&new_h)?.tanh()?;
-            let y = raw.select(1, 1)?.unsqueeze(1)?;
-            let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
-            let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?;
-            let pos = x.cat(&y, 1)?;
-            if is_training { pos } else {
-                let origin_ref = self.origin.borrow();
-                pos.add(origin_ref.as_ref().unwrap())?
-            }
-        } else {
-            let pos = self.controller.loc_head.forward(&new_h)?.tanh()?;
-            if is_training { pos } else {
-                let origin_ref = self.origin.borrow();
-                pos.add(origin_ref.as_ref().unwrap())?
-            }
-        };
-
-        *self.location.borrow_mut() = Some(new_loc);
-        *self.step_idx.borrow_mut() = idx + 1;
-
-        Ok(new_h)
     }
 }
 
@@ -497,11 +428,13 @@ impl Module for CombinedStep {
     fn name(&self) -> &str { "combined_step" }
 
     fn forward(&self, input: &Variable) -> Result<Variable> {
-        // Not called directly — NamedInputModule path provides origin via refs.
-        self.step(input, input, input)
+        // Loop-only body: forward outside a loop runner has no meaningful
+        // semantics (image / origin refs unavailable). Calls panic on the
+        // ref lookups inside `step`.
+        forward_via_step(self, input)
     }
 
-    fn as_named_input(&self) -> Option<&dyn NamedInputModule> {
+    fn as_loop_body(&self) -> Option<&dyn LoopBody> {
         Some(self)
     }
 
@@ -509,9 +442,6 @@ impl Module for CombinedStep {
         *self.location.borrow_mut() = None;
         *self.origin.borrow_mut() = None;
         *self.step_idx.borrow_mut() = 0;
-        if let Some(buf) = &self.content_logits {
-            buf.borrow_mut().clear();
-        }
     }
 
     fn detach_state(&self) {
@@ -539,20 +469,90 @@ impl Module for CombinedStep {
     fn sub_modules(&self) -> Vec<Rc<dyn Module>> {
         vec![self.scan_sensor.clone(), self.read_sensor.clone()]
     }
-
-    fn trace(&self) -> Option<Variable> {
-        self.location.borrow().clone()
-    }
 }
 
-impl NamedInputModule for CombinedStep {
-    fn forward_named(
+impl LoopBody for CombinedStep {
+    fn step(
         &self,
-        input: &Variable,
+        h: &Variable,
         refs: &HashMap<String, Variable>,
+        emit: &mut TraceEmit<'_>,
     ) -> Result<Variable> {
         let image = refs.get("image").expect("CombinedStep requires 'image' ref");
         let origin = refs.get("origin").expect("CombinedStep requires 'origin' ref");
-        self.step(input, image, origin)
+
+        let idx = *self.step_idx.borrow();
+        let is_scan = idx < self.n_scan;
+
+        // Store origin on first step (constant within a forward pass).
+        if self.origin.borrow().is_none() {
+            *self.origin.borrow_mut() = Some(origin.clone());
+        }
+
+        let new_h = {
+            // Lazy init: start at origin position.
+            if self.location.borrow().is_none() {
+                *self.location.borrow_mut() = Some(origin.clone());
+            }
+
+            let loc_guard = self.location.borrow();
+            let location = loc_guard.as_ref().unwrap();
+
+            // location_fc sees position relative to origin (always near zero).
+            // grid_sample sees absolute position (unchanged from old code).
+            let relative = location.sub(origin)?;
+
+            let mut sensor_refs = HashMap::new();
+            sensor_refs.insert("location".to_string(), location.clone());
+            sensor_refs.insert("relative_location".to_string(), relative);
+
+            // Pick sensor based on phase.
+            let sensor = if is_scan { &self.scan_sensor } else { &self.read_sensor };
+            let glimpse = sensor.as_named_input().unwrap()
+                .forward_named(image, &sensor_refs)?;
+
+            self.controller.gru.forward_step(&glimpse, Some(h))?
+        };
+
+        // Content head (scan phase only): publish per-step logit under "content".
+        // Sparse: read iters don't grow the "content" trace vector.
+        if is_scan && let Some(head) = &self.content_head {
+            let logit = head.forward(&new_h)?;
+            emit.publish("content", logit);
+        }
+
+        // Location update.
+        // Training: absolute positions (stable learning, origin only in location_fc).
+        // Inference: offset + origin (geometric translation for composition).
+        let is_training = *self.training.borrow();
+        let new_loc = if is_scan {
+            let raw = self.controller.loc_head.forward(&new_h)?.tanh()?;
+            let y = raw.select(1, 1)?.unsqueeze(1)?;
+            let scan_x = &self.scan_xs[idx.min(self.scan_xs.len() - 1)];
+            let x = scan_x.variable.tanh()?.expand(&[h.shape()[0], 1])?;
+            let pos = x.cat(&y, 1)?;
+            if is_training { pos } else {
+                let origin_ref = self.origin.borrow();
+                pos.add(origin_ref.as_ref().unwrap())?
+            }
+        } else {
+            let pos = self.controller.loc_head.forward(&new_h)?.tanh()?;
+            if is_training { pos } else {
+                let origin_ref = self.origin.borrow();
+                pos.add(origin_ref.as_ref().unwrap())?
+            }
+        };
+
+        // Publish under phase-specific name; sparse emits mean each name's
+        // vector reflects only its own phase's iterations.
+        emit.publish(
+            if is_scan { "scan_loc" } else { "read_loc" },
+            new_loc.clone(),
+        );
+
+        *self.location.borrow_mut() = Some(new_loc);
+        *self.step_idx.borrow_mut() = idx + 1;
+
+        Ok(new_h)
     }
 }

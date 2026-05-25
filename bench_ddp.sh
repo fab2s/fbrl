@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # DDP benchmark suite — runs all modes back to back.
-# Usage: ./bench_ddp.sh [EPOCHS]    (default: 5)
-#        ./bench_ddp.sh 50           (overnight run)
+# Usage: ./bench_ddp.sh [EPOCHS] [MODES...]
+#        ./bench_ddp.sh 50                          # all modes, 50 epochs
+#        ./bench_ddp.sh 50 all                      # same
+#        ./bench_ddp.sh 50 sync async-nccl-async    # specific modes
 set -euo pipefail
 
 EPOCHS="${1:-5}"
+shift || true
 BATCH=52
 BENCH_DIR="runs/ddp_bench"          # relative to Docker CWD (letter/)
 HOST_BENCH="letter/$BENCH_DIR"      # same dir, relative to repo root
 MONITOR=3000
 
-# All modes and their directory names.
-MODES=(
+# Mode → directory mapping (hyphens→underscores for dirs).
+declare -A MODE_DIR
+ALL_MODES=(
     "solo_5060ti"
     "solo_1060"
     "sync"
@@ -22,30 +26,30 @@ MODES=(
     "async-cpu-cadence"
     "async-cpu-async"
 )
-
-# Docker-relative dirs (passed to make)
-DIRS=(
-    "$BENCH_DIR/solo_5060ti"
-    "$BENCH_DIR/solo_1060"
-    "$BENCH_DIR/sync"
-    "$BENCH_DIR/async_nccl_sync"
-    "$BENCH_DIR/async_nccl_cadence"
-    "$BENCH_DIR/async_nccl_async"
-    "$BENCH_DIR/async_cpu_sync"
-    "$BENCH_DIR/async_cpu_cadence"
-    "$BENCH_DIR/async_cpu_async"
-)
-
-# Host-relative dirs (for mkdir, cp, reading results)
-HOST_DIRS=()
-for d in "${DIRS[@]}"; do
-    HOST_DIRS+=("letter/$d")
+for m in "${ALL_MODES[@]}"; do
+    MODE_DIR["$m"]="$BENCH_DIR/${m//-/_}"
 done
+
+# Select which modes to run.
+if [ $# -eq 0 ] || [ "$1" = "all" ]; then
+    MODES=("${ALL_MODES[@]}")
+else
+    MODES=("$@")
+    # Validate each requested mode.
+    for m in "${MODES[@]}"; do
+        if [ -z "${MODE_DIR[$m]+x}" ]; then
+            echo "ERROR: unknown mode '$m'" >&2
+            echo "Available: ${ALL_MODES[*]}" >&2
+            exit 1
+        fi
+    done
+fi
 
 TOTAL=${#MODES[@]}
 
 echo "=== DDP Benchmark Suite ==="
 echo "Epochs: $EPOCHS  Batch: $BATCH  Modes: $TOTAL"
+echo "Running: ${MODES[*]}"
 echo ""
 
 # Ensure template config exists at bench root
@@ -63,8 +67,8 @@ fi
 
 for i in "${!MODES[@]}"; do
     mode="${MODES[$i]}"
-    dir="${DIRS[$i]}"
-    host_dir="${HOST_DIRS[$i]}"
+    dir="${MODE_DIR[$mode]}"
+    host_dir="letter/$dir"
     mkdir -p "$host_dir"
     cp -n "$TEMPLATE" "$host_dir/gen_config.json" 2>/dev/null || true
 
@@ -91,9 +95,8 @@ done
 echo "=== Results ==="
 printf "%-25s %12s %12s %12s %12s\n" "Mode" "Avg epoch" "Total" "letter_acc" "case_acc"
 echo "------------------------------------------------------------------------------------"
-for i in "${!MODES[@]}"; do
-    host_dir="${HOST_DIRS[$i]}"
-    mode="${MODES[$i]}"
+for mode in "${MODES[@]}"; do
+    host_dir="letter/${MODE_DIR[$mode]}"
     if [ -f "$host_dir/benchmark.json" ] && [ -f "$host_dir/training.csv" ]; then
         stats=$(python3 -c "
 import json, csv

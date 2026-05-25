@@ -13,7 +13,7 @@ use flodl::nn::{
     cross_entropy_loss, mse_loss, bce_with_logits_loss, clip_grad_norm,
     Adam, CosineScheduler, Module,
 };
-use flodl::{Ddp, DdpConfig, ApplyPolicy, AverageBackend};
+use flodl::{Trainer, DdpConfig, ApplyPolicy, AverageBackend};
 use flodl::monitor::Monitor;
 use flodl::tensor::{
     cuda_available, cuda_device_count, Device, DType, Result, Tensor, TensorError, TensorOptions,
@@ -280,13 +280,8 @@ fn compute_loss(
     let recon = model.graph.tagged("recon").expect("recon");
     let latent = model.graph.tagged("latent").expect("latent");
 
-    let all_traces = model.graph.traces("attn").unwrap_or_default();
-    let (scan_locs, read_locs) = if cfg.n_scan > 0 && all_traces.len() > cfg.n_scan {
-        let (s, r) = all_traces.split_at(cfg.n_scan);
-        (s.to_vec(), r.to_vec())
-    } else {
-        (Vec::new(), all_traces)
-    };
+    let scan_locs = model.graph.traces("scan_loc").unwrap_or_default();
+    let read_locs = model.graph.traces("read_loc").unwrap_or_default();
 
     let img_var = Variable::new(to_dev(&batch["image"])?, false);
     let case_var = Variable::new(to_dev(&batch["case"])?, false);
@@ -314,13 +309,11 @@ fn compute_loss(
         mse_loss(&recode, &Variable::new(to_dev(&batch["partner_clean"])?, false))?
     } else { zero() };
 
-    // Content (from main graph's RefCell — not gathered across replicas).
-    // Skip when batch sizes don't match (El Che gathers traces but not RefCell state).
+    // Content: BCE between content_head logit and ink-presence at each scan_loc.
+    // Both vectors are emit-published per-iter and propagate across replicas.
     let content_loss = if cfg.content_weight > 0.0 && cfg.n_scan > 0 {
         let scan_logits = model.content_logits();
-        let logit_b = scan_logits.first().map(|l| l.shape()[0]).unwrap_or(0);
-        let trace_b = scan_locs.first().map(|l| l.shape()[0]).unwrap_or(0);
-        if !scan_logits.is_empty() && !scan_locs.is_empty() && logit_b == trace_b {
+        if !scan_logits.is_empty() && !scan_locs.is_empty() {
             let mut loss_sum = zero();
             for (loc, logit) in scan_locs.iter().zip(scan_logits.iter()) {
                 let grid = loc.unsqueeze(1)?.unsqueeze(2)?;
@@ -428,7 +421,7 @@ pub fn train_letter(
 
     let scheduler = CosineScheduler::new(cfg.lr, cfg.min_lr, cfg.epochs);
 
-    // Transparent DDP: Ddp::setup_with detects GPUs, creates replicas,
+    // Transparent DDP: Trainer::setup_with detects GPUs, creates replicas,
     // sets per-replica optimizers, enables El Che for heterogeneous hardware.
     // Training loop is identical for 1 or N GPUs.
     let n_classes = cfg.n_classes;
@@ -440,7 +433,7 @@ pub fn train_letter(
     let latent_dim = cfg.latent_dim;
     let lr = cfg.lr;
 
-    Ddp::setup_with(
+    Trainer::setup_with(
         &model.graph,
         |dev| {
             let replica = LetterModel::new(
@@ -453,7 +446,8 @@ pub fn train_letter(
         |p| Adam::new(p, lr),
         DdpConfig::new()
             .speed_hint(1, 2.3)
-            .overhead_target(0.10),
+            .overhead_target(0.10)
+            .max_grad_norm(cfg.max_grad_norm),
     )?;
 
     // El Che per-batch backward: loss closure runs inside forward_batch,
@@ -465,7 +459,6 @@ pub fn train_letter(
     let leash_w_cell = Rc::new(Cell::new(cfg.leash_weight));
 
     if is_el_che {
-        let n_scan = cfg.n_scan;
         let patch_size = cfg.patch_size;
         let scan_patch_w = cfg.scan_patch_w;
         let scan_gw = cfg.scan_guide_weight;
@@ -473,16 +466,23 @@ pub fn train_letter(
         let scan_vw = cfg.scan_void_weight;
         let void_w = cfg.void_weight;
         let div_w = cfg.diversity_weight;
+        let recode_w = cfg.recode_weight;
+        let content_w = cfg.content_weight;
         let blur_sr = cfg.blur_sigma_ratio;
         let div_sigma = cfg.diversity_sigma;
         let s_vy = cfg.scan_vy;
         let r_vy = cfg.read_vy;
         let l_radius = cfg.leash_radius;
+        let has_partners = ds.has_partners;
+        let decoder = model.decoder.clone();
         let rw = recon_w_cell.clone();
         let lw = leash_w_cell.clone();
 
         // Pure loss computation — no .item() calls, no GPU→CPU syncs.
         // Metrics are computed AFTER forward_batch from gathered detached data.
+        //
+        // content_loss now reads from emit-published `ctx.traces["content"]`,
+        // which propagates across replicas via the LoopBody gather pipeline.
         model.graph.set_loss_fn(move |ctx: &LossContext| {
             let dev = ctx.output.device();
             let zero = || Variable::new(
@@ -492,17 +492,16 @@ pub fn train_letter(
             let letter_logits = ctx.tags.get("heads_0").expect("heads_0");
             let case_logits = ctx.tags.get("heads_1").expect("heads_1");
             let recon = ctx.tags.get("recon").expect("recon");
+            let latent = ctx.tags.get("latent").expect("latent");
 
-            let all_traces = ctx.traces.get("attn").map(|v| v.as_slice()).unwrap_or(&[]);
-            let (scan_locs, read_locs) = if n_scan > 0 && all_traces.len() > n_scan {
-                all_traces.split_at(n_scan)
-            } else {
-                (&[][..], all_traces)
-            };
+            let scan_locs = ctx.traces.get("scan_loc").map(|v| v.as_slice()).unwrap_or(&[]);
+            let read_locs = ctx.traces.get("read_loc").map(|v| v.as_slice()).unwrap_or(&[]);
+            let content_logits = ctx.traces.get("content").map(|v| v.as_slice()).unwrap_or(&[]);
 
             let img = Variable::new(ctx.batch["image"].clone(), false);
             let clean = Variable::new(ctx.batch["clean"].clone(), false);
             let origin = Variable::new(ctx.batch["origin"].clone(), false);
+            let case = Variable::new(ctx.batch["case"].clone(), false);
             let letter_target = Variable::new(ctx.batch["letter_idx"].clone(), false);
             let case_idx = case_idx_from_float(&ctx.batch["case"])?;
             let case_target = Variable::new(case_idx, false);
@@ -510,6 +509,33 @@ pub fn train_letter(
             let letter_loss = cross_entropy_loss(letter_logits, &letter_target)?;
             let case_loss = cross_entropy_loss(case_logits, &case_target)?;
             let recon_loss = mse_loss(recon, &img)?;
+
+            // Recode: reconstruct partner letter (same letter, flipped case).
+            let recode_loss = if recode_w > 0.0 && has_partners {
+                let b = ctx.batch["case"].shape()[0];
+                let ones_t = Tensor::from_f32(&vec![1.0f32; b as usize], &[b, 1], dev)?;
+                let ones = Variable::new(ones_t, false);
+                let flipped_case = ones.sub(&case)?;
+                let z_recode = latent.cat(&flipped_case, 1)?;
+                let recode = decoder.forward(&z_recode)?;
+                mse_loss(&recode, &Variable::new(ctx.batch["partner_clean"].clone(), false))?
+            } else { zero() };
+
+            // Content: BCE between content_head logit and ink-presence at the
+            // matching scan_loc. Sparse emits ensure both vectors hold exactly
+            // n_scan entries (one per scan iter).
+            let content_loss = if content_w > 0.0 && !content_logits.is_empty() {
+                let mut loss_sum = zero();
+                for (loc, logit) in scan_locs.iter().zip(content_logits.iter()) {
+                    let grid = loc.unsqueeze(1)?.unsqueeze(2)?;
+                    let sampled = grid_sample(&clean, &grid, 0, 0, true)?;
+                    let label_t = sampled.data().reshape(&[-1, 1])?
+                        .gt_scalar(0.1)?.to_dtype(DType::Float32)?;
+                    let label = Variable::new(label_t, false);
+                    loss_sum = loss_sum.add(&bce_with_logits_loss(logit, &label)?)?;
+                }
+                loss_sum.mul_scalar(1.0 / content_logits.len() as f64)?
+            } else { zero() };
 
             let scan_guide = if scan_gw > 0.0 && !scan_locs.is_empty() {
                 attention_guide_loss(&clean, scan_locs, blur_sr)?
@@ -538,6 +564,8 @@ pub fn train_letter(
             let cur_recon = rw.get();
             letter_loss.add(&case_loss)?
                 .add(&recon_loss.mul_scalar(cur_recon)?)?
+                .add(&recode_loss.mul_scalar(recode_w)?)?
+                .add(&content_loss.mul_scalar(content_w)?)?
                 .add(&scan_guide.mul_scalar(scan_gw)?)?
                 .add(&read_guide.mul_scalar(read_gw)?)?
                 .add(&scan_void.mul_scalar(scan_vw)?)?
@@ -677,7 +705,10 @@ pub fn train_letter(
                 total.backward()?;
             }
 
-            clip_grad_norm(&model.parameters(), cfg.max_grad_norm)?;
+            if !is_el_che {
+                // Solo: clip here. El Che: clipping handled per-rank inside step().
+                clip_grad_norm(&model.parameters(), cfg.max_grad_norm)?;
+            }
             model.graph.step()?;
 
             model.graph.record_scalar("lr", current_lr);
@@ -873,7 +904,7 @@ pub fn train_letter(
 }
 
 // ---------------------------------------------------------------------------
-// Async DDP path: framework-managed training via Ddp::builder
+// Async DDP path: framework-managed training via Trainer::builder
 // ---------------------------------------------------------------------------
 
 /// Train with async DDP (thread-per-GPU, framework-managed epoch loop).
@@ -985,7 +1016,7 @@ fn train_letter_async(
         None
     };
 
-    let handle = Ddp::builder(
+    let handle = Trainer::builder(
         // model_factory: one LetterModel per GPU.
         move |dev| {
             let m = LetterModel::new(
@@ -1122,6 +1153,7 @@ fn train_letter_async(
     .policy(policy)
     .backend(backend)
     .overhead_target(0.10)
+    .max_grad_norm(cfg.max_grad_norm)
     .epoch_fn(move |epoch: usize, worker: &mut flodl::GpuWorker<LetterModel>| {
         // LR schedule.
         let sched = CosineScheduler::new(lr, min_lr, epochs);
